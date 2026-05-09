@@ -1,0 +1,66 @@
+# Rust
+/target
+target/
+**/*.rs.bk
+*.pdb
+Cargo.lock.bak
+
+# Cargo workspace member build artifacts
+**/target/
+
+# Criterion benchmark output
+criterion/
+
+# Flamegraph output
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Node / napi-rs
+node_modules/
+*.tsbuildinfo
+*.node
+crates/stryx_napi/index.js
+crates/stryx_napi/index.d.ts
+crates/stryx_napi/npm/**/*.node
+
+# sqlx offline cache (regenerate via `cargo sqlx prepare`)
+.sqlx/
+
+# Stryx local cache (LLM verdicts, etc.)
+.cache/stryx/
+~/.cache/stryx/
+
+# Editor / IDE
+.idea/
+.vscode/
+!.vscode/extensions.json
+!.vscode/settings.shared.json
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+logs/
+
+# Coverage
+*.profraw
+*.profdata
+coverage/
+lcov.info
+tarpaulin-report.html
+
+# OS junk
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db

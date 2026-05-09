@@ -1,0 +1,15 @@
+[package]
+name         = "stryx_cache"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Content-hash cache abstraction for Stryx (in-memory + disk backends)."
+
+[dependencies]
+stryx_core = { workspace = true }
+dashmap    = { workspace = true }
+blake3     = { workspace = true }
+serde      = { workspace = true }

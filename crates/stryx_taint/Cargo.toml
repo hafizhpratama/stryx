@@ -1,0 +1,14 @@
+[package]
+name         = "stryx_taint"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Inter-procedural taint engine for Stryx. Stub for v0.0.1."
+
+[dependencies]
+stryx_core  = { workspace = true }
+stryx_index = { workspace = true }
+serde       = { workspace = true }

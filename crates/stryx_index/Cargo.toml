@@ -1,0 +1,13 @@
+[package]
+name         = "stryx_index"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Project-level semantic index for Stryx (cross-file lookups). Stub for v0.0.1."
+
+[dependencies]
+stryx_core = { workspace = true }
+serde      = { workspace = true }

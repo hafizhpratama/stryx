@@ -1,0 +1,77 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stryx_core",
+    "crates/stryx_ast",
+    "crates/stryx_cache",
+    "crates/stryx_index",
+    "crates/stryx_taint",
+    "crates/stryx_rules",
+    "crates/stryx_llm",
+    "crates/stryx_reporter",
+    "crates/stryx_cli",
+]
+# stryx_napi excluded until the napi-rs build chain is set up.
+
+[workspace.package]
+version      = "0.1.0-alpha.1"
+edition      = "2024"
+rust-version = "1.93"
+license      = "Apache-2.0"
+repository   = "https://github.com/hafizhpratama/stryx"
+authors      = ["Hafizh Pratama and Stryx contributors"]
+
+[workspace.dependencies]
+# oxc family — pinned to a single minor for now; bump deliberately.
+oxc_allocator = "0.129"
+oxc_ast       = "0.129"
+oxc_ast_visit = "0.129"
+oxc_parser    = "0.129"
+oxc_semantic  = "0.129"
+oxc_span      = "0.129"
+
+# Concurrency
+rayon         = "1.10"
+dashmap       = "6"
+
+# CLI
+clap          = { version = "4", features = ["derive"] }
+ignore        = "0.4"
+
+# Serialization
+serde         = { version = "1", features = ["derive"] }
+serde_json    = "1"
+
+# Error handling
+thiserror     = "2"
+anyhow        = "1"
+
+# Logging
+tracing       = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto
+blake3        = "1"
+
+# Async (LLM client only)
+tokio         = { version = "1", features = ["rt-multi-thread", "macros"] }
+async-trait   = "0.1"
+
+# Patterns
+regex         = "1"
+
+# Workspace-internal deps
+stryx_core      = { path = "crates/stryx_core",      version = "0.1.0-alpha.1" }
+stryx_ast       = { path = "crates/stryx_ast",       version = "0.1.0-alpha.1" }
+stryx_cache     = { path = "crates/stryx_cache",     version = "0.1.0-alpha.1" }
+stryx_index     = { path = "crates/stryx_index",     version = "0.1.0-alpha.1" }
+stryx_taint     = { path = "crates/stryx_taint",     version = "0.1.0-alpha.1" }
+stryx_rules     = { path = "crates/stryx_rules",     version = "0.1.0-alpha.1" }
+stryx_llm       = { path = "crates/stryx_llm",       version = "0.1.0-alpha.1" }
+stryx_reporter  = { path = "crates/stryx_reporter",  version = "0.1.0-alpha.1" }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+opt-level = 3
+strip = "symbols"

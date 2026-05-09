@@ -1,0 +1,28 @@
+[package]
+name         = "stryx_cli"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Stryx command-line interface."
+
+[[bin]]
+name = "stryx"
+path = "src/main.rs"
+
+[dependencies]
+stryx_core     = { workspace = true }
+stryx_ast      = { workspace = true }
+stryx_rules    = { workspace = true }
+stryx_reporter = { workspace = true }
+
+clap               = { workspace = true }
+ignore             = { workspace = true }
+rayon              = { workspace = true }
+dashmap            = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow             = { workspace = true }
+serde_json         = { workspace = true }

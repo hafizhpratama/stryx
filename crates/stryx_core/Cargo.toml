@@ -1,0 +1,13 @@
+[package]
+name         = "stryx_core"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Core types for the Stryx static analyzer (Finding, Severity, Span, Rule context)."
+
+[dependencies]
+serde     = { workspace = true }
+thiserror = { workspace = true }

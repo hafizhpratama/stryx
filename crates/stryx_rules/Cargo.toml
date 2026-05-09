@@ -1,0 +1,16 @@
+[package]
+name         = "stryx_rules"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Built-in rules detecting AI-generated TypeScript failures."
+
+[dependencies]
+stryx_core  = { workspace = true }
+stryx_ast   = { workspace = true }
+stryx_index = { workspace = true }
+stryx_taint = { workspace = true }
+regex       = { workspace = true }
