@@ -20,10 +20,11 @@ use std::path::PathBuf;
 use stryx_ast::{
     ast::{
         ArrowFunctionExpression, BindingPattern, CallExpression, Declaration,
-        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, Function,
-        FunctionBody, ImportDeclaration, ImportDeclarationSpecifier,
-        ImportOrExportKind, MemberExpression, ObjectPropertyKind,
-        Program, PropertyKey, Statement, VariableDeclaration,
+        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, FormalParameter,
+        Function, FunctionBody, ImportDeclaration, ImportDeclarationSpecifier,
+        ImportOrExportKind, LogicalOperator, MemberExpression, ObjectPropertyKind,
+        Program, PropertyKey, Statement, TSType, TSTypeName, UnaryOperator,
+        VariableDeclaration,
     },
     to_span, ScopeFlags, Visit,
 };
@@ -193,6 +194,19 @@ impl<'idx> FlowVisitor<'idx> {
                 self.handle_statement(&is.consequent);
                 if let Some(alt) = &is.alternate {
                     self.handle_statement(alt);
+                }
+                // Allow-list narrowing: an early-return guard of the
+                // shape `if (...!ARR.includes(x)...) return ...` proves
+                // that `x` is one of ARR's elements past this point.
+                // Drop its taint for the remainder of the scope.
+                if branch_returns(&is.consequent) {
+                    let mut narrowed = Vec::new();
+                    collect_includes_narrowed(&is.test, &mut narrowed);
+                    for name in narrowed {
+                        if let Some(scope) = self.current_scope_mut() {
+                            scope.remove(&name);
+                        }
+                    }
                 }
             }
             Statement::TryStatement(ts) => {
@@ -643,27 +657,51 @@ fn is_request_like_expr(expr: &Expression<'_>) -> bool {
 }
 
 fn is_sanitizer_call(call: &CallExpression<'_>) -> bool {
-    // Recognised sanitizer methods: parse, safeParse, parseAsync, safeParseAsync.
-    // Any object can host them — covers Schema.parse, z.object({}).parse,
-    // CreateUserSchema.safeParse, etc.
     let Some(callee) = call.callee.as_member_expression() else {
         return false;
     };
-    let prop_name = match callee {
-        MemberExpression::StaticMemberExpression(m) => m.property.name.as_str(),
-        _ => return false,
+    let MemberExpression::StaticMemberExpression(method) = callee else {
+        return false;
     };
-    matches!(
-        prop_name,
+    let prop = method.property.name.as_str();
+
+    // Zod / valibot / yup parser style: any object exposing
+    // `.parse`, `.safeParse`, `.parseAsync`, `.safeParseAsync`. Covers
+    // `Schema.parse(body)`, `CreateUserSchema.safeParse(...)`, etc.
+    if matches!(
+        prop,
         "parse" | "safeParse" | "parseAsync" | "safeParseAsync"
-    )
+    ) {
+        return true;
+    }
+
+    // Stripe webhook signature verification:
+    //   `stripe.webhooks.constructEvent(body, signature, secret)`
+    // Throws on bad signature; on success returns a verified Stripe.Event
+    // whose shape is enforced by the Stripe SDK. Treat it as a sanitiser.
+    if prop == "constructEvent"
+        && let Expression::StaticMemberExpression(inner) = &method.object
+        && inner.property.name == "webhooks"
+    {
+        return true;
+    }
+
+    false
 }
 
 fn is_db_read_call(call: &CallExpression<'_>) -> bool {
+    let Some(callee) = call.callee.as_member_expression() else {
+        return false;
+    };
+    let MemberExpression::StaticMemberExpression(method) = callee else {
+        return false;
+    };
+    let prop = method.property.name.as_str();
+
     // Prisma read methods on a `prisma.<model>` chain. The result is
     // a typed DB row; we treat it as clean even when the where-clause
     // carries taint.
-    const READ_METHODS: &[&str] = &[
+    const PRISMA_READS: &[&str] = &[
         "findUnique",
         "findUniqueOrThrow",
         "findFirst",
@@ -674,22 +712,43 @@ fn is_db_read_call(call: &CallExpression<'_>) -> bool {
         "groupBy",
         "exists",
     ];
-    let Some(callee) = call.callee.as_member_expression() else {
-        return false;
-    };
-    let MemberExpression::StaticMemberExpression(method) = callee else {
-        return false;
-    };
-    if !READ_METHODS.contains(&method.property.name.as_str()) {
-        return false;
+    if PRISMA_READS.contains(&prop)
+        && let Expression::StaticMemberExpression(model_member) = &method.object
+        && let Expression::Identifier(root_id) = &model_member.object
+        && matches!(root_id.name.as_str(), "prisma" | "db" | "database")
+    {
+        return true;
     }
-    let Expression::StaticMemberExpression(model_member) = &method.object else {
-        return false;
-    };
-    let Expression::Identifier(root_id) = &model_member.object else {
-        return false;
-    };
-    matches!(root_id.name.as_str(), "prisma" | "db" | "database")
+
+    // Drizzle read chains: `db.select(...).from(t).where(c).orderBy(...)`
+    // and so on. Each call in the chain returns a query builder whose
+    // eventual rows are typed by the schema, not by the tainted where-
+    // clause. Treat the chain's intermediate calls as reads so taint
+    // doesn't leak into the result. Write terminators like `.values`
+    // and `.set` are handled separately by `is_drizzle_write_sink`.
+    const DRIZZLE_READS: &[&str] = &[
+        "select",
+        "from",
+        "where",
+        "orderBy",
+        "limit",
+        "offset",
+        "groupBy",
+        "having",
+        "innerJoin",
+        "leftJoin",
+        "rightJoin",
+        "fullJoin",
+        "all",
+        "get",
+        "execute",
+        "returning",
+    ];
+    if DRIZZLE_READS.contains(&prop) {
+        return true;
+    }
+
+    false
 }
 
 /// Top-level sink matcher: returns true if `call` is a DB write across
@@ -781,12 +840,82 @@ fn is_orm_write_sink(call: &CallExpression<'_>) -> bool {
     matches!(method.property.name.as_str(), "save" | "insert" | "upsert")
 }
 
+/// True if the body of an if-branch is guaranteed to leave the
+/// enclosing scope (return / throw). Used to recognise early-return
+/// guards.
+fn branch_returns(stmt: &Statement<'_>) -> bool {
+    match stmt {
+        Statement::ReturnStatement(_) | Statement::ThrowStatement(_) => true,
+        Statement::BlockStatement(b) => b.body.iter().any(branch_returns),
+        _ => false,
+    }
+}
+
+/// Collect identifiers narrowed by `!ARR.includes(IDENT)` clauses
+/// inside an OR-chain. Each such clause inside an early-return guard
+/// proves that `IDENT` is one of `ARR`'s literal elements past the
+/// guard, so we can clear its taint.
+fn collect_includes_narrowed(test: &Expression<'_>, out: &mut Vec<String>) {
+    match test {
+        Expression::LogicalExpression(b) if b.operator == LogicalOperator::Or => {
+            collect_includes_narrowed(&b.left, out);
+            collect_includes_narrowed(&b.right, out);
+        }
+        _ => {
+            if let Some(name) = match_includes_negation(test) {
+                out.push(name.to_string());
+            }
+        }
+    }
+}
+
+fn match_includes_negation<'a>(expr: &'a Expression<'_>) -> Option<&'a str> {
+    let Expression::UnaryExpression(unary) = expr else {
+        return None;
+    };
+    if unary.operator != UnaryOperator::LogicalNot {
+        return None;
+    }
+    let Expression::CallExpression(call) = &unary.argument else {
+        return None;
+    };
+    let callee = call.callee.as_member_expression()?;
+    let MemberExpression::StaticMemberExpression(method) = callee else {
+        return None;
+    };
+    if method.property.name != "includes" {
+        return None;
+    }
+    // Receiver should be a literal array (the allow-list itself).
+    if !matches!(&method.object, Expression::ArrayExpression(_)) {
+        return None;
+    }
+    if call.arguments.len() != 1 {
+        return None;
+    }
+    let arg_expr = call.arguments[0].as_expression()?;
+    let Expression::Identifier(id) = arg_expr else {
+        return None;
+    };
+    Some(id.name.as_str())
+}
+
 /// Names of parameters carrying a body-source decorator (`@Body()` or
 /// `@Body`). NestJS controllers declare their body argument this way.
+///
+/// Heuristic: when the parameter's TS type annotation looks like a
+/// validated DTO (suffix `Dto` / `DTO` / `Input` / `Schema` /
+/// `Request`), assume NestJS's `ValidationPipe` runs class-validator
+/// against the DTO before the body reaches user code, and don't pre-
+/// taint. The framework provides validation we can't see — the
+/// type-name convention is the cheapest signal we can read locally.
 fn body_decorated_param_names(params: &stryx_ast::ast::FormalParameters<'_>) -> Vec<String> {
     let mut out = Vec::new();
     for param in &params.items {
         if !param.decorators.iter().any(is_body_decorator) {
+            continue;
+        }
+        if looks_like_validated_dto(param) {
             continue;
         }
         if let Some(name) = single_binding_name(&param.pattern) {
@@ -794,6 +923,25 @@ fn body_decorated_param_names(params: &stryx_ast::ast::FormalParameters<'_>) -> 
         }
     }
     out
+}
+
+fn looks_like_validated_dto(param: &FormalParameter<'_>) -> bool {
+    let Some(annotation) = &param.type_annotation else {
+        return false;
+    };
+    let TSType::TSTypeReference(tref) = &annotation.type_annotation else {
+        return false;
+    };
+    let TSTypeName::IdentifierReference(id) = &tref.type_name else {
+        return false;
+    };
+    let name = id.name.as_str();
+    name.ends_with("Dto")
+        || name.ends_with("DTO")
+        || name.ends_with("Input")
+        || name.ends_with("InputDto")
+        || name.ends_with("Schema")
+        || name.ends_with("Request")
 }
 
 fn is_body_decorator(decorator: &stryx_ast::ast::Decorator<'_>) -> bool {
