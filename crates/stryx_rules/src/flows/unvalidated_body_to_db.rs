@@ -1,28 +1,37 @@
-//! `flow/unvalidated-body-to-db` — slice 1 (intra-procedural).
+//! `flow/unvalidated-body-to-db` — slice 1 + slice 2.
 //!
 //! Detects request-body data flowing into a DB write call (Prisma, generic
 //! `db.X.create/update/upsert`) without passing through a parser-style
 //! sanitizer (`Schema.parse(...)`, `Schema.safeParse(...)`).
 //!
-//! Slice 1 is single-file: we walk each function, track which local
-//! identifiers carry body taint, and check whether tainted refs reach a
-//! DB sink. Slice 2 will plumb `stryx_index` summaries so the same logic
-//! follows function calls across module boundaries.
+//! - **Slice 1** (intra-procedural): within a function body, any local
+//!   variable initialised from a request-body source is tracked, and a
+//!   finding fires if it reaches a DB sink without being sanitised first.
+//! - **Slice 2** (cross-file): during the engine's extract pass, every
+//!   exported function gets a per-parameter summary stating whether
+//!   that parameter — if tainted — would reach a DB sink. The run pass
+//!   consults `ProjectIndex::resolve_summary` at every call site to
+//!   detect cross-file flows: `route.ts` calls `createUser(body)` and
+//!   `lib.ts`'s `createUser` writes to the DB without validation.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
 
 use stryx_ast::{
     ast::{
-        ArrowFunctionExpression, BindingPattern, CallExpression, Expression,
-        Function, MemberExpression, ObjectPropertyKind, PropertyKey, Statement,
-        VariableDeclaration,
+        ArrowFunctionExpression, BindingPattern, CallExpression, Declaration,
+        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, Function,
+        FunctionBody, ImportDeclaration, ImportDeclarationSpecifier,
+        ImportOrExportKind, MemberExpression, ObjectPropertyKind,
+        Program, PropertyKey, Statement, VariableDeclaration,
     },
     to_span, ScopeFlags, Visit,
 };
-use stryx_core::{Finding, Severity};
+use stryx_core::{Finding, Severity, Span};
+use stryx_index::{FileSummary, ImportRef};
+use stryx_taint::{ExportedFunctionSummary, ParamFlow};
 
-use crate::{Rule, RuleContext, RuleMeta};
+use crate::{ExtractOutput, Rule, RuleContext, RuleMeta};
 
 const RULE_ID: &str = "flow/unvalidated-body-to-db";
 
@@ -49,27 +58,35 @@ impl Rule for UnvalidatedBodyToDb {
         }
     }
 
+    fn extract<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> ExtractOutput {
+        Some(extract_summary(ctx.file.path.clone(), &ctx.file.program))
+    }
+
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
-        let mut visitor = FlowVisitor::new(ctx.file.path.clone());
+        let mut visitor = FlowVisitor::new(ctx.file.path.clone(), ctx.index);
         visitor.visit_program(&ctx.file.program);
         visitor.findings
     }
 }
 
-struct FlowVisitor {
+struct FlowVisitor<'idx> {
     file: PathBuf,
     findings: Vec<Finding>,
     /// Stack of per-function scopes. Each frame holds the names of local
     /// identifiers currently carrying request-body taint.
     scopes: Vec<HashSet<String>>,
+    /// Read-only project index; `Some` during the run pass, `None`
+    /// during summary extraction.
+    index: Option<&'idx stryx_index::ProjectIndex>,
 }
 
-impl FlowVisitor {
-    fn new(file: PathBuf) -> Self {
+impl<'idx> FlowVisitor<'idx> {
+    fn new(file: PathBuf, index: Option<&'idx stryx_index::ProjectIndex>) -> Self {
         Self {
             file,
             findings: Vec::new(),
             scopes: Vec::new(),
+            index,
         }
     }
 
@@ -322,6 +339,11 @@ impl FlowVisitor {
     fn scan_for_sinks(&mut self, expr: &Expression<'_>) {
         match expr {
             Expression::CallExpression(call) => {
+                // Slice 2: cross-file sink — a call to an imported
+                // function whose summary marks the receiving param as
+                // sinking to the DB without sanitisation.
+                self.check_cross_file_call(call);
+
                 if is_db_write_sink(call) {
                     let any_tainted = call.arguments.iter().any(|arg| {
                         arg.as_expression()
@@ -435,7 +457,7 @@ impl FlowVisitor {
     }
 }
 
-impl<'a> Visit<'a> for FlowVisitor {
+impl<'a, 'idx> Visit<'a> for FlowVisitor<'idx> {
     fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
         self.enter_fn();
         if let Some(body) = &func.body {
@@ -451,6 +473,58 @@ impl<'a> Visit<'a> for FlowVisitor {
         // expression-bodied case wrapped as a single ExpressionStatement.
         self.handle_function_body(&arrow.body.statements);
         self.exit_fn();
+    }
+}
+
+impl FlowVisitor<'_> {
+    /// Slice 2: when a tainted argument is passed to a call site whose
+    /// callee resolves through the project index to a function that
+    /// taints that parameter to a sink, emit a cross-file finding.
+    fn check_cross_file_call(&mut self, call: &CallExpression<'_>) {
+        let Some(index) = self.index else { return };
+        let Expression::Identifier(callee_id) = &call.callee else {
+            return;
+        };
+        let Some(summary) = index.resolve_summary(&self.file, callee_id.name.as_str()) else {
+            return;
+        };
+        for (i, arg) in call.arguments.iter().enumerate() {
+            let Some(arg_expr) = arg.as_expression() else {
+                continue;
+            };
+            if !self.expr_is_tainted_readonly(arg_expr) {
+                continue;
+            }
+            if !summary.taints_through_param(i) {
+                continue;
+            }
+            let sink_hint = summary
+                .params
+                .get(i)
+                .and_then(|p| p.sink_span.as_ref())
+                .map(|s| {
+                    format!(
+                        " The sink lives in {}.",
+                        s.file.display(),
+                    )
+                })
+                .unwrap_or_default();
+            self.findings.push(
+                Finding::ast(
+                    RULE_ID,
+                    Severity::High,
+                    format!(
+                        "Untrusted request body flows into `{}` (param `{}`), which writes to the database without validating it.{sink_hint}",
+                        callee_id.name,
+                        summary.params.get(i).map(|p| p.name.as_str()).unwrap_or("?"),
+                    ),
+                    to_span(&self.file, call.span),
+                )
+                .with_help(
+                    "Validate the body with zod/valibot/yup at this call site, or inside the called function before the DB write.",
+                ),
+            );
+        }
     }
 }
 
@@ -619,6 +693,212 @@ fn collect_binding_names(pat: &BindingPattern<'_>) -> Vec<String> {
     let mut out = Vec::new();
     walk_binding_pattern(pat, &mut out);
     out
+}
+
+// ── Slice 2: per-file summary extraction ────────────────────────────────
+
+fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
+    let mut summary = FileSummary {
+        path: file.clone(),
+        ..Default::default()
+    };
+
+    for stmt in &program.body {
+        match stmt {
+            Statement::ImportDeclaration(decl) => {
+                collect_imports(decl, &mut summary);
+            }
+            Statement::ExportNamedDeclaration(decl) => {
+                collect_named_exports(&file, decl, &mut summary);
+            }
+            Statement::ExportDefaultDeclaration(decl) => {
+                collect_default_export(&file, &decl.declaration, &mut summary);
+            }
+            _ => {}
+        }
+    }
+
+    summary
+}
+
+fn collect_imports(decl: &ImportDeclaration<'_>, summary: &mut FileSummary) {
+    // Skip `import type { ... }` — pure types can't carry runtime taint.
+    if matches!(decl.import_kind, ImportOrExportKind::Type) {
+        return;
+    }
+    let Some(specifiers) = decl.specifiers.as_ref() else {
+        return;
+    };
+    let module = decl.source.value.to_string();
+    for spec in specifiers {
+        match spec {
+            ImportDeclarationSpecifier::ImportSpecifier(s) => {
+                summary.imports.insert(
+                    s.local.name.to_string(),
+                    ImportRef {
+                        module_specifier: module.clone(),
+                        imported_name: s.imported.name().to_string(),
+                    },
+                );
+            }
+            ImportDeclarationSpecifier::ImportDefaultSpecifier(s) => {
+                summary.imports.insert(
+                    s.local.name.to_string(),
+                    ImportRef {
+                        module_specifier: module.clone(),
+                        imported_name: "default".to_string(),
+                    },
+                );
+            }
+            ImportDeclarationSpecifier::ImportNamespaceSpecifier(_) => {
+                // `import * as ns from "..."` — slice 2 doesn't track
+                // namespace member access.
+            }
+        }
+    }
+}
+
+fn collect_named_exports(
+    file: &std::path::Path,
+    decl: &ExportNamedDeclaration<'_>,
+    summary: &mut FileSummary,
+) {
+    let Some(declaration) = &decl.declaration else {
+        return;
+    };
+    match declaration {
+        Declaration::FunctionDeclaration(func) => {
+            if let Some(name) = func.id.as_ref().map(|id| id.name.to_string())
+                && let Some(s) =
+                    summarise_function(file, &name, &func.params, func.body.as_deref())
+            {
+                summary.exports.insert(name, s);
+            }
+        }
+        Declaration::VariableDeclaration(var) => {
+            for declarator in &var.declarations {
+                let Some(name) = single_binding_name(&declarator.id) else {
+                    continue;
+                };
+                let Some(init) = &declarator.init else { continue };
+                if let Some(s) = summarise_initialiser(file, &name, init) {
+                    summary.exports.insert(name, s);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_default_export(
+    file: &std::path::Path,
+    decl: &ExportDefaultDeclarationKind<'_>,
+    summary: &mut FileSummary,
+) {
+    let s = match decl {
+        ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+            summarise_function(file, "default", &func.params, func.body.as_deref())
+        }
+        ExportDefaultDeclarationKind::ArrowFunctionExpression(arrow) => Some(summarise_arrow(
+            file,
+            "default",
+            &arrow.params,
+            &arrow.body,
+        )),
+        _ => None,
+    };
+    if let Some(s) = s {
+        summary.exports.insert("default".to_string(), s);
+    }
+}
+
+fn summarise_initialiser(
+    file: &std::path::Path,
+    name: &str,
+    init: &Expression<'_>,
+) -> Option<ExportedFunctionSummary> {
+    match init {
+        Expression::FunctionExpression(func) => {
+            summarise_function(file, name, &func.params, func.body.as_deref())
+        }
+        Expression::ArrowFunctionExpression(arrow) => Some(summarise_arrow(
+            file,
+            name,
+            &arrow.params,
+            &arrow.body,
+        )),
+        _ => None,
+    }
+}
+
+fn summarise_function(
+    file: &std::path::Path,
+    name: &str,
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    body: Option<&FunctionBody<'_>>,
+) -> Option<ExportedFunctionSummary> {
+    let body_stmts = body.map(|b| b.statements.as_slice()).unwrap_or(&[]);
+    Some(build_summary(file, name, params, body_stmts))
+}
+
+fn summarise_arrow(
+    file: &std::path::Path,
+    name: &str,
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    body: &FunctionBody<'_>,
+) -> ExportedFunctionSummary {
+    build_summary(file, name, params, &body.statements)
+}
+
+fn build_summary(
+    file: &std::path::Path,
+    name: &str,
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    body: &[Statement<'_>],
+) -> ExportedFunctionSummary {
+    let param_names: Vec<String> = params
+        .items
+        .iter()
+        .map(|p| {
+            single_binding_name(&p.pattern).unwrap_or_else(|| format!("_arg{}", p.span.start))
+        })
+        .collect();
+
+    let mut params_out = Vec::with_capacity(param_names.len());
+    for pname in &param_names {
+        // Run the same flow visitor over the function body with this
+        // parameter pre-tainted. If any sink fires, the param sinks to
+        // the DB without sanitisation along the path.
+        let mut visitor = FlowVisitor::new(file.to_path_buf(), None);
+        visitor.enter_fn();
+        visitor.taint(pname.clone());
+        for stmt in body {
+            visitor.handle_statement(stmt);
+        }
+        visitor.exit_fn();
+
+        let reaches = !visitor.findings.is_empty();
+        let sink_span = visitor.findings.first().map(|f| f.span.clone());
+        params_out.push(ParamFlow {
+            name: pname.clone(),
+            reaches_db_sink_unsanitized: reaches,
+            sink_span,
+        });
+    }
+
+    ExportedFunctionSummary {
+        name: name.to_string(),
+        params: params_out,
+        span: Span::new(file.to_path_buf(), params.span.start, params.span.end),
+    }
+}
+
+fn single_binding_name(pat: &BindingPattern<'_>) -> Option<String> {
+    if let BindingPattern::BindingIdentifier(id) = pat {
+        Some(id.name.to_string())
+    } else {
+        None
+    }
 }
 
 fn walk_binding_pattern(pat: &BindingPattern<'_>, out: &mut Vec<String>) {

@@ -1226,6 +1226,7 @@ dependencies = [
  "serde_json",
  "stryx_ast",
  "stryx_core",
+ "stryx_index",
  "stryx_reporter",
  "stryx_rules",
  "tracing",
@@ -1246,6 +1247,7 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "stryx_core",
+ "stryx_taint",
 ]
 
 [[package]]
@@ -1285,7 +1287,6 @@ version = "0.1.0-alpha.1"
 dependencies = [
  "serde",
  "stryx_core",
- "stryx_index",
 ]
 
 [[package]]

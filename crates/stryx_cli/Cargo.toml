@@ -15,6 +15,7 @@ path = "src/main.rs"
 [dependencies]
 stryx_core     = { workspace = true }
 stryx_ast      = { workspace = true }
+stryx_index    = { workspace = true }
 stryx_rules    = { workspace = true }
 stryx_reporter = { workspace = true }
 

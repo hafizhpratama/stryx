@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use stryx_ast::{parse, Allocator};
 use stryx_core::{Finding, Severity};
+use stryx_index::ProjectIndex;
 use stryx_reporter::{write_report, ReportFormat};
 use stryx_rules::{builtin_rules, RuleContext, RuleRegistry};
 
@@ -115,9 +116,24 @@ fn cmd_scan(path: &Path, format_str: &str, fail_on: &str) -> Result<ExitCode> {
     // without re-reading from disk.
     let sources: Arc<DashMap<PathBuf, String>> = Arc::new(DashMap::new());
 
+    // Pass 1 — extract: each rule contributes optional FileSummary entries
+    // that we merge into a project index. Rules that don't need cross-file
+    // data simply contribute nothing.
+    let summaries: Vec<stryx_index::FileSummary> = files
+        .par_iter()
+        .flat_map_iter(|file| extract_file(file, &registry, &sources))
+        .collect();
+    let mut project_index = ProjectIndex::new();
+    for summary in summaries {
+        project_index.insert_file(summary);
+    }
+    project_index.finalize();
+    let project_index = Arc::new(project_index);
+
+    // Pass 2 — run: each rule sees the merged index and produces findings.
     let findings: Vec<Finding> = files
         .par_iter()
-        .flat_map_iter(|file| scan_file(file, &registry, &sources))
+        .flat_map_iter(|file| run_file(file, &registry, &sources, &project_index))
         .collect();
 
     let stdout = std::io::stdout();
@@ -163,11 +179,13 @@ fn has_ts_extension(p: &Path) -> bool {
     )
 }
 
-fn scan_file(
+/// Pass 1: parse the file and let each rule contribute a per-file summary.
+/// Sources are cached here so pass 2 doesn't have to read from disk.
+fn extract_file(
     file: &Path,
     registry: &Arc<RuleRegistry>,
     sources: &Arc<DashMap<PathBuf, String>>,
-) -> Vec<Finding> {
+) -> Vec<stryx_index::FileSummary> {
     let source = match std::fs::read_to_string(file) {
         Ok(s) => s,
         Err(err) => {
@@ -186,7 +204,42 @@ fn scan_file(
         }
     };
 
-    let ctx = RuleContext { file: &parsed };
+    let ctx = RuleContext {
+        file: &parsed,
+        index: None,
+    };
+    let mut out = Vec::new();
+    for rule in registry.rules() {
+        if let Some(summary) = rule.extract(&ctx) {
+            out.push(summary);
+        }
+    }
+    out
+}
+
+/// Pass 2: re-parse the file and run rules with access to the merged
+/// project index. Source comes from the cache populated in pass 1.
+fn run_file(
+    file: &Path,
+    registry: &Arc<RuleRegistry>,
+    sources: &Arc<DashMap<PathBuf, String>>,
+    index: &Arc<ProjectIndex>,
+) -> Vec<Finding> {
+    let source = match sources.get(file) {
+        Some(s) => s.clone(),
+        None => return Vec::new(), // pass 1 declined this file (read or parse error)
+    };
+
+    let allocator = Allocator::default();
+    let parsed = match parse(&allocator, file, &source) {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+
+    let ctx = RuleContext {
+        file: &parsed,
+        index: Some(index),
+    };
     let mut findings = Vec::new();
     for rule in registry.rules() {
         findings.extend(rule.run(&ctx));

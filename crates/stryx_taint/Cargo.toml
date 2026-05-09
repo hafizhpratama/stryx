@@ -9,6 +9,5 @@ authors      = { workspace = true }
 description  = "Inter-procedural taint engine for Stryx. Stub for v0.0.1."
 
 [dependencies]
-stryx_core  = { workspace = true }
-stryx_index = { workspace = true }
-serde       = { workspace = true }
+stryx_core = { workspace = true }
+serde      = { workspace = true }

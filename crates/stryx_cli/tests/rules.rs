@@ -7,6 +7,7 @@
 use std::path::{Path, PathBuf};
 use stryx_ast::{parse, Allocator};
 use stryx_core::{Finding, Severity};
+use stryx_index::ProjectIndex;
 use stryx_rules::{builtin_rules, RuleContext};
 
 fn fixtures_root() -> PathBuf {
@@ -23,12 +24,65 @@ fn scan_file(path: &Path) -> Vec<Finding> {
     let allocator = Allocator::default();
     let parsed = parse(&allocator, path, &source).expect("parse fixture");
     let registry = builtin_rules();
-    let ctx = RuleContext { file: &parsed };
+    let ctx = RuleContext { file: &parsed, index: None };
     registry
         .rules()
         .iter()
         .flat_map(|r| r.run(&ctx))
         .collect()
+}
+
+/// Run the engine's two-pass pipeline over a fixture directory and collect
+/// all findings. Mirrors what `stryx scan <dir>` does in the CLI.
+fn scan_dir(dir: &Path) -> Vec<Finding> {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read fixture dir") {
+        let entry = entry.expect("dir entry");
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) == Some("ts")
+            || p.extension().and_then(|e| e.to_str()) == Some("tsx")
+        {
+            files.push(p);
+        }
+    }
+
+    let registry = builtin_rules();
+
+    // Pass 1 — extract.
+    let mut sources: std::collections::HashMap<PathBuf, String> = Default::default();
+    let mut index = ProjectIndex::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path).expect("read");
+        sources.insert(path.clone(), source);
+    }
+    for path in &files {
+        let allocator = Allocator::default();
+        let source = sources.get(path).unwrap();
+        let parsed = parse(&allocator, path, source).expect("parse");
+        let ctx = RuleContext { file: &parsed, index: None };
+        for rule in registry.rules() {
+            if let Some(summary) = rule.extract(&ctx) {
+                index.insert_file(summary);
+            }
+        }
+    }
+    index.finalize();
+
+    // Pass 2 — run.
+    let mut findings = Vec::new();
+    for path in &files {
+        let allocator = Allocator::default();
+        let source = sources.get(path).unwrap();
+        let parsed = parse(&allocator, path, source).expect("parse");
+        let ctx = RuleContext {
+            file: &parsed,
+            index: Some(&index),
+        };
+        for rule in registry.rules() {
+            findings.extend(rule.run(&ctx));
+        }
+    }
+    findings
 }
 
 #[test]
@@ -81,6 +135,42 @@ fn unvalidated_body_to_db_bad_fixture_fires() {
         assert_eq!(f.severity, Severity::High);
         assert_eq!(f.span.file, path);
     }
+}
+
+#[test]
+fn unvalidated_body_to_db_cross_file_bad_fires() {
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert!(
+        !findings.is_empty(),
+        "expected at least one cross-file finding in bad/, got none"
+    );
+    let route_path = dir.join("route.ts");
+    let cross_file_finding = findings
+        .iter()
+        .find(|f| f.span.file == route_path && f.message.contains("createUser"));
+    assert!(
+        cross_file_finding.is_some(),
+        "expected a cross-file finding on route.ts referencing createUser; got: {:?}",
+        findings.iter().map(|f| (&f.span.file, &f.message)).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unvalidated_body_to_db_cross_file_good_silent() {
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/good");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "expected zero flow findings on good/, got: {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
 }
 
 #[test]

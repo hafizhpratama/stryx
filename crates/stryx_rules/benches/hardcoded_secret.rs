@@ -21,7 +21,7 @@ fn run_rules(source: &str, path: &std::path::Path) -> usize {
     let allocator = Allocator::default();
     let parsed = parse(&allocator, path, source).expect("parse");
     let registry = builtin_rules();
-    let ctx = RuleContext { file: &parsed };
+    let ctx = RuleContext { file: &parsed, index: None };
     registry.rules().iter().map(|r| r.run(&ctx).len()).sum()
 }
 

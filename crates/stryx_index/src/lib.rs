@@ -1,15 +1,18 @@
-//! Project-level semantic index. Stub for v0.0.1: types are defined so the
-//! Rule trait can reference them, but the extract/merge phases described in
-//! `docs/architecture/semantic-index.md` are not yet implemented.
+//! Project-level semantic index. Slice 2 populates per-file summaries
+//! so cross-file rules can resolve call sites to function bodies in
+//! other files. See `docs/architecture/semantic-index.md`.
 
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use stryx_taint::ExportedFunctionSummary;
 
 /// Hint about the framework a file participates in. Rules use this to
 /// decide whether to engage at all (e.g. Next.js rules skip non-Next files).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum FrameworkHint {
+    #[default]
     Generic,
     NextJs,
     Hono,
@@ -17,22 +20,162 @@ pub enum FrameworkHint {
     NestJs,
 }
 
-/// Per-file index entry. The full schema is described in
-/// `docs/architecture/semantic-index.md`.
+/// A binding pulled in from another module via `import { foo } from "./bar"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FileEntry {
-    pub path: PathBuf,
-    pub framework: FrameworkHint,
+pub struct ImportRef {
+    /// Module specifier exactly as written, e.g. `"./lib"`, `"@/lib/db"`,
+    /// `"hono"`. Resolution into an absolute file path is the index's job.
+    pub module_specifier: String,
+    /// Name as exported by the source module. `"default"` for default
+    /// imports.
+    pub imported_name: String,
 }
 
-/// Project-wide index. Empty for v0.0.1; populated once cross-file rules ship.
+/// Per-file extract output. Each rule that needs cross-file context
+/// contributes data into FileSummary during pass 1.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FileSummary {
+    pub path: PathBuf,
+    #[serde(default)]
+    pub framework: FrameworkHint,
+    /// Exported functions keyed by their *exported* name (`"default"` for
+    /// the default export).
+    #[serde(default)]
+    pub exports: HashMap<String, ExportedFunctionSummary>,
+    /// Local-name → ImportRef, e.g. `"createUser"` → `("./lib", "createUser")`.
+    #[serde(default)]
+    pub imports: HashMap<String, ImportRef>,
+}
+
+/// Project-wide index produced at the end of pass 1. Pass 2 hands a
+/// shared reference to each rule via the `RuleContext`.
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ProjectIndex {
-    pub files: Vec<FileEntry>,
+    files: HashMap<PathBuf, FileSummary>,
+    /// (caller_file, local_name) → (target_file, exported_name). Built by
+    /// `finalize` once all per-file summaries are collected.
+    #[serde(default)]
+    resolved: HashMap<(PathBuf, String), (PathBuf, String)>,
 }
 
 impl ProjectIndex {
     pub fn new() -> Self {
         Self::default()
     }
+
+    pub fn insert_file(&mut self, summary: FileSummary) {
+        self.files.insert(summary.path.clone(), summary);
+    }
+
+    pub fn file(&self, path: &Path) -> Option<&FileSummary> {
+        self.files.get(path)
+    }
+
+    pub fn files(&self) -> impl Iterator<Item = &FileSummary> {
+        self.files.values()
+    }
+
+    /// Resolve a name imported in `caller` into the file + exported name
+    /// it ultimately refers to. Returns `None` for unresolved imports
+    /// (external packages, unresolvable aliases).
+    pub fn resolve(&self, caller: &Path, local_name: &str) -> Option<&FileSummary> {
+        let key = (caller.to_path_buf(), local_name.to_string());
+        let (target_path, exported_name) = self.resolved.get(&key)?;
+        let file = self.files.get(target_path)?;
+        // Validate that the resolved export still exists; stale resolves
+        // can't produce stale findings.
+        if file.exports.contains_key(exported_name) {
+            Some(file)
+        } else {
+            None
+        }
+    }
+
+    /// Resolve a name imported in `caller` directly to the function summary
+    /// it points at, in one step.
+    pub fn resolve_summary(
+        &self,
+        caller: &Path,
+        local_name: &str,
+    ) -> Option<&ExportedFunctionSummary> {
+        let key = (caller.to_path_buf(), local_name.to_string());
+        let (target_path, exported_name) = self.resolved.get(&key)?;
+        self.files.get(target_path)?.exports.get(exported_name)
+    }
+
+    /// After all per-file summaries have been inserted, walk every file's
+    /// imports and try to resolve each against the indexed files. Only
+    /// relative-path specifiers are resolved here; bare specifiers
+    /// (npm packages, unmapped aliases) are left unresolved.
+    pub fn finalize(&mut self) {
+        let mut resolved = HashMap::new();
+        for (caller_path, summary) in &self.files {
+            for (local_name, import) in &summary.imports {
+                if !is_relative_specifier(&import.module_specifier) {
+                    continue;
+                }
+                let Some(target_path) = resolve_relative_path(
+                    caller_path,
+                    &import.module_specifier,
+                    &self.files,
+                ) else {
+                    continue;
+                };
+                resolved.insert(
+                    (caller_path.clone(), local_name.clone()),
+                    (target_path, import.imported_name.clone()),
+                );
+            }
+        }
+        self.resolved = resolved;
+    }
+}
+
+fn is_relative_specifier(spec: &str) -> bool {
+    spec.starts_with("./") || spec.starts_with("../")
+}
+
+fn resolve_relative_path(
+    caller: &Path,
+    specifier: &str,
+    files: &HashMap<PathBuf, FileSummary>,
+) -> Option<PathBuf> {
+    let base = caller.parent()?;
+    let mut joined = base.join(specifier);
+    // Normalise `./` and `../` segments without touching the filesystem.
+    joined = normalise(&joined);
+
+    // 1. Exact match (specifier already includes an extension).
+    if files.contains_key(&joined) {
+        return Some(joined);
+    }
+    // 2. With each candidate extension.
+    for ext in [".ts", ".tsx", ".js", ".jsx", ".mts", ".cts", ".mjs", ".cjs"] {
+        let with_ext = joined.with_extension(&ext[1..]);
+        if files.contains_key(&with_ext) {
+            return Some(with_ext);
+        }
+    }
+    // 3. As a directory: `<spec>/index.<ext>`.
+    for ext in ["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"] {
+        let with_index = joined.join(format!("index.{ext}"));
+        if files.contains_key(&with_index) {
+            return Some(with_index);
+        }
+    }
+    None
+}
+
+fn normalise(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    out
 }

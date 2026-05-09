@@ -1,6 +1,7 @@
-//! Cross-file taint engine. Stub for v0.0.1: defines the vocabulary
-//! (labels, source/sink/sanitizer roles) so rules can declare a
-//! `taint_signature` per ADR-0003. The engine itself ships in v0.1.
+//! Cross-file taint vocabulary. Slice 2 introduces concrete summary
+//! types: a per-function record of *what each parameter does to the
+//! taint that flows in*. The flow rule consumes these summaries during
+//! the second engine pass to follow call sites across files.
 
 use serde::{Deserialize, Serialize};
 use stryx_core::Span;
@@ -22,32 +23,38 @@ pub enum TaintLabel {
     DbRow,
 }
 
-/// Where a tainted value originates. Producers populate this when seeding
-/// taint at parameters, request handlers, or external calls.
-pub trait Source {
-    fn label(&self) -> TaintLabel;
-    fn span(&self) -> &Span;
+/// What happens to taint that enters a function through a single
+/// parameter. Per-rule for now — the flow rule populates this for the
+/// `UserInput` label.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ParamFlow {
+    /// Position-indexed name of the parameter (informational).
+    pub name: String,
+    /// True iff there is a control-flow path from this parameter to a
+    /// DB write call where no sanitizer (`.parse`/`.safeParse`) cleared
+    /// the taint along the way.
+    pub reaches_db_sink_unsanitized: bool,
+    /// Where the sink lives, if known. Used so call-site findings can
+    /// point readers to the actual write inside the callee.
+    pub sink_span: Option<Span>,
 }
 
-/// A sink is a position where a taint label is dangerous to reach.
-pub trait Sink {
-    fn forbids(&self) -> &[TaintLabel];
-    fn span(&self) -> &Span;
-}
-
-/// A sanitizer removes one or more taint labels from values flowing through
-/// it (e.g. a Zod parser strips `UserInput`).
-pub trait Sanitizer {
-    fn clears(&self) -> &[TaintLabel];
-    fn span(&self) -> &Span;
-}
-
-/// A concrete flow from a source to a sink, optionally passing through
-/// sanitizers. The engine produces these; rules consume them.
+/// Summary of a single exported function. The flow rule produces one of
+/// these per top-level/exported function during the extract pass.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TaintFlow {
-    pub label: TaintLabel,
-    pub source: Span,
-    pub sink: Span,
-    pub sanitized: bool,
+pub struct ExportedFunctionSummary {
+    pub name: String,
+    pub params: Vec<ParamFlow>,
+    /// Span of the function definition itself, for diagnostics.
+    pub span: Span,
+}
+
+impl ExportedFunctionSummary {
+    /// True if calling this function with a tainted value at parameter
+    /// position `idx` would result in that taint reaching a DB sink.
+    pub fn taints_through_param(&self, idx: usize) -> bool {
+        self.params
+            .get(idx)
+            .is_some_and(|p| p.reaches_db_sink_unsanitized)
+    }
 }
