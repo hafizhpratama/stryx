@@ -31,6 +31,24 @@ pub struct ImportRef {
     pub imported_name: String,
 }
 
+/// What we know about a class declared at top level. Used so the flow
+/// rule can resolve `this.<member>.<method>(arg)` calls inside class
+/// methods to the receiving class's method summary, even when the class
+/// is defined in another file.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ClassInfo {
+    /// Method name → its summary. Constructors and accessors are not
+    /// stored here.
+    #[serde(default)]
+    pub methods: HashMap<String, ExportedFunctionSummary>,
+    /// Field/property name → declared TS type name. Populated from
+    /// constructor parameter properties (`private readonly userService:
+    /// UsersService`) and class field declarations with type annotations
+    /// (`private userService: UsersService`).
+    #[serde(default)]
+    pub field_types: HashMap<String, String>,
+}
+
 /// Per-file extract output. Each rule that needs cross-file context
 /// contributes data into FileSummary during pass 1.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -50,6 +68,11 @@ pub struct FileSummary {
     /// Local-name → ImportRef, e.g. `"createUser"` → `("./lib", "createUser")`.
     #[serde(default)]
     pub imports: HashMap<String, ImportRef>,
+    /// Top-level classes keyed by name. Used to resolve
+    /// `this.<member>.<method>(...)` calls in NestJS-shaped controllers
+    /// where the controller's method delegates to an injected service.
+    #[serde(default)]
+    pub classes: HashMap<String, ClassInfo>,
 }
 
 /// Project-wide index produced at the end of pass 1. Pass 2 hands a
@@ -106,6 +129,20 @@ impl ProjectIndex {
         let key = (caller.to_path_buf(), local_name.to_string());
         let (target_path, exported_name) = self.resolved.get(&key)?;
         self.files.get(target_path)?.exports.get(exported_name)
+    }
+
+    /// Resolve a name imported in `caller` to a class declared in the
+    /// target file. Returns the file plus the exported name to look up
+    /// inside `file.classes`.
+    pub fn resolve_class(&self, caller: &Path, local_name: &str) -> Option<(&FileSummary, &str)> {
+        let key = (caller.to_path_buf(), local_name.to_string());
+        let (target_path, exported_name) = self.resolved.get(&key)?;
+        let file = self.files.get(target_path)?;
+        if file.classes.contains_key(exported_name) {
+            Some((file, exported_name.as_str()))
+        } else {
+            None
+        }
     }
 
     /// After all per-file summaries have been inserted, walk every file's

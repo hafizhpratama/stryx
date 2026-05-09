@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 pub use oxc_allocator::Allocator;
 pub use oxc_ast::ast;
-pub use oxc_ast_visit::Visit;
+pub use oxc_ast_visit::{walk, Visit};
 pub use oxc_parser::Parser;
 pub use oxc_semantic::{Semantic, SemanticBuilder};
 pub use oxc_span::{SourceType, Span as OxcSpan};

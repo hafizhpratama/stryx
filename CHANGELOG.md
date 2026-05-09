@@ -23,6 +23,13 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - Core architecture documentation, including ADRs 0001–0004
 - AI agent context files (CLAUDE.md, AGENTS.md, .github/copilot-instructions.md)
 - Contributor guidelines
+- `flow/unvalidated-body-to-db` now follows class-method calls. Class
+  declarations contribute method summaries and field-type maps to the
+  project index, and `this.<member>.<method>(arg)` resolves through
+  constructor parameter properties (`private readonly userService:
+  UsersService`) and class field declarations to the receiving class's
+  method summary. NestJS-shaped controllers that delegate to injected
+  services are now reachable by cross-file taint.
 
 ### Coming soon (v0.1, planned)
 - Foundational crates `stryx_index` (project semantic index) and

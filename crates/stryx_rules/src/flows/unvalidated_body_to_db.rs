@@ -20,16 +20,16 @@ use std::path::PathBuf;
 use stryx_ast::{
     ast::{
         Argument, ArrowFunctionExpression, BinaryOperator, BindingPattern, CallExpression,
-        ChainElement, Declaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
-        Expression, FormalParameter, Function, FunctionBody, ImportDeclaration,
-        ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator,
-        MemberExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
-        SwitchCase, TSType, TSTypeName, UnaryOperator, VariableDeclaration,
+        ChainElement, Class, ClassElement, Declaration, ExportDefaultDeclarationKind,
+        ExportNamedDeclaration, Expression, FormalParameter, Function, FunctionBody,
+        ImportDeclaration, ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator,
+        MemberExpression, MethodDefinitionKind, ObjectPropertyKind, Program, PropertyKey,
+        Statement, SwitchCase, TSType, TSTypeName, UnaryOperator, VariableDeclaration,
     },
     to_span, ScopeFlags, Visit,
 };
 use stryx_core::{Finding, Severity, Span};
-use stryx_index::{FileSummary, ImportRef};
+use stryx_index::{ClassInfo, FileSummary, ImportRef};
 use stryx_taint::{ExportedFunctionSummary, ParamFlow};
 
 use crate::{ExtractOutput, Rule, RuleContext, RuleMeta};
@@ -94,6 +94,10 @@ struct FlowVisitor<'idx> {
     /// `if (!ALLOWED.includes(x)) return ...` narrows even when `ALLOWED`
     /// is a hoisted const rather than an inline array literal.
     allow_lists: HashSet<String>,
+    /// Stack of class names currently being visited. Used inside class
+    /// methods so `this.<member>.<method>(arg)` can resolve `<member>`
+    /// against the enclosing class's `field_types`.
+    class_stack: Vec<String>,
 }
 
 impl<'idx> FlowVisitor<'idx> {
@@ -105,6 +109,7 @@ impl<'idx> FlowVisitor<'idx> {
             index,
             tainted_return: false,
             allow_lists: HashSet::new(),
+            class_stack: Vec::new(),
         }
     }
 
@@ -142,18 +147,66 @@ impl<'idx> FlowVisitor<'idx> {
         callee: &Expression<'_>,
     ) -> Option<&'idx stryx_taint::ExportedFunctionSummary> {
         let index = self.index?;
-        let Expression::Identifier(id) = callee else {
-            return None;
-        };
-        let name = id.name.as_str();
-        // Cross-file: resolve through the import map.
-        if let Some(s) = index.resolve_summary(&self.file, name) {
+        match callee {
+            Expression::Identifier(id) => {
+                let name = id.name.as_str();
+                // Cross-file: resolve through the import map.
+                if let Some(s) = index.resolve_summary(&self.file, name) {
+                    return Some(s);
+                }
+                // Same-file: look up a top-level function declared in this file
+                // (exported or local).
+                let file = index.file(&self.file)?;
+                file.exports.get(name).or_else(|| file.locals.get(name))
+            }
+            Expression::StaticMemberExpression(m) => {
+                // `this.<method>(...)` — same-class call.
+                if matches!(&m.object, Expression::ThisExpression(_)) {
+                    let method = m.property.name.as_str();
+                    let current_class = self.class_stack.last()?;
+                    let my_file = index.file(&self.file)?;
+                    let class_info = my_file.classes.get(current_class)?;
+                    return class_info.methods.get(method);
+                }
+                // `this.<member>.<method>(...)` — call to an injected
+                // service. Resolve `<member>` to its declared TS type
+                // name in the enclosing class, then look up that class's
+                // `<method>` in this file or via imports.
+                if let Expression::StaticMemberExpression(inner) = &m.object
+                    && matches!(&inner.object, Expression::ThisExpression(_))
+                {
+                    let member = inner.property.name.as_str();
+                    let method = m.property.name.as_str();
+                    return self.lookup_this_method_summary(member, method);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    /// Resolve `this.<member>.<method>` to a method summary, where
+    /// `<member>` is a field/parameter-property whose declared type
+    /// names a class we can find in this file or via an import.
+    fn lookup_this_method_summary(
+        &self,
+        member: &str,
+        method: &str,
+    ) -> Option<&'idx stryx_taint::ExportedFunctionSummary> {
+        let index = self.index?;
+        let current_class = self.class_stack.last()?;
+        let my_file = index.file(&self.file)?;
+        let class_info = my_file.classes.get(current_class)?;
+        let type_name = class_info.field_types.get(member)?;
+        // Same-file class declaration first.
+        if let Some(target) = my_file.classes.get(type_name)
+            && let Some(s) = target.methods.get(method)
+        {
             return Some(s);
         }
-        // Same-file: look up a top-level function declared in this file
-        // (exported or local).
-        let file = index.file(&self.file)?;
-        file.exports.get(name).or_else(|| file.locals.get(name))
+        // Cross-file via the import map.
+        let (target_file, exported_name) = index.resolve_class(&self.file, type_name)?;
+        target_file.classes.get(exported_name)?.methods.get(method)
     }
 
     /// Should taint at argument position `i` propagate through this call
@@ -843,20 +896,33 @@ impl<'a, 'idx> Visit<'a> for FlowVisitor<'idx> {
         self.handle_function_body(&arrow.body.statements);
         self.exit_fn();
     }
+
+    fn visit_class(&mut self, class: &Class<'a>) {
+        let pushed = if let Some(id) = &class.id {
+            self.class_stack.push(id.name.to_string());
+            true
+        } else {
+            false
+        };
+        stryx_ast::walk::walk_class(self, class);
+        if pushed {
+            self.class_stack.pop();
+        }
+    }
 }
 
 impl FlowVisitor<'_> {
     /// Slice 2: when a tainted argument is passed to a call site whose
     /// callee resolves through the project index to a function that
     /// taints that parameter to a sink, emit a cross-file finding.
+    /// Handles both bare-identifier calls (`createUser(body)`) and
+    /// `this.<member>.<method>(body)` calls in NestJS-shaped code.
     fn check_cross_file_call(&mut self, call: &CallExpression<'_>) {
-        let Some(index) = self.index else { return };
-        let Expression::Identifier(callee_id) = &call.callee else {
+        let Some(summary) = self.lookup_callee_summary(&call.callee) else {
             return;
         };
-        let Some(summary) = index.resolve_summary(&self.file, callee_id.name.as_str()) else {
-            return;
-        };
+        let callee_label =
+            callee_chain(&call.callee).unwrap_or_else(|| "<call>".to_string());
         for (i, arg) in call.arguments.iter().enumerate() {
             let Some(arg_expr) = argument_expr(arg) else {
                 continue;
@@ -871,12 +937,7 @@ impl FlowVisitor<'_> {
                 .params
                 .get(i)
                 .and_then(|p| p.sink_span.as_ref())
-                .map(|s| {
-                    format!(
-                        " The sink lives in {}.",
-                        s.file.display(),
-                    )
-                })
+                .map(|s| format!(" The sink lives in {}.", s.file.display()))
                 .unwrap_or_default();
             self.findings.push(
                 Finding::ast(
@@ -884,7 +945,7 @@ impl FlowVisitor<'_> {
                     Severity::High,
                     format!(
                         "Untrusted request body flows into `{}` (param `{}`), which writes to the database without validating it.{sink_hint}",
-                        callee_id.name,
+                        callee_label,
                         summary.params.get(i).map(|p| p.name.as_str()).unwrap_or("?"),
                     ),
                     to_span(&self.file, call.span),
@@ -1396,6 +1457,9 @@ fn extract_summary(
             Statement::ExportDefaultDeclaration(decl) => {
                 collect_default_export(&file, &decl.declaration, index, &mut summary);
             }
+            Statement::ClassDeclaration(class) => {
+                collect_class(&file, class, index, &mut summary);
+            }
             // Top-level non-exported functions: summarise as locals so
             // same-file helpers participate in propagation decisions.
             Statement::FunctionDeclaration(func) => {
@@ -1406,6 +1470,7 @@ fn extract_summary(
                         &func.params,
                         func.body.as_deref(),
                         index,
+                        None,
                     )
                 {
                     summary.locals.insert(name, s);
@@ -1485,6 +1550,7 @@ fn collect_named_exports(
                     &func.params,
                     func.body.as_deref(),
                     index,
+                    None,
                 )
             {
                 summary.exports.insert(name, s);
@@ -1500,6 +1566,9 @@ fn collect_named_exports(
                     summary.exports.insert(name, s);
                 }
             }
+        }
+        Declaration::ClassDeclaration(class) => {
+            collect_class(file, class, index, summary);
         }
         _ => {}
     }
@@ -1518,6 +1587,7 @@ fn collect_default_export(
             &func.params,
             func.body.as_deref(),
             index,
+            None,
         ),
         ExportDefaultDeclarationKind::ArrowFunctionExpression(arrow) => Some(summarise_arrow(
             file,
@@ -1526,11 +1596,103 @@ fn collect_default_export(
             &arrow.body,
             index,
         )),
+        ExportDefaultDeclarationKind::ClassDeclaration(class) => {
+            collect_class(file, class, index, summary);
+            None
+        }
         _ => None,
     };
     if let Some(s) = s {
         summary.exports.insert("default".to_string(), s);
     }
+}
+
+/// Walk a top-level class declaration, summarise each method, and
+/// record constructor parameter properties + property declarations as
+/// field types so `this.<member>` lookups work cross-file.
+fn collect_class(
+    file: &std::path::Path,
+    class: &Class<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
+    summary: &mut FileSummary,
+) {
+    let Some(class_name) = class.id.as_ref().map(|id| id.name.to_string()) else {
+        return;
+    };
+    let mut info = ClassInfo::default();
+    for el in &class.body.body {
+        let ClassElement::MethodDefinition(method) = el else {
+            // PropertyDefinition with type annotations: record as field.
+            if let ClassElement::PropertyDefinition(prop) = el {
+                let Some(name) = property_key_name(&prop.key) else {
+                    continue;
+                };
+                if let Some(t) = type_annotation_name(prop.type_annotation.as_deref()) {
+                    info.field_types.insert(name, t);
+                }
+            }
+            continue;
+        };
+        if matches!(
+            method.kind,
+            MethodDefinitionKind::Constructor
+                | MethodDefinitionKind::Get
+                | MethodDefinitionKind::Set
+        ) {
+            // Constructor: harvest parameter properties as field types.
+            if method.kind == MethodDefinitionKind::Constructor {
+                for param in &method.value.params.items {
+                    if param.accessibility.is_none() && !param.readonly {
+                        continue;
+                    }
+                    let Some(name) = single_binding_name(&param.pattern) else {
+                        continue;
+                    };
+                    if let Some(t) = type_annotation_name(param.type_annotation.as_deref()) {
+                        info.field_types.insert(name, t);
+                    }
+                }
+            }
+            continue;
+        }
+        let Some(method_name) = property_key_name(&method.key) else {
+            continue;
+        };
+        if let Some(s) = summarise_function(
+            file,
+            &method_name,
+            &method.value.params,
+            method.value.body.as_deref(),
+            index,
+            Some(&class_name),
+        ) {
+            info.methods.insert(method_name, s);
+        }
+    }
+    summary.classes.insert(class_name, info);
+}
+
+fn property_key_name(key: &PropertyKey<'_>) -> Option<String> {
+    match key {
+        PropertyKey::StaticIdentifier(id) => Some(id.name.to_string()),
+        PropertyKey::StringLiteral(s) => Some(s.value.to_string()),
+        _ => None,
+    }
+}
+
+/// Resolve a TS type annotation to its identifier name, e.g.
+/// `: UsersService` → `Some("UsersService")`. Returns `None` for
+/// generic / union / inline / non-identifier types.
+fn type_annotation_name(
+    annotation: Option<&stryx_ast::ast::TSTypeAnnotation<'_>>,
+) -> Option<String> {
+    let TSType::TSTypeReference(tref) = &annotation?.type_annotation else {
+        return None;
+    };
+    let TSTypeName::IdentifierReference(id) = &tref.type_name else {
+        return None;
+    };
+    Some(id.name.to_string())
 }
 
 fn summarise_initialiser(
@@ -1541,7 +1703,7 @@ fn summarise_initialiser(
 ) -> Option<ExportedFunctionSummary> {
     match init {
         Expression::FunctionExpression(func) => {
-            summarise_function(file, name, &func.params, func.body.as_deref(), index)
+            summarise_function(file, name, &func.params, func.body.as_deref(), index, None)
         }
         Expression::ArrowFunctionExpression(arrow) => Some(summarise_arrow(
             file,
@@ -1560,9 +1722,17 @@ fn summarise_function(
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: Option<&FunctionBody<'_>>,
     index: Option<&stryx_index::ProjectIndex>,
+    class_context: Option<&str>,
 ) -> Option<ExportedFunctionSummary> {
     let body_stmts = body.map(|b| b.statements.as_slice()).unwrap_or(&[]);
-    Some(build_summary(file, name, params, body_stmts, index))
+    Some(build_summary(
+        file,
+        name,
+        params,
+        body_stmts,
+        index,
+        class_context,
+    ))
 }
 
 fn summarise_arrow(
@@ -1572,7 +1742,7 @@ fn summarise_arrow(
     body: &FunctionBody<'_>,
     index: Option<&stryx_index::ProjectIndex>,
 ) -> ExportedFunctionSummary {
-    build_summary(file, name, params, &body.statements, index)
+    build_summary(file, name, params, &body.statements, index, None)
 }
 
 fn build_summary(
@@ -1581,6 +1751,7 @@ fn build_summary(
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: &[Statement<'_>],
     index: Option<&stryx_index::ProjectIndex>,
+    class_context: Option<&str>,
 ) -> ExportedFunctionSummary {
     let param_names: Vec<String> = params
         .items
@@ -1598,6 +1769,9 @@ fn build_summary(
         // contribute too — that's what makes summaries converge through
         // multi-level chains (controller → service → repository).
         let mut visitor = FlowVisitor::new(file.to_path_buf(), index);
+        if let Some(cls) = class_context {
+            visitor.class_stack.push(cls.to_string());
+        }
         visitor.enter_fn();
         visitor.taint(pname.clone());
         for stmt in body {

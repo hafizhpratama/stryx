@@ -160,6 +160,19 @@ The rule subscribes to taint flows matching its signature; it does not
 walk the AST itself. See
 [`taint-engine.md`](../architecture/taint-engine.md).
 
+### Class-method resolution (NestJS shape)
+
+When a controller method delegates to an injected service via
+`this.<member>.<method>(arg)`, the rule resolves `<member>` against the
+enclosing class's constructor parameter properties (`private readonly
+userService: UsersService`) and class field declarations
+(`private userService: UsersService`). The declared type name is
+followed through the import map to a class declaration in either the
+same file or another file, and the matching method's parameter summary
+is consulted at the call site. Same-class `this.<method>(arg)` calls
+also resolve. Field aliasing (`const u = this.userService`) and
+dynamic dispatch (`this[name].create`) are not currently followed.
+
 ## Known false positive zones
 
 - **Webhook handlers** that intentionally accept raw payloads (Stripe,

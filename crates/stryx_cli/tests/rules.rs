@@ -224,6 +224,47 @@ fn unvalidated_body_to_db_cross_file_good_silent() {
 }
 
 #[test]
+fn unvalidated_body_to_db_nest_bad_fires() {
+    // NestJS shape: controller method receives @Body() and delegates to
+    // an injected service via `this.userService.create(body)`. The
+    // service's `create` method writes to prisma without validation.
+    // Cross-class taint must follow the field-injection chain.
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/nest-bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    let controller_path = dir.join("controller.ts");
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.span.file == controller_path
+                && f.message.contains("this.userService.create")),
+        "expected a cross-class finding on controller.ts referencing this.userService.create; got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unvalidated_body_to_db_nest_good_silent() {
+    // Same shape as nest-bad, but the controller parses the body with
+    // `createUserSchema.parse(body)` before delegating to the service.
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/nest-good");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "expected zero findings on nest-good/, got: {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn unvalidated_body_to_db_good_fixture_silent() {
     let path = fixtures_root().join("flow-unvalidated-body-to-db/good.ts");
     let flow_findings: Vec<_> = scan_file(&path)
