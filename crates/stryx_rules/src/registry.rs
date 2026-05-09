@@ -28,5 +28,6 @@ pub fn builtin_rules() -> RuleRegistry {
     let mut reg = RuleRegistry::new();
     reg.register(Arc::new(generic::HardcodedSecret::new()));
     reg.register(Arc::new(flows::UnvalidatedBodyToDb::new()));
+    reg.register(Arc::new(flows::SecretToResponse::new()));
     reg
 }

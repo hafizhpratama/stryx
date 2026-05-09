@@ -30,6 +30,19 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   UsersService`) and class field declarations to the receiving class's
   method summary. NestJS-shaped controllers that delegate to injected
   services are now reachable by cross-file taint.
+- `flow/secret-to-response` (slice 1, single-file). Detects
+  secret-shaped values flowing into a response-body sink without
+  redaction. Sources: `process.env.X` where X matches the secret-name
+  regex (`SECRET|KEY|TOKEN|PASSWORD|JWT|PRIVATE|CREDENTIAL|DSN`,
+  case-insensitive) and isn't on the public allow-list (`NEXT_PUBLIC_*`,
+  `PUBLIC_*`, `NODE_ENV`, etc.); hardcoded credential string literals
+  (AWS, Anthropic, Stripe, GitHub, OpenAI shapes); destructured
+  identifiers whose key name itself matches the secret regex. Sinks:
+  `Response.json`, `NextResponse.json`, `res.json/send/end/write`,
+  `c.json/text/html/body` (Hono), `reply.send` (Fastify), and
+  `new Response(JSON.stringify(...))`. Sanitisers: `Boolean(secret)`,
+  `redact/mask/fingerprint/hash(secret)`. Cross-file flow is deferred
+  to slice 2.
 
 ### Coming soon (v0.1, planned)
 - Foundational crates `stryx_index` (project semantic index) and

@@ -224,6 +224,40 @@ fn unvalidated_body_to_db_cross_file_good_silent() {
 }
 
 #[test]
+fn secret_to_response_bad_fires() {
+    let path = fixtures_root().join("flow-secret-to-response/bad.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/secret-to-response")
+        .collect();
+    assert_eq!(
+        findings.len(),
+        6,
+        "bad.ts has 6 secret leaks (App Router dump, indirect, Pages res.json, hardcoded credential, Hono, new Response), got {}: {:?}",
+        findings.len(),
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+    for f in &findings {
+        assert_eq!(f.severity, Severity::Critical);
+        assert_eq!(f.span.file, path);
+    }
+}
+
+#[test]
+fn secret_to_response_good_silent() {
+    let path = fixtures_root().join("flow-secret-to-response/good.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/secret-to-response")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "good.ts uses Boolean()/redact()/destructure-and-drop — expected zero findings, got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn unvalidated_body_to_db_nest_bad_fires() {
     // NestJS shape: controller method receives @Body() and delegates to
     // an injected service via `this.userService.create(body)`. The

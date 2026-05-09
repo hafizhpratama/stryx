@@ -25,3 +25,7 @@ harness = false
 [[bench]]
 name    = "unvalidated_body_to_db"
 harness = false
+
+[[bench]]
+name    = "secret_to_response"
+harness = false
