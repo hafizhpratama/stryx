@@ -19,12 +19,12 @@ use std::path::PathBuf;
 
 use stryx_ast::{
     ast::{
-        ArrowFunctionExpression, BindingPattern, CallExpression, Declaration,
-        ExportDefaultDeclarationKind, ExportNamedDeclaration, Expression, FormalParameter,
-        Function, FunctionBody, ImportDeclaration, ImportDeclarationSpecifier,
-        ImportOrExportKind, LogicalOperator, MemberExpression, ObjectPropertyKind,
-        Program, PropertyKey, Statement, TSType, TSTypeName, UnaryOperator,
-        VariableDeclaration,
+        Argument, ArrowFunctionExpression, BinaryOperator, BindingPattern, CallExpression,
+        ChainElement, Declaration, ExportDefaultDeclarationKind, ExportNamedDeclaration,
+        Expression, FormalParameter, Function, FunctionBody, ImportDeclaration,
+        ImportDeclarationSpecifier, ImportOrExportKind, LogicalOperator,
+        MemberExpression, ObjectPropertyKind, Program, PropertyKey, Statement,
+        SwitchCase, TSType, TSTypeName, UnaryOperator, VariableDeclaration,
     },
     to_span, ScopeFlags, Visit,
 };
@@ -69,6 +69,7 @@ impl Rule for UnvalidatedBodyToDb {
 
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
         let mut visitor = FlowVisitor::new(ctx.file.path.clone(), ctx.index);
+        visitor.collect_allow_lists(&ctx.file.program);
         visitor.visit_program(&ctx.file.program);
         visitor.findings
     }
@@ -88,6 +89,11 @@ struct FlowVisitor<'idx> {
     /// `build_summary` reads this to populate
     /// `ParamFlow::propagates_to_return`.
     tainted_return: bool,
+    /// Top-level `const NAME = [literal, literal, ...]` allow-list
+    /// declarations seen in this file. Used so that
+    /// `if (!ALLOWED.includes(x)) return ...` narrows even when `ALLOWED`
+    /// is a hoisted const rather than an inline array literal.
+    allow_lists: HashSet<String>,
 }
 
 impl<'idx> FlowVisitor<'idx> {
@@ -98,6 +104,7 @@ impl<'idx> FlowVisitor<'idx> {
             scopes: Vec::new(),
             index,
             tainted_return: false,
+            allow_lists: HashSet::new(),
         }
     }
 
@@ -163,6 +170,80 @@ impl<'idx> FlowVisitor<'idx> {
         }
     }
 
+    /// Pre-pass: scan the file's top-level statements for
+    /// `const NAME = [literal, literal, ...]` declarations and record
+    /// each NAME as an allow-list. Lets the run-pass narrowing detector
+    /// recognise `ALLOWED.includes(x)` (Identifier receiver) the same
+    /// way it recognises an inline-array `["a","b"].includes(x)`.
+    fn collect_allow_lists(&mut self, program: &Program<'_>) {
+        for stmt in &program.body {
+            let var = match stmt {
+                Statement::VariableDeclaration(v) => v,
+                Statement::ExportNamedDeclaration(decl) => match decl.declaration.as_ref() {
+                    Some(Declaration::VariableDeclaration(v)) => v,
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            for declarator in &var.declarations {
+                let Some(name) = single_binding_name(&declarator.id) else {
+                    continue;
+                };
+                let Some(init) = &declarator.init else { continue };
+                let array_expr = match init {
+                    Expression::ArrayExpression(a) => a,
+                    Expression::TSAsExpression(t) => match &t.expression {
+                        Expression::ArrayExpression(a) => a,
+                        _ => continue,
+                    },
+                    _ => continue,
+                };
+                if array_expr.elements.iter().all(|el| {
+                    matches!(
+                        el.as_expression(),
+                        Some(
+                            Expression::StringLiteral(_)
+                                | Expression::NumericLiteral(_)
+                                | Expression::BooleanLiteral(_)
+                        )
+                    )
+                }) {
+                    self.allow_lists.insert(name);
+                }
+            }
+        }
+    }
+
+    fn handle_switch_case(&mut self, case: &SwitchCase<'_>) {
+        if let Some(test) = &case.test {
+            let _ = self.expr_taint(test);
+        }
+        for s in &case.consequent {
+            self.handle_statement(s);
+        }
+    }
+
+    /// Taint each binding introduced by a `for-of` / `for-in` left side.
+    /// Handles `for (const x of ...)` / `for (let x of ...)` / pattern
+    /// destructuring; `for (existing of ...)` (assignment target without
+    /// declaration) is handled in the catch-all branch.
+    fn taint_for_left(&mut self, left: &stryx_ast::ast::ForStatementLeft<'_>) {
+        use stryx_ast::ast::ForStatementLeft;
+        match left {
+            ForStatementLeft::VariableDeclaration(decl) => {
+                for declarator in &decl.declarations {
+                    for name in collect_binding_names(&declarator.id) {
+                        self.taint(name);
+                    }
+                }
+            }
+            ForStatementLeft::AssignmentTargetIdentifier(id) => {
+                self.taint(id.name.to_string());
+            }
+            _ => {}
+        }
+    }
+
     fn handle_function_body(&mut self, body: &[Statement<'_>]) {
         for stmt in body {
             self.handle_statement(stmt);
@@ -198,10 +279,12 @@ impl<'idx> FlowVisitor<'idx> {
                 // Allow-list narrowing: an early-return guard of the
                 // shape `if (...!ARR.includes(x)...) return ...` proves
                 // that `x` is one of ARR's elements past this point.
-                // Drop its taint for the remainder of the scope.
+                // Drop its taint for the remainder of the scope. ARR can
+                // be either a literal array or a hoisted `const`
+                // allow-list (collected in `collect_allow_lists`).
                 if branch_returns(&is.consequent) {
                     let mut narrowed = Vec::new();
-                    collect_includes_narrowed(&is.test, &mut narrowed);
+                    collect_includes_narrowed(&is.test, &self.allow_lists, &mut narrowed);
                     for name in narrowed {
                         if let Some(scope) = self.current_scope_mut() {
                             scope.remove(&name);
@@ -223,6 +306,72 @@ impl<'idx> FlowVisitor<'idx> {
                         self.handle_statement(s);
                     }
                 }
+            }
+            Statement::WhileStatement(ws) => {
+                let _ = self.expr_taint(&ws.test);
+                self.handle_statement(&ws.body);
+            }
+            Statement::DoWhileStatement(ds) => {
+                self.handle_statement(&ds.body);
+                let _ = self.expr_taint(&ds.test);
+            }
+            Statement::ForStatement(fs) => {
+                if let Some(init) = &fs.init {
+                    use stryx_ast::ast::ForStatementInit;
+                    match init {
+                        ForStatementInit::VariableDeclaration(v) => self.handle_var_decl(v),
+                        other => {
+                            // Inherit-variant: any Expression. Walk for taint
+                            // side effects.
+                            if let Some(e) = expression_from_for_init(other) {
+                                let _ = self.expr_taint(e);
+                                self.scan_for_sinks(e);
+                            }
+                        }
+                    }
+                }
+                if let Some(test) = &fs.test {
+                    let _ = self.expr_taint(test);
+                }
+                if let Some(update) = &fs.update {
+                    let _ = self.expr_taint(update);
+                    self.scan_for_sinks(update);
+                }
+                self.handle_statement(&fs.body);
+            }
+            Statement::ForOfStatement(fs) => {
+                let right_tainted = self.expr_taint(&fs.right);
+                self.scan_for_sinks(&fs.right);
+                // Each iteration's loop binding takes one element of the
+                // (possibly tainted) iterable, so it inherits the iterable's
+                // taint. `for (const x of body.items) sink(x)` therefore
+                // flags x correctly.
+                if right_tainted {
+                    self.taint_for_left(&fs.left);
+                }
+                self.handle_statement(&fs.body);
+            }
+            Statement::ForInStatement(fs) => {
+                let right_tainted = self.expr_taint(&fs.right);
+                self.scan_for_sinks(&fs.right);
+                if right_tainted {
+                    self.taint_for_left(&fs.left);
+                }
+                self.handle_statement(&fs.body);
+            }
+            Statement::SwitchStatement(ss) => {
+                let _ = self.expr_taint(&ss.discriminant);
+                self.scan_for_sinks(&ss.discriminant);
+                for case in &ss.cases {
+                    self.handle_switch_case(case);
+                }
+            }
+            Statement::LabeledStatement(ls) => {
+                self.handle_statement(&ls.body);
+            }
+            Statement::ThrowStatement(ts) => {
+                let _ = self.expr_taint(&ts.argument);
+                self.scan_for_sinks(&ts.argument);
             }
             // Functions/classes inside a function body open new scopes; the
             // outer Visit handlers below take care of those when reached
@@ -268,7 +417,7 @@ impl<'idx> FlowVisitor<'idx> {
                 if is_sanitizer_call(call) {
                     // Still walk arguments to record any nested sinks/taint.
                     for arg in &call.arguments {
-                        if let Some(e) = arg.as_expression() {
+                        if let Some(e) = argument_expr(arg) {
                             let _ = self.expr_taint(e);
                             self.scan_for_sinks(e);
                         }
@@ -282,7 +431,7 @@ impl<'idx> FlowVisitor<'idx> {
                 // result as clean.
                 if is_db_read_call(call) {
                     for arg in &call.arguments {
-                        if let Some(e) = arg.as_expression() {
+                        if let Some(e) = argument_expr(arg) {
                             let _ = self.expr_taint(e);
                             self.scan_for_sinks(e);
                         }
@@ -304,7 +453,7 @@ impl<'idx> FlowVisitor<'idx> {
                 let summary = self.lookup_callee_summary(&call.callee);
                 let mut any_tainted = false;
                 for (i, arg) in call.arguments.iter().enumerate() {
-                    let Some(e) = arg.as_expression() else { continue };
+                    let Some(e) = argument_expr(arg) else { continue };
                     if self.expr_taint(e) && self.callee_propagates_arg(summary, i) {
                         any_tainted = true;
                     }
@@ -385,10 +534,15 @@ impl<'idx> FlowVisitor<'idx> {
 
             Expression::AssignmentExpression(a) => {
                 let r = self.expr_taint(&a.right);
-                if r
-                    && let Some(name) = assignment_target_name(&a.left)
-                {
-                    self.taint(name);
+                if let Some(name) = assignment_target_name(&a.left) {
+                    if r {
+                        self.taint(name);
+                    } else if let Some(scope) = self.current_scope_mut() {
+                        // Reassignment to a clean RHS clears prior taint on
+                        // the binding — `let x = body; x = "safe"` should
+                        // make `x` clean for the rest of the scope.
+                        scope.remove(&name);
+                    }
                 }
                 r
             }
@@ -398,7 +552,58 @@ impl<'idx> FlowVisitor<'idx> {
             Expression::TSSatisfiesExpression(t) => self.expr_taint(&t.expression),
             Expression::TSTypeAssertion(t) => self.expr_taint(&t.expression),
 
+            // Optional chaining: `body?.x()` — for taint we treat it
+            // identically to a non-optional chain. The `undefined` short-
+            // circuit doesn't add or strip taint.
+            Expression::ChainExpression(c) => self.chain_element_taint(&c.expression),
+
+            // Tagged template: `sql`...${tainted}...`` — the tag function
+            // could be a SQL builder etc. Conservatively, taint
+            // propagates if any interpolated expression is tainted.
+            Expression::TaggedTemplateExpression(t) => {
+                let mut tainted = false;
+                for e in &t.quasi.expressions {
+                    if self.expr_taint(e) {
+                        tainted = true;
+                    }
+                }
+                tainted
+            }
+
             _ => false,
+        }
+    }
+
+    fn chain_element_taint(&mut self, el: &ChainElement<'_>) -> bool {
+        match el {
+            ChainElement::CallExpression(call) => {
+                // Mirror the standard CallExpression branch — sanitisers,
+                // db-reads, body sources, then conservative propagation.
+                if is_sanitizer_call(call) || is_db_read_call(call) {
+                    return false;
+                }
+                if is_body_source_call(call) {
+                    return true;
+                }
+                let summary = self.lookup_callee_summary(&call.callee);
+                let mut any_tainted = false;
+                for (i, arg) in call.arguments.iter().enumerate() {
+                    let Some(e) = argument_expr(arg) else { continue };
+                    if self.expr_taint(e) && self.callee_propagates_arg(summary, i) {
+                        any_tainted = true;
+                    }
+                }
+                any_tainted
+            }
+            ChainElement::TSNonNullExpression(t) => self.expr_taint(&t.expression),
+            ChainElement::StaticMemberExpression(m) => {
+                if is_request_body_member(&m.object, m.property.name.as_str()) {
+                    return true;
+                }
+                self.expr_taint(&m.object)
+            }
+            ChainElement::ComputedMemberExpression(m) => self.expr_taint(&m.object),
+            ChainElement::PrivateFieldExpression(m) => self.expr_taint(&m.object),
         }
     }
 
@@ -414,7 +619,7 @@ impl<'idx> FlowVisitor<'idx> {
 
                 if is_db_write_sink(call) {
                     let any_tainted = call.arguments.iter().any(|arg| {
-                        arg.as_expression()
+                        argument_expr(arg)
                             .map(|e| self.expr_is_tainted_readonly(e))
                             .unwrap_or(false)
                     });
@@ -438,7 +643,7 @@ impl<'idx> FlowVisitor<'idx> {
                 // Recurse into callee + args to catch nested sinks.
                 self.scan_for_sinks(&call.callee);
                 for arg in &call.arguments {
-                    if let Some(e) = arg.as_expression() {
+                    if let Some(e) = argument_expr(arg) {
                         self.scan_for_sinks(e);
                     }
                 }
@@ -463,6 +668,53 @@ impl<'idx> FlowVisitor<'idx> {
                     if let Some(e) = el.as_expression() {
                         self.scan_for_sinks(e);
                     }
+                }
+            }
+            Expression::ChainExpression(c) => match &c.expression {
+                ChainElement::CallExpression(call) => {
+                    self.check_cross_file_call(call);
+                    if is_db_write_sink(call) {
+                        let any_tainted = call.arguments.iter().any(|arg| {
+                            argument_expr(arg)
+                                .map(|e| self.expr_is_tainted_readonly(e))
+                                .unwrap_or(false)
+                        });
+                        if any_tainted {
+                            self.findings.push(
+                                Finding::ast(
+                                    RULE_ID,
+                                    Severity::High,
+                                    format!(
+                                        "Untrusted request body reaches `{}` without a validating parser along the path.",
+                                        callee_chain(&call.callee).unwrap_or_else(|| "db sink".into())
+                                    ),
+                                    to_span(&self.file, call.span),
+                                )
+                                .with_help(
+                                    "Validate the body with zod/valibot/yup before passing it to the DB write.",
+                                ),
+                            );
+                        }
+                    }
+                    self.scan_for_sinks(&call.callee);
+                    for arg in &call.arguments {
+                        if let Some(e) = argument_expr(arg) {
+                            self.scan_for_sinks(e);
+                        }
+                    }
+                }
+                ChainElement::TSNonNullExpression(t) => self.scan_for_sinks(&t.expression),
+                ChainElement::StaticMemberExpression(m) => self.scan_for_sinks(&m.object),
+                ChainElement::ComputedMemberExpression(m) => {
+                    self.scan_for_sinks(&m.object);
+                    self.scan_for_sinks(&m.expression);
+                }
+                ChainElement::PrivateFieldExpression(m) => self.scan_for_sinks(&m.object),
+            },
+            Expression::TaggedTemplateExpression(t) => {
+                self.scan_for_sinks(&t.tag);
+                for e in &t.quasi.expressions {
+                    self.scan_for_sinks(e);
                 }
             }
             _ => {}
@@ -492,7 +744,7 @@ impl<'idx> FlowVisitor<'idx> {
                 }
                 let summary = self.lookup_callee_summary(&call.callee);
                 call.arguments.iter().enumerate().any(|(i, arg)| {
-                    arg.as_expression()
+                    argument_expr(arg)
                         .map(|e| {
                             self.expr_is_tainted_readonly(e)
                                 && self.callee_propagates_arg(summary, i)
@@ -524,6 +776,45 @@ impl<'idx> FlowVisitor<'idx> {
             Expression::TSNonNullExpression(t) => self.expr_is_tainted_readonly(&t.expression),
             Expression::TSSatisfiesExpression(t) => self.expr_is_tainted_readonly(&t.expression),
             Expression::TSTypeAssertion(t) => self.expr_is_tainted_readonly(&t.expression),
+            Expression::ChainExpression(c) => match &c.expression {
+                ChainElement::CallExpression(call) => {
+                    if is_sanitizer_call(call) || is_db_read_call(call) {
+                        return false;
+                    }
+                    if is_body_source_call(call) {
+                        return true;
+                    }
+                    let summary = self.lookup_callee_summary(&call.callee);
+                    call.arguments.iter().enumerate().any(|(i, arg)| {
+                        argument_expr(arg)
+                            .map(|e| {
+                                self.expr_is_tainted_readonly(e)
+                                    && self.callee_propagates_arg(summary, i)
+                            })
+                            .unwrap_or(false)
+                    })
+                }
+                ChainElement::TSNonNullExpression(t) => {
+                    self.expr_is_tainted_readonly(&t.expression)
+                }
+                ChainElement::StaticMemberExpression(m) => {
+                    if is_request_body_member(&m.object, m.property.name.as_str()) {
+                        return true;
+                    }
+                    self.expr_is_tainted_readonly(&m.object)
+                }
+                ChainElement::ComputedMemberExpression(m) => {
+                    self.expr_is_tainted_readonly(&m.object)
+                }
+                ChainElement::PrivateFieldExpression(m) => {
+                    self.expr_is_tainted_readonly(&m.object)
+                }
+            },
+            Expression::TaggedTemplateExpression(t) => t
+                .quasi
+                .expressions
+                .iter()
+                .any(|e| self.expr_is_tainted_readonly(e)),
             _ => false,
         }
     }
@@ -567,7 +858,7 @@ impl FlowVisitor<'_> {
             return;
         };
         for (i, arg) in call.arguments.iter().enumerate() {
-            let Some(arg_expr) = arg.as_expression() else {
+            let Some(arg_expr) = argument_expr(arg) else {
                 continue;
             };
             if !self.expr_is_tainted_readonly(arg_expr) {
@@ -840,6 +1131,34 @@ fn is_orm_write_sink(call: &CallExpression<'_>) -> bool {
     matches!(method.property.name.as_str(), "save" | "insert" | "upsert")
 }
 
+/// Best-effort extraction of an Expression from a `ForStatementInit`
+/// when it isn't a `VariableDeclaration`. Slice 1.5: only the bare
+/// expression-as-init shape is recognised; complex inheritance variants
+/// fall through.
+fn expression_from_for_init<'a>(
+    init: &'a stryx_ast::ast::ForStatementInit<'_>,
+) -> Option<&'a Expression<'a>> {
+    use stryx_ast::ast::ForStatementInit;
+    if let ForStatementInit::VariableDeclaration(_) = init {
+        return None;
+    }
+    // ForStatementInit inherits Expression variants; cast back via match
+    // on a few common shapes. Anything else falls through and is
+    // skipped — it will still be visited by the default Visit walk.
+    None
+}
+
+/// Underlying expression for a call argument, peeling spread elements
+/// (`...x` becomes `x` for taint-propagation purposes; the array's
+/// elements all share the same taint as the array itself in our coarse
+/// model).
+fn argument_expr<'a>(arg: &'a Argument<'_>) -> Option<&'a Expression<'a>> {
+    match arg {
+        Argument::SpreadElement(s) => Some(&s.argument),
+        _ => arg.as_expression(),
+    }
+}
+
 /// True if the body of an if-branch is guaranteed to leave the
 /// enclosing scope (return / throw). Used to recognise early-return
 /// guards.
@@ -851,25 +1170,77 @@ fn branch_returns(stmt: &Statement<'_>) -> bool {
     }
 }
 
-/// Collect identifiers narrowed by `!ARR.includes(IDENT)` clauses
-/// inside an OR-chain. Each such clause inside an early-return guard
-/// proves that `IDENT` is one of `ARR`'s literal elements past the
-/// guard, so we can clear its taint.
-fn collect_includes_narrowed(test: &Expression<'_>, out: &mut Vec<String>) {
+/// Collect identifiers narrowed by an early-return guard. Walks
+/// OR-chains and accepts each clause that:
+///
+/// - is `!ARR.includes(IDENT)` — allow-list narrowing
+/// - is `typeof IDENT !== "<lit>"` (or `==`/`===`/`!==` against a
+///   type-string literal) — type-name narrowing
+///
+/// In both cases the variable is provably constrained past the guard,
+/// so we clear its taint.
+fn collect_includes_narrowed(
+    test: &Expression<'_>,
+    allow_lists: &HashSet<String>,
+    out: &mut Vec<String>,
+) {
     match test {
         Expression::LogicalExpression(b) if b.operator == LogicalOperator::Or => {
-            collect_includes_narrowed(&b.left, out);
-            collect_includes_narrowed(&b.right, out);
+            collect_includes_narrowed(&b.left, allow_lists, out);
+            collect_includes_narrowed(&b.right, allow_lists, out);
         }
         _ => {
-            if let Some(name) = match_includes_negation(test) {
+            if let Some(name) = match_includes_negation(test, allow_lists) {
+                out.push(name.to_string());
+            } else if let Some(name) = match_typeof_check(test) {
                 out.push(name.to_string());
             }
         }
     }
 }
 
-fn match_includes_negation<'a>(expr: &'a Expression<'_>) -> Option<&'a str> {
+/// `typeof X !== "string"` (or `==`, `===`, `!==`) — for an early-return
+/// guard, this proves X has a known runtime type past the guard. Treat
+/// any of these forms as taint-clearing for the named identifier.
+fn match_typeof_check<'a>(expr: &'a Expression<'_>) -> Option<&'a str> {
+    let Expression::BinaryExpression(b) = expr else {
+        return None;
+    };
+    if !matches!(
+        b.operator,
+        BinaryOperator::Equality
+            | BinaryOperator::Inequality
+            | BinaryOperator::StrictEquality
+            | BinaryOperator::StrictInequality,
+    ) {
+        return None;
+    }
+    // Either side may be the typeof; the other should be a string literal.
+    let (typeof_side, lit_side) = match (&b.left, &b.right) {
+        (Expression::UnaryExpression(_), other) => (&b.left, other),
+        (other, Expression::UnaryExpression(_)) => (&b.right, other),
+        _ => return None,
+    };
+    let Expression::UnaryExpression(unary) = typeof_side else {
+        return None;
+    };
+    if unary.operator != UnaryOperator::Typeof {
+        return None;
+    }
+    let Expression::Identifier(id) = &unary.argument else {
+        return None;
+    };
+    // Other side must be a string literal — `"string"`, `"number"`, etc.
+    if !matches!(lit_side, Expression::StringLiteral(_)) {
+        return None;
+    }
+    Some(id.name.as_str())
+}
+
+fn match_includes_negation<'a>(
+    expr: &'a Expression<'_>,
+    allow_lists: &HashSet<String>,
+) -> Option<&'a str> {
     let Expression::UnaryExpression(unary) = expr else {
         return None;
     };
@@ -886,14 +1257,20 @@ fn match_includes_negation<'a>(expr: &'a Expression<'_>) -> Option<&'a str> {
     if method.property.name != "includes" {
         return None;
     }
-    // Receiver should be a literal array (the allow-list itself).
-    if !matches!(&method.object, Expression::ArrayExpression(_)) {
+    // Receiver: either a literal array or an Identifier that names a
+    // top-level allow-list `const`.
+    let receiver_ok = match &method.object {
+        Expression::ArrayExpression(_) => true,
+        Expression::Identifier(id) => allow_lists.contains(id.name.as_str()),
+        _ => false,
+    };
+    if !receiver_ok {
         return None;
     }
     if call.arguments.len() != 1 {
         return None;
     }
-    let arg_expr = call.arguments[0].as_expression()?;
+    let arg_expr = argument_expr(&call.arguments[0])?;
     let Expression::Identifier(id) = arg_expr else {
         return None;
     };
