@@ -82,6 +82,11 @@ struct FlowVisitor<'idx> {
     /// Read-only project index; `Some` during the run pass, `None`
     /// during summary extraction.
     index: Option<&'idx stryx_index::ProjectIndex>,
+    /// Set true by `handle_statement` when a `return <expr>` is reached
+    /// and `<expr>` is tainted. The per-parameter simulation in
+    /// `build_summary` reads this to populate
+    /// `ParamFlow::propagates_to_return`.
+    tainted_return: bool,
 }
 
 impl<'idx> FlowVisitor<'idx> {
@@ -91,6 +96,7 @@ impl<'idx> FlowVisitor<'idx> {
             findings: Vec::new(),
             scopes: Vec::new(),
             index,
+            tainted_return: false,
         }
     }
 
@@ -119,6 +125,43 @@ impl<'idx> FlowVisitor<'idx> {
         }
     }
 
+    /// If the callee resolves through the project index to a known
+    /// exported function, return that summary. Used by call-site taint
+    /// propagation to avoid spurious propagation through helpers that
+    /// transform their input into something different.
+    fn lookup_callee_summary(
+        &self,
+        callee: &Expression<'_>,
+    ) -> Option<&'idx stryx_taint::ExportedFunctionSummary> {
+        let index = self.index?;
+        let Expression::Identifier(id) = callee else {
+            return None;
+        };
+        let name = id.name.as_str();
+        // Cross-file: resolve through the import map.
+        if let Some(s) = index.resolve_summary(&self.file, name) {
+            return Some(s);
+        }
+        // Same-file: look up a top-level function declared in this file
+        // (exported or local).
+        let file = index.file(&self.file)?;
+        file.exports.get(name).or_else(|| file.locals.get(name))
+    }
+
+    /// Should taint at argument position `i` propagate through this call
+    /// site? When the callee has a known summary we trust it; otherwise
+    /// we default to conservative propagation (true).
+    fn callee_propagates_arg(
+        &self,
+        summary: Option<&stryx_taint::ExportedFunctionSummary>,
+        i: usize,
+    ) -> bool {
+        match summary {
+            Some(s) => s.params.get(i).is_none_or(|p| p.propagates_to_return),
+            None => true,
+        }
+    }
+
     fn handle_function_body(&mut self, body: &[Statement<'_>]) {
         for stmt in body {
             self.handle_statement(stmt);
@@ -134,7 +177,9 @@ impl<'idx> FlowVisitor<'idx> {
             }
             Statement::ReturnStatement(rs) => {
                 if let Some(arg) = &rs.argument {
-                    let _ = self.expr_taint(arg);
+                    if self.expr_taint(arg) {
+                        self.tainted_return = true;
+                    }
                     self.scan_for_sinks(arg);
                 }
             }
@@ -234,17 +279,22 @@ impl<'idx> FlowVisitor<'idx> {
                 if is_body_source_call(call) {
                     return true;
                 }
-                // For any other call, taint propagates if any argument is
-                // tainted (conservative; refinements come with summaries).
+                // For any other call, taint propagates if a tainted
+                // argument flows into a parameter the callee actually
+                // returns. When the callee has no known summary
+                // (third-party imports, dynamic calls), we fall back to
+                // conservative propagation. Sink scanning happens in
+                // `scan_for_sinks` which walks the whole expression tree;
+                // doing it here too would double-emit findings on
+                // chained calls like `db.insert(t).values(body).run()`.
+                let summary = self.lookup_callee_summary(&call.callee);
                 let mut any_tainted = false;
-                for arg in &call.arguments {
-                    if let Some(e) = arg.as_expression()
-                        && self.expr_taint(e)
-                    {
+                for (i, arg) in call.arguments.iter().enumerate() {
+                    let Some(e) = arg.as_expression() else { continue };
+                    if self.expr_taint(e) && self.callee_propagates_arg(summary, i) {
                         any_tainted = true;
                     }
                 }
-                self.scan_for_sinks(&call.callee);
                 any_tainted
             }
 
@@ -426,9 +476,13 @@ impl<'idx> FlowVisitor<'idx> {
                 if is_body_source_call(call) {
                     return true;
                 }
-                call.arguments.iter().any(|arg| {
+                let summary = self.lookup_callee_summary(&call.callee);
+                call.arguments.iter().enumerate().any(|(i, arg)| {
                     arg.as_expression()
-                        .map(|e| self.expr_is_tainted_readonly(e))
+                        .map(|e| {
+                            self.expr_is_tainted_readonly(e)
+                                && self.callee_propagates_arg(summary, i)
+                        })
                         .unwrap_or(false)
                 })
             }
@@ -464,6 +518,12 @@ impl<'idx> FlowVisitor<'idx> {
 impl<'a, 'idx> Visit<'a> for FlowVisitor<'idx> {
     fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
         self.enter_fn();
+        // NestJS and similar frameworks declare body sources via parameter
+        // decorators (`@Body() dto: CreateUserDto`). Pre-taint any param
+        // marked with one — the framework will inject body data there.
+        for name in body_decorated_param_names(&func.params) {
+            self.taint(name);
+        }
         if let Some(body) = &func.body {
             self.handle_function_body(&body.statements);
         }
@@ -632,11 +692,20 @@ fn is_db_read_call(call: &CallExpression<'_>) -> bool {
     matches!(root_id.name.as_str(), "prisma" | "db" | "database")
 }
 
+/// Top-level sink matcher: returns true if `call` is a DB write across
+/// any recognised ORM. Shapes covered:
+/// - Prisma: `<prisma|db|database>.<model>.<crud>(...)`
+/// - Drizzle: `<chain>.values(...)` after `<x>.insert(t)`,
+///   `<chain>.set(...)` after `<x>.update(t)`
+/// - TypeORM/Mongoose-ish: `<expr>.save(...)`, `<expr>.insert(...)`,
+///   `<expr>.upsert(...)` on any receiver — these verbs are
+///   DB-specific enough that we don't gate on the receiver shape.
 fn is_db_write_sink(call: &CallExpression<'_>) -> bool {
-    // Recognised DB write methods on Prisma-shaped clients:
-    //   prisma.<model>.create / createMany / update / updateMany / upsert /
-    //   delete / deleteMany / createManyAndReturn
-    // Also accepts a `db.` or `database.` prefix for generic clients.
+    is_prisma_write_sink(call) || is_drizzle_write_sink(call) || is_orm_write_sink(call)
+}
+
+fn is_prisma_write_sink(call: &CallExpression<'_>) -> bool {
+    // Prisma-shape: <prisma|db|database>.<model>.<method>
     const SINK_METHODS: &[&str] = &[
         "create",
         "createMany",
@@ -657,7 +726,6 @@ fn is_db_write_sink(call: &CallExpression<'_>) -> bool {
     if !SINK_METHODS.contains(&method.property.name.as_str()) {
         return false;
     }
-    // method.object should be `<root>.<model>` where root ∈ {prisma, db, database}.
     let Expression::StaticMemberExpression(model_member) = &method.object else {
         return false;
     };
@@ -667,12 +735,93 @@ fn is_db_write_sink(call: &CallExpression<'_>) -> bool {
     matches!(root_id.name.as_str(), "prisma" | "db" | "database")
 }
 
+fn is_drizzle_write_sink(call: &CallExpression<'_>) -> bool {
+    // Drizzle-shape: `<x>.insert(table).values(arg)` / `<x>.update(table).set(arg)`.
+    // The terminal call is `<chain>.values` or `<chain>.set` and the
+    // chain itself contains an `.insert` or `.update` call.
+    let Some(callee) = call.callee.as_member_expression() else {
+        return false;
+    };
+    let MemberExpression::StaticMemberExpression(terminal) = callee else {
+        return false;
+    };
+    let expected_inner = match terminal.property.name.as_str() {
+        "values" => "insert",
+        "set" => "update",
+        _ => return false,
+    };
+    // The receiver of the terminal call must itself be a `.insert(...)`
+    // or `.update(...)` call.
+    let Expression::CallExpression(inner_call) = &terminal.object else {
+        return false;
+    };
+    let Some(inner_callee) = inner_call.callee.as_member_expression() else {
+        return false;
+    };
+    let MemberExpression::StaticMemberExpression(inner_method) = inner_callee else {
+        return false;
+    };
+    inner_method.property.name.as_str() == expected_inner
+}
+
+fn is_orm_write_sink(call: &CallExpression<'_>) -> bool {
+    // TypeORM / Mongoose / generic ORM: `<receiver>.save(...)`,
+    // `<receiver>.insert(...)`, `<receiver>.upsert(...)`. We don't
+    // restrict the receiver shape — these verbs are DB-specific enough
+    // that any tainted argument arriving here is worth flagging.
+    if call.arguments.is_empty() {
+        return false;
+    }
+    let Some(callee) = call.callee.as_member_expression() else {
+        return false;
+    };
+    let MemberExpression::StaticMemberExpression(method) = callee else {
+        return false;
+    };
+    matches!(method.property.name.as_str(), "save" | "insert" | "upsert")
+}
+
+/// Names of parameters carrying a body-source decorator (`@Body()` or
+/// `@Body`). NestJS controllers declare their body argument this way.
+fn body_decorated_param_names(params: &stryx_ast::ast::FormalParameters<'_>) -> Vec<String> {
+    let mut out = Vec::new();
+    for param in &params.items {
+        if !param.decorators.iter().any(is_body_decorator) {
+            continue;
+        }
+        if let Some(name) = single_binding_name(&param.pattern) {
+            out.push(name);
+        }
+    }
+    out
+}
+
+fn is_body_decorator(decorator: &stryx_ast::ast::Decorator<'_>) -> bool {
+    let target = match &decorator.expression {
+        // `@Body()` — call expression with `Body` as callee.
+        Expression::CallExpression(call) => &call.callee,
+        // `@Body` — bare identifier.
+        other => other,
+    };
+    matches!(
+        target,
+        Expression::Identifier(id) if id.name.as_str() == "Body"
+    )
+}
+
 fn callee_chain(expr: &Expression<'_>) -> Option<String> {
     match expr {
         Expression::Identifier(id) => Some(id.name.to_string()),
+        Expression::ThisExpression(_) => Some("this".to_string()),
         Expression::StaticMemberExpression(m) => {
             let lhs = callee_chain(&m.object)?;
             Some(format!("{lhs}.{}", m.property.name))
+        }
+        // Show drizzle-style chains like `db.insert(...).values` rather
+        // than collapsing to "db sink".
+        Expression::CallExpression(call) => {
+            let inner = callee_chain(&call.callee)?;
+            Some(format!("{inner}(...)"))
         }
         _ => None,
     }
@@ -721,6 +870,33 @@ fn extract_summary(
             }
             Statement::ExportDefaultDeclaration(decl) => {
                 collect_default_export(&file, &decl.declaration, index, &mut summary);
+            }
+            // Top-level non-exported functions: summarise as locals so
+            // same-file helpers participate in propagation decisions.
+            Statement::FunctionDeclaration(func) => {
+                if let Some(name) = func.id.as_ref().map(|id| id.name.to_string())
+                    && let Some(s) = summarise_function(
+                        &file,
+                        &name,
+                        &func.params,
+                        func.body.as_deref(),
+                        index,
+                    )
+                {
+                    summary.locals.insert(name, s);
+                }
+            }
+            // Same for `const foo = (...) => {...}` at the top level.
+            Statement::VariableDeclaration(var) => {
+                for declarator in &var.declarations {
+                    let Some(name) = single_binding_name(&declarator.id) else {
+                        continue;
+                    };
+                    let Some(init) = &declarator.init else { continue };
+                    if let Some(s) = summarise_initialiser(&file, &name, init, index) {
+                        summary.locals.insert(name, s);
+                    }
+                }
             }
             _ => {}
         }
@@ -906,9 +1082,11 @@ fn build_summary(
 
         let reaches = !visitor.findings.is_empty();
         let sink_span = visitor.findings.first().map(|f| f.span.clone());
+        let propagates_to_return = visitor.tainted_return;
         params_out.push(ParamFlow {
             name: pname.clone(),
             reaches_db_sink_unsanitized: reaches,
+            propagates_to_return,
             sink_span,
         });
     }

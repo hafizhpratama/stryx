@@ -42,6 +42,11 @@ pub struct FileSummary {
     /// the default export).
     #[serde(default)]
     pub exports: HashMap<String, ExportedFunctionSummary>,
+    /// Top-level functions defined in this file but not exported.
+    /// Reachable only from the same file, but worth summarising so
+    /// in-file helpers contribute to taint propagation decisions.
+    #[serde(default)]
+    pub locals: HashMap<String, ExportedFunctionSummary>,
     /// Local-name → ImportRef, e.g. `"createUser"` → `("./lib", "createUser")`.
     #[serde(default)]
     pub imports: HashMap<String, ImportRef>,

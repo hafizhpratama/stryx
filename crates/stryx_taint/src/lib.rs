@@ -34,6 +34,13 @@ pub struct ParamFlow {
     /// DB write call where no sanitizer (`.parse`/`.safeParse`) cleared
     /// the taint along the way.
     pub reaches_db_sink_unsanitized: bool,
+    /// True iff the parameter's value flows back to the function's
+    /// return value (directly, or via member access / object/array
+    /// literal containment). Helpers like `toPaymentStatus(input)`
+    /// that only return constant strings have this set to false, so
+    /// callers don't propagate taint through them.
+    #[serde(default)]
+    pub propagates_to_return: bool,
     /// Where the sink lives, if known. Used so call-site findings can
     /// point readers to the actual write inside the callee.
     pub sink_span: Option<Span>,

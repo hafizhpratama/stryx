@@ -49,3 +49,27 @@ export async function honoCreate(c: any) {
   const data = CreateUserSchema.parse(await c.req.json());
   return db.session.create({ data });
 }
+
+// Drizzle variants with zod validation between source and sink.
+export async function drizzleInsert(req: NextRequest) {
+  const data = CreateUserSchema.parse(await req.json());
+  return db.insert(usersTable).values(data).run();
+}
+
+export async function drizzleUpdate(req: NextRequest) {
+  const data = CreateUserSchema.parse(await req.json());
+  return db.update(usersTable).set(data).where(eq(usersTable.id, 1));
+}
+
+// NestJS controller that pipes the @Body() through a class-validator
+// pipe before the repository write. (NestJS pipes happen at the
+// framework layer, not in user code, so even though we still see
+// `dto`, the assumption is real validation already happened. Stryx
+// can't tell — but if you go ZodValidationPipe + .parse here, taint
+// clears explicitly.)
+class UsersController {
+  async create(@Body() dto: any) {
+    const data = CreateUserSchema.parse(dto);
+    return this.userRepo.save(data);
+  }
+}

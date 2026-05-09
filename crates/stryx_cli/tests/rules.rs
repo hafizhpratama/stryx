@@ -145,8 +145,8 @@ fn unvalidated_body_to_db_bad_fixture_fires() {
         .collect();
     assert_eq!(
         findings.len(),
-        4,
-        "bad.ts has 4 vulnerable handlers (POST/PUT/PATCH + Hono), got {}: {:?}",
+        7,
+        "bad.ts has 7 vulnerable handlers (POST/PUT/PATCH + Hono + drizzle insert/update + NestJS), got {}: {:?}",
         findings.len(),
         findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
     );
