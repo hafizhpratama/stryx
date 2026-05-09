@@ -29,6 +29,7 @@ oxc_ast_visit = "0.129"
 oxc_parser    = "0.129"
 oxc_semantic  = "0.129"
 oxc_span      = "0.129"
+oxc_syntax    = "0.129"
 
 # Concurrency
 rayon         = "1.10"
@@ -59,6 +60,9 @@ async-trait   = "0.1"
 
 # Patterns
 regex         = "1"
+
+# Bench
+criterion     = { version = "0.8", features = ["html_reports"] }
 
 # Workspace-internal deps
 stryx_core      = { path = "crates/stryx_core",      version = "0.1.0-alpha.1" }

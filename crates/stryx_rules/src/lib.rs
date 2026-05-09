@@ -2,6 +2,7 @@
 //! consumes a `ParsedFile` and emits findings. The richer `interests()` /
 //! `taint_signature()` / `scope()` methods land alongside `stryx_taint`.
 
+pub mod flows;
 pub mod generic;
 pub mod registry;
 

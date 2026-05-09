@@ -10,6 +10,7 @@ pub use oxc_ast_visit::Visit;
 pub use oxc_parser::Parser;
 pub use oxc_semantic::{Semantic, SemanticBuilder};
 pub use oxc_span::{SourceType, Span as OxcSpan};
+pub use oxc_syntax::scope::ScopeFlags;
 
 use stryx_core::{Span, StryxError};
 

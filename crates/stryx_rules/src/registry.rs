@@ -1,4 +1,4 @@
-use crate::{generic, Rule};
+use crate::{flows, generic, Rule};
 use std::sync::Arc;
 
 /// Registry of all enabled rules for a scan. Rules are stored as `Arc<dyn Rule>`
@@ -27,5 +27,6 @@ impl RuleRegistry {
 pub fn builtin_rules() -> RuleRegistry {
     let mut reg = RuleRegistry::new();
     reg.register(Arc::new(generic::HardcodedSecret::new()));
+    reg.register(Arc::new(flows::UnvalidatedBodyToDb::new()));
     reg
 }

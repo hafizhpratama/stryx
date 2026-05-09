@@ -14,3 +14,14 @@ stryx_ast   = { workspace = true }
 stryx_index = { workspace = true }
 stryx_taint = { workspace = true }
 regex       = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name    = "hardcoded_secret"
+harness = false
+
+[[bench]]
+name    = "unvalidated_body_to_db"
+harness = false
