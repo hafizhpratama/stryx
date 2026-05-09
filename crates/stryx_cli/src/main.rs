@@ -116,18 +116,34 @@ fn cmd_scan(path: &Path, format_str: &str, fail_on: &str) -> Result<ExitCode> {
     // without re-reading from disk.
     let sources: Arc<DashMap<PathBuf, String>> = Arc::new(DashMap::new());
 
-    // Pass 1 — extract: each rule contributes optional FileSummary entries
-    // that we merge into a project index. Rules that don't need cross-file
-    // data simply contribute nothing.
-    let summaries: Vec<stryx_index::FileSummary> = files
-        .par_iter()
-        .flat_map_iter(|file| extract_file(file, &registry, &sources))
-        .collect();
+    // Pass 1 — iterative extract. On each round every rule sees the
+    // previous round's ProjectIndex, so summaries that depend on
+    // cross-file calls converge through multi-level chains (controller →
+    // service → repository). Capped at MAX_ITER as a safety net; in
+    // practice TS apps converge in 2–4 rounds because reachability is
+    // monotonic.
+    const MAX_ITER: usize = 10;
     let mut project_index = ProjectIndex::new();
-    for summary in summaries {
-        project_index.insert_file(summary);
+    let mut prev_signal = 0usize;
+    for round in 0..MAX_ITER {
+        let prev = Arc::new(project_index);
+        let summaries: Vec<stryx_index::FileSummary> = files
+            .par_iter()
+            .flat_map_iter(|file| extract_file(file, &registry, &sources, &prev))
+            .collect();
+        let mut next = ProjectIndex::new();
+        for summary in summaries {
+            next.insert_file(summary);
+        }
+        next.finalize();
+        let signal = sink_param_count(&next);
+        tracing::debug!(round, signal, "extract round");
+        project_index = next;
+        if round > 0 && signal == prev_signal {
+            break;
+        }
+        prev_signal = signal;
     }
-    project_index.finalize();
     let project_index = Arc::new(project_index);
 
     // Pass 2 — run: each rule sees the merged index and produces findings.
@@ -179,21 +195,33 @@ fn has_ts_extension(p: &Path) -> bool {
     )
 }
 
-/// Pass 1: parse the file and let each rule contribute a per-file summary.
-/// Sources are cached here so pass 2 doesn't have to read from disk.
+/// Pass 1: parse the file and let each rule contribute a per-file
+/// summary. The previous round's `ProjectIndex` is exposed so summaries
+/// can depend on cross-file calls already known to sink.
+///
+/// On the first round the source is read from disk and cached; later
+/// rounds reuse the cached source, so the iterative loop only pays for
+/// re-parsing each file (cheap with oxc).
 fn extract_file(
     file: &Path,
     registry: &Arc<RuleRegistry>,
     sources: &Arc<DashMap<PathBuf, String>>,
+    prev_index: &Arc<ProjectIndex>,
 ) -> Vec<stryx_index::FileSummary> {
-    let source = match std::fs::read_to_string(file) {
-        Ok(s) => s,
-        Err(err) => {
-            tracing::warn!(?file, %err, "skip unreadable file");
-            return Vec::new();
+    let source = if let Some(cached) = sources.get(file) {
+        cached.clone()
+    } else {
+        match std::fs::read_to_string(file) {
+            Ok(s) => {
+                sources.insert(file.to_path_buf(), s.clone());
+                s
+            }
+            Err(err) => {
+                tracing::warn!(?file, %err, "skip unreadable file");
+                return Vec::new();
+            }
         }
     };
-    sources.insert(file.to_path_buf(), source.clone());
 
     let allocator = Allocator::default();
     let parsed = match parse(&allocator, file, &source) {
@@ -206,7 +234,7 @@ fn extract_file(
 
     let ctx = RuleContext {
         file: &parsed,
-        index: None,
+        index: Some(prev_index),
     };
     let mut out = Vec::new();
     for rule in registry.rules() {
@@ -215,6 +243,19 @@ fn extract_file(
         }
     }
     out
+}
+
+/// Convergence signal: total number of (file, exported-fn, param)
+/// triples whose summary marks them as sinking unsanitised body taint
+/// to the database. Monotonic across iterations — only flips false→true
+/// — so a fixed point is reached in at most call-graph-depth rounds.
+fn sink_param_count(index: &ProjectIndex) -> usize {
+    index
+        .files()
+        .flat_map(|f| f.exports.values())
+        .flat_map(|e| e.params.iter())
+        .filter(|p| p.reaches_db_sink_unsanitized)
+        .count()
 }
 
 /// Pass 2: re-parse the file and run rules with access to the merged

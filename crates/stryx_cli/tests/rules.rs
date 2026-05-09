@@ -48,25 +48,44 @@ fn scan_dir(dir: &Path) -> Vec<Finding> {
 
     let registry = builtin_rules();
 
-    // Pass 1 — extract.
     let mut sources: std::collections::HashMap<PathBuf, String> = Default::default();
-    let mut index = ProjectIndex::new();
     for path in &files {
         let source = std::fs::read_to_string(path).expect("read");
         sources.insert(path.clone(), source);
     }
-    for path in &files {
-        let allocator = Allocator::default();
-        let source = sources.get(path).unwrap();
-        let parsed = parse(&allocator, path, source).expect("parse");
-        let ctx = RuleContext { file: &parsed, index: None };
-        for rule in registry.rules() {
-            if let Some(summary) = rule.extract(&ctx) {
-                index.insert_file(summary);
+
+    // Pass 1 — iterative extract (mirrors the CLI's fixed-point loop).
+    let mut index = ProjectIndex::new();
+    let mut prev_signal = 0usize;
+    for round in 0..10 {
+        let mut next = ProjectIndex::new();
+        for path in &files {
+            let allocator = Allocator::default();
+            let source = sources.get(path).unwrap();
+            let parsed = parse(&allocator, path, source).expect("parse");
+            let ctx = RuleContext {
+                file: &parsed,
+                index: Some(&index),
+            };
+            for rule in registry.rules() {
+                if let Some(summary) = rule.extract(&ctx) {
+                    next.insert_file(summary);
+                }
             }
         }
+        next.finalize();
+        let signal: usize = next
+            .files()
+            .flat_map(|f| f.exports.values())
+            .flat_map(|e| e.params.iter())
+            .filter(|p| p.reaches_db_sink_unsanitized)
+            .count();
+        index = next;
+        if round > 0 && signal == prev_signal {
+            break;
+        }
+        prev_signal = signal;
     }
-    index.finalize();
 
     // Pass 2 — run.
     let mut findings = Vec::new();
@@ -156,6 +175,37 @@ fn unvalidated_body_to_db_cross_file_bad_fires() {
         cross_file_finding.is_some(),
         "expected a cross-file finding on route.ts referencing createUser; got: {:?}",
         findings.iter().map(|f| (&f.span.file, &f.message)).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unvalidated_body_to_db_three_level_chain_bad_fires() {
+    // route → service → repo → prisma. Slice 2 v1's iterative summary
+    // computation must converge through three levels of indirection.
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/chain-bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    let route_path = dir.join("route.ts");
+    assert!(
+        findings.iter().any(|f| f.span.file == route_path && f.message.contains("signupUser")),
+        "expected a finding on route.ts referencing signupUser; got: {:?}",
+        findings.iter().map(|f| (&f.span.file, &f.message)).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unvalidated_body_to_db_three_level_chain_good_silent() {
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/chain-good");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "expected zero findings on chain-good/, got: {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
     );
 }
 

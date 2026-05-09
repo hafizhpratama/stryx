@@ -59,7 +59,11 @@ impl Rule for UnvalidatedBodyToDb {
     }
 
     fn extract<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> ExtractOutput {
-        Some(extract_summary(ctx.file.path.clone(), &ctx.file.program))
+        Some(extract_summary(
+            ctx.file.path.clone(),
+            &ctx.file.program,
+            ctx.index,
+        ))
     }
 
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
@@ -697,7 +701,11 @@ fn collect_binding_names(pat: &BindingPattern<'_>) -> Vec<String> {
 
 // ── Slice 2: per-file summary extraction ────────────────────────────────
 
-fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
+fn extract_summary(
+    file: PathBuf,
+    program: &Program<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
+) -> FileSummary {
     let mut summary = FileSummary {
         path: file.clone(),
         ..Default::default()
@@ -709,10 +717,10 @@ fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
                 collect_imports(decl, &mut summary);
             }
             Statement::ExportNamedDeclaration(decl) => {
-                collect_named_exports(&file, decl, &mut summary);
+                collect_named_exports(&file, decl, index, &mut summary);
             }
             Statement::ExportDefaultDeclaration(decl) => {
-                collect_default_export(&file, &decl.declaration, &mut summary);
+                collect_default_export(&file, &decl.declaration, index, &mut summary);
             }
             _ => {}
         }
@@ -761,6 +769,7 @@ fn collect_imports(decl: &ImportDeclaration<'_>, summary: &mut FileSummary) {
 fn collect_named_exports(
     file: &std::path::Path,
     decl: &ExportNamedDeclaration<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
     summary: &mut FileSummary,
 ) {
     let Some(declaration) = &decl.declaration else {
@@ -769,8 +778,13 @@ fn collect_named_exports(
     match declaration {
         Declaration::FunctionDeclaration(func) => {
             if let Some(name) = func.id.as_ref().map(|id| id.name.to_string())
-                && let Some(s) =
-                    summarise_function(file, &name, &func.params, func.body.as_deref())
+                && let Some(s) = summarise_function(
+                    file,
+                    &name,
+                    &func.params,
+                    func.body.as_deref(),
+                    index,
+                )
             {
                 summary.exports.insert(name, s);
             }
@@ -781,7 +795,7 @@ fn collect_named_exports(
                     continue;
                 };
                 let Some(init) = &declarator.init else { continue };
-                if let Some(s) = summarise_initialiser(file, &name, init) {
+                if let Some(s) = summarise_initialiser(file, &name, init, index) {
                     summary.exports.insert(name, s);
                 }
             }
@@ -793,17 +807,23 @@ fn collect_named_exports(
 fn collect_default_export(
     file: &std::path::Path,
     decl: &ExportDefaultDeclarationKind<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
     summary: &mut FileSummary,
 ) {
     let s = match decl {
-        ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
-            summarise_function(file, "default", &func.params, func.body.as_deref())
-        }
+        ExportDefaultDeclarationKind::FunctionDeclaration(func) => summarise_function(
+            file,
+            "default",
+            &func.params,
+            func.body.as_deref(),
+            index,
+        ),
         ExportDefaultDeclarationKind::ArrowFunctionExpression(arrow) => Some(summarise_arrow(
             file,
             "default",
             &arrow.params,
             &arrow.body,
+            index,
         )),
         _ => None,
     };
@@ -816,16 +836,18 @@ fn summarise_initialiser(
     file: &std::path::Path,
     name: &str,
     init: &Expression<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
 ) -> Option<ExportedFunctionSummary> {
     match init {
         Expression::FunctionExpression(func) => {
-            summarise_function(file, name, &func.params, func.body.as_deref())
+            summarise_function(file, name, &func.params, func.body.as_deref(), index)
         }
         Expression::ArrowFunctionExpression(arrow) => Some(summarise_arrow(
             file,
             name,
             &arrow.params,
             &arrow.body,
+            index,
         )),
         _ => None,
     }
@@ -836,9 +858,10 @@ fn summarise_function(
     name: &str,
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: Option<&FunctionBody<'_>>,
+    index: Option<&stryx_index::ProjectIndex>,
 ) -> Option<ExportedFunctionSummary> {
     let body_stmts = body.map(|b| b.statements.as_slice()).unwrap_or(&[]);
-    Some(build_summary(file, name, params, body_stmts))
+    Some(build_summary(file, name, params, body_stmts, index))
 }
 
 fn summarise_arrow(
@@ -846,8 +869,9 @@ fn summarise_arrow(
     name: &str,
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: &FunctionBody<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
 ) -> ExportedFunctionSummary {
-    build_summary(file, name, params, &body.statements)
+    build_summary(file, name, params, &body.statements, index)
 }
 
 fn build_summary(
@@ -855,6 +879,7 @@ fn build_summary(
     name: &str,
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: &[Statement<'_>],
+    index: Option<&stryx_index::ProjectIndex>,
 ) -> ExportedFunctionSummary {
     let param_names: Vec<String> = params
         .items
@@ -866,10 +891,12 @@ fn build_summary(
 
     let mut params_out = Vec::with_capacity(param_names.len());
     for pname in &param_names {
-        // Run the same flow visitor over the function body with this
-        // parameter pre-tainted. If any sink fires, the param sinks to
-        // the DB without sanitisation along the path.
-        let mut visitor = FlowVisitor::new(file.to_path_buf(), None);
+        // Run the flow visitor over the function body with just this
+        // parameter pre-tainted. The visitor consults the *previous
+        // iteration's* index, so cross-file calls already known to sink
+        // contribute too — that's what makes summaries converge through
+        // multi-level chains (controller → service → repository).
+        let mut visitor = FlowVisitor::new(file.to_path_buf(), index);
         visitor.enter_fn();
         visitor.taint(pname.clone());
         for stmt in body {
