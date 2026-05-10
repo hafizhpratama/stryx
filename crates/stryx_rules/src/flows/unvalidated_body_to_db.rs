@@ -2016,6 +2016,10 @@ fn build_summary(
             reaches_db_sink_unsanitized: reaches,
             propagates_to_return,
             sink_span,
+            // Slice-2 of ADR 0006 will populate this from the visitor's
+            // recorded offsets. For now the boolean above is the source
+            // of truth.
+            tainted_offsets: Vec::new(),
         });
     }
 

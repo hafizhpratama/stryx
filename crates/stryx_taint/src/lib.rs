@@ -23,6 +23,28 @@ pub enum TaintLabel {
     DbRow,
 }
 
+/// A field/index offset into a tainted parameter. Phase 1 of the
+/// shape-lattice migration (ADR 0006): instead of "this whole parameter
+/// is tainted," summaries record *which fields/indexes* flow to a sink.
+/// Phase 2 will absorb this list into a full `Cell { xtaint, shape }`
+/// tree; for now a flat list is enough to lift where-clause severity
+/// and validated-field suppression beyond what whole-arg booleans can
+/// express.
+///
+/// `Field` is JS/TS-aware: `obj.a` and `obj["a"]` yield the same
+/// offset, matching Semgrep's `Ofld == Ostr` unification.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Offset {
+    /// Named field access: `param.field` or `param["field"]`.
+    Field(String),
+    /// Constant numeric index: `param[0]`.
+    Index(u32),
+    /// Non-constant index — `param[i]` where `i` isn't a literal.
+    /// Acts as the wildcard offset; collapses into Phase 2's `Oany`.
+    Any,
+}
+
 /// What happens to taint that enters a function through a single
 /// parameter. Per-rule for now — the flow rule populates this for the
 /// `UserInput` label.
@@ -33,7 +55,22 @@ pub struct ParamFlow {
     /// True iff there is a control-flow path from this parameter to a
     /// DB write call where no sanitizer (`.parse`/`.safeParse`) cleared
     /// the taint along the way.
+    ///
+    /// Slice-1 transitional state per ADR 0006 — coexists with
+    /// [`tainted_offsets`](Self::tainted_offsets) until slice 2 starts
+    /// populating offsets and slice 3 collapses this field into a
+    /// derived accessor (`!self.tainted_offsets.is_empty()`).
     pub reaches_db_sink_unsanitized: bool,
+    /// Which field/index offsets of this parameter flow to a sink, if
+    /// the rule populating the summary records that detail. Empty list
+    /// means either "no taint reaches a sink" or "the rule has not yet
+    /// migrated to record offsets" — disambiguate via
+    /// [`reaches_db_sink_unsanitized`](Self::reaches_db_sink_unsanitized)
+    /// during the slice-1/2 window.
+    ///
+    /// See ADR 0006 (shape lattice) for the migration plan.
+    #[serde(default)]
+    pub tainted_offsets: Vec<Offset>,
     /// True iff the parameter's value flows back to the function's
     /// return value (directly, or via member access / object/array
     /// literal containment). Helpers like `toPaymentStatus(input)`
@@ -78,5 +115,40 @@ impl ExportedFunctionSummary {
         self.params
             .get(idx)
             .is_some_and(|p| p.reaches_db_sink_unsanitized)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn offset_serde_roundtrips() {
+        let offsets = vec![
+            Offset::Field("body".into()),
+            Offset::Field("where".into()),
+            Offset::Index(0),
+            Offset::Any,
+        ];
+        let json = serde_json::to_string(&offsets).unwrap();
+        let back: Vec<Offset> = serde_json::from_str(&json).unwrap();
+        assert_eq!(offsets, back);
+    }
+
+    #[test]
+    fn paramflow_with_empty_offsets_deserializes_from_pre_slice1_json() {
+        // Pre-slice-1 cache entries have no `tainted_offsets` key.
+        // They must still deserialize, with the field defaulting to
+        // empty — a safe under-approximation per the slice-1
+        // transitional contract. Guards the cache-rollover behaviour
+        // from ADR 0005.
+        let pre = r#"{
+            "name": "handler",
+            "reaches_db_sink_unsanitized": true,
+            "propagates_to_return": false
+        }"#;
+        let pf: ParamFlow = serde_json::from_str(pre).unwrap();
+        assert!(pf.reaches_db_sink_unsanitized);
+        assert!(pf.tainted_offsets.is_empty());
     }
 }
