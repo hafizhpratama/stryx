@@ -6,6 +6,29 @@ The project-level read-only index that powers cross-file analysis.
 > first for *why* a project index exists. Read [`taint-engine.md`](taint-engine.md)
 > for the engine that queries it most heavily.
 
+## Implementation status (as of v0.0.1)
+
+This document mixes shipped behaviour with design intent. The
+following are **not yet implemented** — flagged inline with 📋:
+
+- `re_export_chain` traversal in `SymbolEntry` — the implemented
+  `ProjectIndex::resolve` does *one* hop only. Barrel files
+  (`export * from "./other"`) are silently dropped. Phase 2 fix.
+- tsconfig path-alias resolution (`@/lib/db`, `~/lib/db`,
+  `#internal/db`) — `is_relative_specifier` rejects anything not
+  starting with `./` or `../`. Phase 2 fix.
+- On-disk SQLite cache at `~/.cache/stryx/index/` — not in code.
+  v0.0.1 rebuilds the index every scan from in-memory parse results.
+- Tarjan SCC detection on circular imports — not in code. Cycles in
+  the import graph are handled by the resolver returning `None` on
+  the second hop, which is conservative but loses precision.
+
+What **is** built: `FileSummary` per file with exports/locals/
+imports/classes maps; `ProjectIndex::resolve` and `resolve_summary`
+walking the import map for relative specifiers; per-file extract
+populated by `flow/unvalidated-body-to-db`'s extract pass; `classes`
+field for class-method resolution (NestJS-shaped controllers).
+
 ## What it is and why it exists
 
 The semantic index is a project-level data structure built once per
@@ -54,6 +77,7 @@ pub struct SymbolEntry {
     span: Span,
     kind: SymbolKind,         // Function | Const | Class | Type | Enum
     exported: bool,
+    // 📋 Phase 2 — barrel-file `export * from "./other"` chains.
     re_export_chain: Option<Vec<SymbolId>>,
 }
 
@@ -221,9 +245,10 @@ invalidates when we add or change entry types.
 Storage layers:
 
 1. **In-process** — `dashmap::DashMap<CacheKey, FileIndexEntries>`
-   for the duration of a scan
-2. **On-disk** — `~/.cache/stryx/index/` SQLite for repeat scans
-   across CLI invocations; entries expire after 30 days unused
+   for the duration of a scan (v0.0.1)
+2. 📋 **On-disk** — `~/.cache/stryx/index/` SQLite for repeat scans
+   across CLI invocations; entries expire after 30 days unused.
+   Phase 2.
 
 Invalidation is implicit: same content + same parser + same schema =
 same answer. If any of those change, the hash changes and we re-extract.
@@ -272,12 +297,15 @@ schema changes.
 
 What happens when extraction or queries fail:
 
-- **Symbol re-export chain too deep (>5 hops)**: mark the symbol as
-  `opaque` in the resolve path; log at `warn` level. Cross-file rules
-  treat opaque symbols pessimistically (assume taint passes through).
-- **Circular imports**: detected via Tarjan SCC during merge; treated
-  as normal — TypeScript supports them. Symbol resolution prefers the
-  file that declares the symbol, not the file that re-exports.
+- 📋 **Symbol re-export chain too deep (>5 hops)**: mark the symbol
+  as `opaque` in the resolve path; log at `warn` level. Cross-file
+  rules treat opaque symbols pessimistically (assume taint passes
+  through). v0.0.1 does *one* hop only.
+- 📋 **Circular imports**: planned to be detected via Tarjan SCC
+  during merge; treated as normal — TypeScript supports them. Symbol
+  resolution prefers the file that declares the symbol, not the file
+  that re-exports. v0.0.1's resolver returns `None` on a missing
+  hop, which is conservative but loses precision on cycles.
 - **Parse failure on a file**: file is excluded from the index entirely
   (no entries contributed); scan continues; we log the file path so
   users can investigate.

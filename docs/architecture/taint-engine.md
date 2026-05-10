@@ -6,6 +6,30 @@ reaches a dangerous sink unsanitized.
 > Foundational reference. Read [ADR 0003](../decisions/0003-cross-file-and-taint-as-core.md)
 > first for *why* taint analysis is v0.1 core.
 
+## Implementation status (as of v0.0.1)
+
+This document mixes shipped behaviour with design intent. The
+following are **not yet implemented** and are flagged inline with
+📋:
+
+- The `Source` / `Sink` / `Sanitizer` trait surface below — the
+  v0.1 reference rule (`flow/unvalidated-body-to-db`) is hand-rolled
+  with hardcoded matchers, not these traits. The traits will land
+  when rule #4 needs the abstraction.
+- On-disk SQLite summary cache at `~/.cache/stryx/summaries/` — not
+  in `scan()`. Phase 2.
+- SCC detection on the call graph — not implemented. The bounded
+  iteration cap (`MAX_ITER = 10`) is the current substitute; SCCs
+  will replace it in Phase 2.
+- `UncertainZone` emission and Layer 3 LLM escalation — vocabulary
+  exists in `stryx_core`; no rule emits zones yet.
+
+What **is** built: the boolean `ParamFlow` summary lattice
+(`crates/stryx_taint/src/lib.rs`), the per-file extract pass +
+iterative project-index fixed-point in `crates/stryx_cli/src/lib.rs`,
+the cross-file `lookup_callee_summary` resolution path, and the three
+v0.1 flow rules.
+
 ## What it is and why it exists
 
 Most security-relevant AI failures in TypeScript are **taint flow problems**:
@@ -28,6 +52,12 @@ When the engine cannot trace a flow with confidence, it emits an
 question. This is the LLM's primary architectural role.
 
 ## Core abstractions
+
+> 📋 Design intent — the Source/Sink/Sanitizer trait surface below is
+> not the v0.1 rule extension surface. v0.1 rules implement the
+> `crate::Rule` trait directly and hand-roll their matchers. The
+> trait split below is the planned refactor target for when the rule
+> count makes the abstraction worth its weight.
 
 Three traits, one label set, one shared context:
 
@@ -147,21 +177,34 @@ analysis:
 4. Compute the summary and store it keyed by `blake3(function_body_source)`.
 5. Free the re-parsed arena.
 
-Subsequent calls hit the cache. The on-disk cache at
-`~/.cache/stryx/summaries/` survives across scans on the same
-machine.
+Subsequent calls hit the cache.
+
+📋 Design intent: an on-disk cache at `~/.cache/stryx/summaries/` for
+repeat scans on the same machine. v0.0.1 keeps summaries in-memory
+only.
 
 ### Cycles and recursion
 
 Call graphs in real codebases have cycles (mutual recursion, framework
-plugins, dependency injection patterns). We handle them with:
+plugins, dependency injection patterns). v0.0.1 handles them with a
+single mechanism:
 
-- **SCC detection** on the call graph from `stryx_index`
-- **Widening**: when re-entering a function whose summary is being
-  computed, treat its return as carrying every label its parameters
-  carry — pessimistic but safe
-- **Recursion depth cap**: 3 hops by default, configurable. Beyond the
-  cap we bail to LLM with the full call chain in the zone.
+- **Bounded iteration**: the engine runs the per-file extract pass
+  for at most `MAX_ITER = 10` rounds (`crates/stryx_cli/src/lib.rs`),
+  consulting the previous round's `ProjectIndex` each time. Pure
+  recursion converges fine because the lattice is finite (two-element
+  product over `(file, exported_fn, param_idx)`); mutual recursion
+  through a cycle longer than 10 hops is silently under-approximated
+  and is the chief soundness limitation users should be aware of.
+
+📋 Design intent (Phase 2):
+
+- **SCC detection** on the call graph using Tarjan's algorithm,
+  iterating each SCC to its own fixed-point in topological order.
+  Replaces the bounded-iteration cap with proper convergence.
+- **`UncertainZone` emission** when a flow exits via the iteration
+  cap without converging, escalating the residual question to Layer
+  3 instead of silently dropping the finding.
 
 ### Across npm dependency boundaries
 
@@ -304,8 +347,8 @@ Targets, p99:
 
 The function-summary cache is the load-bearing optimization. Without
 it, re-analyzing every function on every scan is intractable on real
-monorepos. The on-disk cache at `~/.cache/stryx/summaries/` survives
-across scans on the same machine.
+monorepos. 📋 In v0.0.1 the cache is in-memory only; an on-disk
+cache at `~/.cache/stryx/summaries/` is planned for Phase 2.
 
 CI fails if the warm whole-project taint pass on the standard 100k-LoC
 fixture exceeds 1.5s.
