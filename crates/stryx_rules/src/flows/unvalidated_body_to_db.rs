@@ -91,9 +91,15 @@ impl Rule for UnvalidatedBodyToDb {
 struct FlowVisitor<'idx> {
     file: PathBuf,
     findings: Vec<Finding>,
-    /// Stack of per-function scopes. Each frame holds the names of local
-    /// identifiers currently carrying request-body taint.
-    scopes: Vec<HashSet<String>>,
+    /// Stack of per-function scopes. Each frame maps the name of a
+    /// tainted local identifier to its tracked [`Cell`] shape.
+    /// Pre-Phase-3 the stack was `Vec<HashSet<String>>` (just names);
+    /// per-local shape tracking was added as substrate for slice 3.5
+    /// (cross-file return-shape propagation at variable bindings).
+    /// `taint(name)` continues to insert `Cell::tainted([UserInput])`
+    /// for backward compatibility; `taint_with_shape(name, cell)`
+    /// lets callers attach a richer shape when they know one.
+    scopes: Vec<std::collections::HashMap<String, Cell>>,
     /// Read-only project index; `Some` during the run pass, `None`
     /// during summary extraction.
     index: Option<&'idx stryx_index::ProjectIndex>,
@@ -169,19 +175,37 @@ impl<'idx> FlowVisitor<'idx> {
     }
 
     fn enter_fn(&mut self) {
-        self.scopes.push(HashSet::new());
+        self.scopes.push(std::collections::HashMap::new());
     }
 
     fn exit_fn(&mut self) {
         self.scopes.pop();
     }
 
-    fn current_scope_mut(&mut self) -> Option<&mut HashSet<String>> {
+    fn current_scope_mut(&mut self) -> Option<&mut std::collections::HashMap<String, Cell>> {
         self.scopes.last_mut()
     }
 
     fn is_tainted(&self, name: &str) -> bool {
-        self.scopes.iter().rev().any(|scope| scope.contains(name))
+        self.scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains_key(name))
+    }
+
+    /// Look up the tracked shape of a tainted local. Returns `None` if
+    /// the name isn't tainted in any active scope. Slice 2.5+ ground
+    /// truth: callers that need to consume the local's shape (e.g.
+    /// the cross-file return-shape consumer in slice 3.5) should
+    /// read this.
+    #[allow(dead_code)]
+    fn local_shape(&self, name: &str) -> Option<&Cell> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(cell) = scope.get(name) {
+                return Some(cell);
+            }
+        }
+        None
     }
 
     /// Body-source recognition gated by the validation-wrapper
@@ -204,8 +228,22 @@ impl<'idx> FlowVisitor<'idx> {
     }
 
     fn taint(&mut self, name: String) {
+        // Default: whole-value taint (`Tainted+Bot`). Most callers
+        // don't yet track shape on the RHS — this preserves the
+        // pre-Phase-3 behavior for `is_tainted(name)` checks while
+        // letting future call sites use `taint_with_shape` to
+        // attach precision when they have it.
+        self.taint_with_shape(name, Cell::tainted(vec![TaintLabel::UserInput]));
+    }
+
+    /// Track `name` as carrying the given `Cell` shape in the current
+    /// scope. Callers with a known shape (e.g. slice 3.5's variable-
+    /// declarator consumer that calls `instantiate_tainted` on a
+    /// callee's return_shape) use this directly.
+    #[allow(dead_code)]
+    fn taint_with_shape(&mut self, name: String, cell: Cell) {
         if let Some(scope) = self.current_scope_mut() {
-            scope.insert(name);
+            scope.insert(name, cell);
         }
     }
 
