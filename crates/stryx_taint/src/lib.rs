@@ -289,6 +289,34 @@ impl Cell {
         }
     }
 
+    /// Replace every `Shape::Arg(id)` reachable through this cell
+    /// where `id.fn_id == fn_id_to_strip` with `Shape::Bot`. Slice
+    /// 2.3b of ADR 0006 — the instantiation primitive used to
+    /// remove a callee's polymorphic placeholders before grafting
+    /// the callee's shape into a caller's tree.
+    ///
+    /// **Wiring status (honest):** the cross-file site in
+    /// `flow/unvalidated-body-to-db` only fires when the callee
+    /// recorded at least one sink observation, which means the
+    /// callee's shape is concrete (`Tainted+Bot` or `Obj{...}`),
+    /// never `Arg`. So this helper is not yet called in production —
+    /// it lives here as the substrate that future slices with
+    /// return-shape tracking (where `Arg` *does* propagate into
+    /// caller-visible shapes) will need.
+    pub fn strip_arg_for(&mut self, fn_id_to_strip: &str) {
+        if let Shape::Arg(id) = &self.shape
+            && id.fn_id == fn_id_to_strip
+        {
+            self.shape = Shape::Bot;
+            return;
+        }
+        if let Shape::Obj(map) = &mut self.shape {
+            for cell in map.values_mut() {
+                cell.strip_arg_for(fn_id_to_strip);
+            }
+        }
+    }
+
     /// Recursively count Tainted leaves reachable through this cell.
     /// Used by [`ConvergenceSignal::tainted_leaf_total`] in
     /// `stryx_cli` to detect shape growth across fix-point
@@ -946,6 +974,58 @@ mod tests {
         )]);
         target.merge_into(&arg_cell(arg_id("f", 0)));
         assert!(matches!(target.shape, Shape::Obj(_)));
+    }
+
+    // ── strip_arg_for tests (slice 2.3b of ADR 0006) ────────────────────
+
+    #[test]
+    fn strip_arg_for_replaces_matching_arg_with_bot() {
+        let mut cell = arg_cell(arg_id("helper", 0));
+        cell.strip_arg_for("helper");
+        assert_eq!(cell.shape, Shape::Bot);
+    }
+
+    #[test]
+    fn strip_arg_for_leaves_non_matching_arg_alone() {
+        let mut cell = arg_cell(arg_id("helper", 0));
+        cell.strip_arg_for("other_fn");
+        assert!(matches!(cell.shape, Shape::Arg(_)));
+    }
+
+    #[test]
+    fn strip_arg_for_recurses_into_obj_map() {
+        // Outer Obj contains an inner Arg cell. After strip_arg_for,
+        // the inner Arg is Bot but the outer Obj structure is intact.
+        let mut cell = obj(vec![
+            (
+                Offset::Field("a".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            ),
+            (Offset::Field("b".into()), arg_cell(arg_id("helper", 0))),
+        ]);
+        cell.strip_arg_for("helper");
+        match &cell.shape {
+            Shape::Obj(map) => {
+                let b = map.get(&Offset::Field("b".into())).unwrap();
+                assert_eq!(b.shape, Shape::Bot);
+                // The Tainted entry under `a` is unchanged.
+                let a = map.get(&Offset::Field("a".into())).unwrap();
+                assert!(matches!(a.xtaint, Xtaint::Tainted(_)));
+            }
+            other => panic!("expected Obj, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn strip_arg_for_does_not_touch_bot_or_tainted_leaves() {
+        // Strip should be a no-op when the cell carries no Arg.
+        let mut cell = obj(vec![(
+            Offset::Field("a".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        )]);
+        let original = cell.clone();
+        cell.strip_arg_for("anywhere");
+        assert_eq!(cell, original);
     }
 
     #[test]
