@@ -26,14 +26,18 @@ pub enum TaintLabel {
 /// A field/index offset into a tainted parameter. Phase 1 of the
 /// shape-lattice migration (ADR 0006): instead of "this whole parameter
 /// is tainted," summaries record *which fields/indexes* flow to a sink.
-/// Phase 2 will absorb this list into a full `Cell { xtaint, shape }`
-/// tree; for now a flat list is enough to lift where-clause severity
-/// and validated-field suppression beyond what whole-arg booleans can
-/// express.
+/// Phase 2 absorbs this into a full [`Cell`]/[`Shape`] tree where
+/// `Offset` is the key type for [`Shape::Obj`].
 ///
 /// `Field` is JS/TS-aware: `obj.a` and `obj["a"]` yield the same
 /// offset, matching Semgrep's `Ofld == Ostr` unification.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+///
+/// The derived `Ord` is the canonical ordering used by [`Shape::Obj`]'s
+/// `BTreeMap` key — Field < Index < Any, with Field and Index sorted
+/// by their inner value. Phase 1's `offset_sort_key` helper produces
+/// the same ordering and will be retired in slice 2.1c when the
+/// flat-`Vec<Offset>` API is replaced by shape-aware queries.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Offset {
     /// Named field access: `param.field` or `param["field"]`.
@@ -41,8 +45,156 @@ pub enum Offset {
     /// Constant numeric index: `param[0]`.
     Index(u32),
     /// Non-constant index — `param[i]` where `i` isn't a literal.
-    /// Acts as the wildcard offset; collapses into Phase 2's `Oany`.
+    /// Acts as the wildcard "any offset" key in [`Shape::Obj`];
+    /// matches Semgrep's `Oany`.
     Any,
+}
+
+/// Explicit taint status of a [`Cell`] — Semgrep's `Xtaint.t`. The
+/// three cases are deliberately distinguished from "no entry in the
+/// shape map":
+///
+/// - [`Xtaint::None`] — no explicit taint *and* no explicit cleanness;
+///   the cell inherits whatever taint a "parent" cell carries. Phase 2
+///   invariant: a cell with `xtaint == None` must have a non-`Bot`
+///   shape that transitively reaches a `Tainted`/`Clean` cell — an
+///   isolated `Cell { None, Bot }` is meaningless and slice 2.1b's
+///   canonicalize will remove it.
+/// - [`Xtaint::Tainted`] — explicitly tainted with a set of labels.
+///   The Vec is treated as a set; insertion-time dedupe is the
+///   producer's responsibility, and ordering is normalised on
+///   canonicalize.
+/// - [`Xtaint::Clean`] — explicitly clean. Phase 2 invariant: a
+///   `Clean` cell must have shape `Bot` (any sub-structure is
+///   subsumed by the cleanness mark).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Xtaint {
+    /// Inherits taint from the surrounding cell. Used as a placeholder
+    /// when sub-structure is being tracked but the cell itself has no
+    /// direct mark (`x.a := taint` makes `x.a` Tainted but `x` itself
+    /// stays None until the analysis decides otherwise).
+    None,
+    /// Explicit taint with a list of labels. Treat as a set —
+    /// duplicates are a producer bug. Empty list means "tainted with
+    /// no labels yet known," distinct from `None` semantically: this
+    /// cell IS tainted, we just haven't classified the source.
+    Tainted(Vec<TaintLabel>),
+    /// Explicit cleanness — a sanitiser ran. A `Clean` cell shadows
+    /// any inherited taint from parent cells.
+    Clean,
+}
+
+/// A taint shape — Semgrep's `shape` from `Shape_and_sig.ml`. A shape
+/// approximates the *structure* of a value being tracked, with each
+/// reachable cell carrying its own [`Xtaint`].
+///
+/// Slice 2.1a ships only [`Shape::Bot`] and [`Shape::Obj`]. The
+/// polymorphic-parameter constructor (`Arg`) lands in slice 2.3 and
+/// the higher-order-function constructor (`Fun`) in slice 2.4.
+///
+/// `Obj` keys are [`Offset`]s, sorted via the derived `Ord` so
+/// serialised summaries are deterministic. JS/TS dot-vs-bracket
+/// access (`x.a` and `x["a"]`) collapses to the same `Field` offset
+/// at construction time per [`Offset`]'s contract.
+///
+/// On the wire, `Obj` is encoded as a sequence of `[offset, cell]`
+/// pairs (sorted by offset) rather than a JSON object, because JSON
+/// requires string keys but our key is an enum. The `BTreeMap` shape
+/// is preserved in-memory for ergonomic canonicalize logic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind", content = "data")]
+pub enum Shape {
+    /// "_|_" — don't know or don't care. Used for primitive values,
+    /// untracked sub-structure, and (per the `Clean`-cell invariant)
+    /// the body of any explicitly-clean cell.
+    Bot,
+    /// Struct/dict/tuple-like. Tuples and array-with-constant-index
+    /// reads are also recorded here, with `Offset::Index` for
+    /// constant indexes and `Offset::Any` for the wildcard. Missing
+    /// keys inherit from the surrounding cell's xtaint.
+    Obj(#[serde(with = "offset_map_serde")] std::collections::BTreeMap<Offset, Cell>),
+}
+
+/// Serde adapter that encodes a `BTreeMap<Offset, V>` as a sorted
+/// sequence of `[offset, value]` pairs. Required because JSON
+/// requires string keys but [`Offset`] is an enum. The output is
+/// deterministic (BTreeMap iteration order, which is the derived
+/// `Ord` on [`Offset`]) so cache keys per ADR 0005 stay stable.
+mod offset_map_serde {
+    use super::Offset;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::BTreeMap;
+
+    pub fn serialize<S, V>(map: &BTreeMap<Offset, V>, ser: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+        V: Serialize,
+    {
+        let pairs: Vec<(&Offset, &V)> = map.iter().collect();
+        pairs.serialize(ser)
+    }
+
+    pub fn deserialize<'de, D, V>(de: D) -> Result<BTreeMap<Offset, V>, D::Error>
+    where
+        D: Deserializer<'de>,
+        V: Deserialize<'de>,
+    {
+        let pairs: Vec<(Offset, V)> = Vec::deserialize(de)?;
+        Ok(pairs.into_iter().collect())
+    }
+}
+
+/// A "cell" — Semgrep's `cell = Cell of Xtaint.t * shape`. Represents
+/// the storage of a value: the [`Xtaint`] mark plus the [`Shape`] of
+/// any sub-structure being tracked.
+///
+/// Phase 2 invariants (enforced by `Cell::canonicalize` in slice
+/// 2.1b, documented here so producers can build canonical cells
+/// directly when convenient):
+///
+/// 1. If `xtaint == Xtaint::None`, then `shape != Shape::Bot` and
+///    the shape transitively reaches a `Tainted`/`Clean` cell.
+///    Otherwise the cell carries no information and should be
+///    omitted from its parent map.
+/// 2. If `xtaint == Xtaint::Clean`, then `shape == Shape::Bot`.
+///    Cleanness shadows sub-structure; any `Obj` content under a
+///    `Clean` cell is meaningless.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Cell {
+    pub xtaint: Xtaint,
+    pub shape: Shape,
+}
+
+impl Cell {
+    /// The "bottom" cell — no taint, no structure. Used as the
+    /// default starting state and as the canonical leaf for
+    /// primitive-typed positions.
+    pub fn bot() -> Self {
+        Self {
+            xtaint: Xtaint::None,
+            shape: Shape::Bot,
+        }
+    }
+
+    /// A cell explicitly tainted with the given labels, no
+    /// sub-structure. Convenience for the common "this whole value
+    /// just got tainted" case.
+    pub fn tainted(labels: Vec<TaintLabel>) -> Self {
+        Self {
+            xtaint: Xtaint::Tainted(labels),
+            shape: Shape::Bot,
+        }
+    }
+
+    /// An explicitly-clean cell. Per invariant 2, its shape must be
+    /// `Bot` — this constructor enforces that at the type level.
+    pub fn clean() -> Self {
+        Self {
+            xtaint: Xtaint::Clean,
+            shape: Shape::Bot,
+        }
+    }
 }
 
 /// What happens to taint that enters a function through a single
@@ -150,5 +302,107 @@ mod tests {
         let pf: ParamFlow = serde_json::from_str(pre).unwrap();
         assert!(pf.reaches_db_sink_unsanitized);
         assert!(pf.tainted_offsets.is_empty());
+    }
+
+    #[test]
+    fn offset_ord_matches_phase1_sort_key() {
+        // Phase 1's `offset_sort_key` defined Field < Index < Any, with
+        // Field/Index sorted by inner value. The derived `Ord` on
+        // `Offset` (which BTreeMap uses) must match — otherwise
+        // serialised summaries from Phase 1 would deserialize into a
+        // differently-ordered tree on Phase 2 readback.
+        let mut items = vec![
+            Offset::Any,
+            Offset::Index(2),
+            Offset::Field("z".into()),
+            Offset::Index(0),
+            Offset::Field("a".into()),
+        ];
+        items.sort();
+        assert_eq!(
+            items,
+            vec![
+                Offset::Field("a".into()),
+                Offset::Field("z".into()),
+                Offset::Index(0),
+                Offset::Index(2),
+                Offset::Any,
+            ],
+        );
+    }
+
+    #[test]
+    fn cell_constructors_produce_canonical_shapes() {
+        // The three convenience constructors must satisfy the Phase 2
+        // invariants documented on `Cell`. `bot()` is non-canonical
+        // by design (xtaint=None + shape=Bot violates invariant 1),
+        // and slice 2.1b's canonicalize will reject/erase it from a
+        // parent map; here we just check the constructor produces
+        // what its name claims.
+        assert_eq!(
+            Cell::bot(),
+            Cell {
+                xtaint: Xtaint::None,
+                shape: Shape::Bot
+            }
+        );
+        let t = Cell::tainted(vec![TaintLabel::UserInput]);
+        assert_eq!(t.xtaint, Xtaint::Tainted(vec![TaintLabel::UserInput]));
+        assert_eq!(t.shape, Shape::Bot);
+        // Invariant 2 is structural: `Cell::clean()` always emits Bot.
+        let c = Cell::clean();
+        assert_eq!(c.xtaint, Xtaint::Clean);
+        assert_eq!(c.shape, Shape::Bot);
+    }
+
+    #[test]
+    fn shape_serde_roundtrips_through_obj_with_nested_cells() {
+        use std::collections::BTreeMap;
+        // Construct a representative shape: an outer Obj with two
+        // fields, one tainted (Tainted/Bot) and one with a nested Obj
+        // tracking a single sub-field. Round-trip through JSON and
+        // assert equality.
+        let mut inner_map = BTreeMap::new();
+        inner_map.insert(
+            Offset::Field("nested".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        );
+        let mut outer_map = BTreeMap::new();
+        outer_map.insert(
+            Offset::Field("a".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        );
+        outer_map.insert(
+            Offset::Field("b".into()),
+            Cell {
+                xtaint: Xtaint::None,
+                shape: Shape::Obj(inner_map),
+            },
+        );
+        let cell = Cell {
+            xtaint: Xtaint::None,
+            shape: Shape::Obj(outer_map),
+        };
+        let json = serde_json::to_string(&cell).unwrap();
+        let back: Cell = serde_json::from_str(&json).unwrap();
+        assert_eq!(cell, back);
+    }
+
+    #[test]
+    fn xtaint_serde_distinguishes_none_clean_and_tainted() {
+        // The three Xtaint variants have semantically distinct cache
+        // implications, so their serialised forms must round-trip
+        // unambiguously. This guards against accidental serde rename
+        // collisions during future label-set additions.
+        for x in [
+            Xtaint::None,
+            Xtaint::Clean,
+            Xtaint::Tainted(vec![]),
+            Xtaint::Tainted(vec![TaintLabel::UserInput, TaintLabel::Secret]),
+        ] {
+            let json = serde_json::to_string(&x).unwrap();
+            let back: Xtaint = serde_json::from_str(&json).unwrap();
+            assert_eq!(x, back);
+        }
     }
 }
