@@ -406,6 +406,68 @@ fn unvalidated_body_to_db_propagates_offsets_cross_file() {
     );
 }
 
+/// Slice 2.3a of ADR 0006 — the producer emits an `Arg(arg_id)`
+/// placeholder for parameters with no observed taint reads, instead
+/// of leaving `param_shape` as `None`. Concrete observations still
+/// produce concrete shapes; Arg only fills the "no info" gap.
+#[test]
+fn unvalidated_body_to_db_emits_arg_placeholder_for_unobserved_params() {
+    use stryx_taint::{Cell, Shape};
+
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/arg-placeholder");
+    let index = extract_index(&dir);
+    let lib = index
+        .files()
+        .find(|f| f.exports.contains_key("noop") && f.exports.contains_key("withOptions"))
+        .expect("arg-placeholder/lib.ts summary present");
+
+    // `noop(unused)` makes no sink reads — its shape should be the
+    // polymorphic placeholder, not None.
+    let noop = lib.exports.get("noop").expect("noop export");
+    let unused_param = noop.params.first().expect("one param");
+    let shape = unused_param
+        .param_shape
+        .as_ref()
+        .expect("Arg placeholder produced for un-observed param");
+    match &shape.shape {
+        Shape::Arg(id) => {
+            assert_eq!(id.fn_id, "noop");
+            assert_eq!(id.idx, 0);
+        }
+        other => panic!("expected Arg placeholder, got {other:?}"),
+    }
+
+    // `withOptions(body, opts)` — body is observed at the sink,
+    // opts is not. Param 0 (body) gets a concrete Tainted+Bot shape;
+    // param 1 (opts) gets the Arg placeholder.
+    let with_opts = lib.exports.get("withOptions").expect("withOptions export");
+    assert_eq!(with_opts.params.len(), 2);
+    let body_shape = with_opts.params[0]
+        .param_shape
+        .as_ref()
+        .expect("body has observed shape");
+    assert!(matches!(body_shape.shape, Shape::Bot));
+    let opts_shape = with_opts.params[1]
+        .param_shape
+        .as_ref()
+        .expect("opts gets Arg placeholder");
+    match &opts_shape.shape {
+        Shape::Arg(id) => {
+            assert_eq!(id.fn_id, "withOptions");
+            assert_eq!(id.idx, 1);
+        }
+        other => panic!("expected Arg(withOptions, 1), got {other:?}"),
+    }
+    // Sanity: the constructor produces what we expect.
+    assert_eq!(
+        opts_shape,
+        &Cell::arg_placeholder(stryx_taint::ArgId {
+            fn_id: "withOptions".into(),
+            idx: 1,
+        })
+    );
+}
+
 /// Slice 2.2 of ADR 0006 — first consumer of `param_shape`. When a
 /// cross-file finding fires and the callee's shape reveals specific
 /// top-level Field offsets, the finding message lists them so users

@@ -2319,7 +2319,7 @@ fn build_summary(
         .collect();
 
     let mut params_out = Vec::with_capacity(param_names.len());
-    for pname in &param_names {
+    for (idx, pname) in param_names.iter().enumerate() {
         // Run the flow visitor over the function body with just this
         // parameter pre-tainted. The visitor consults the *previous
         // iteration's* index, so cross-file calls already known to sink
@@ -2345,10 +2345,22 @@ fn build_summary(
         // whole-value taint was observed (no member-chain reads).
         let mut tainted_offsets: Vec<Offset> = visitor.top_offsets_seen.into_iter().collect();
         tainted_offsets.sort_by(offset_sort_key);
-        // Slice 2.1c — canonicalize the accumulated shape. None when
-        // the visitor recorded no observations or only useless
-        // sub-structure that canonicalize prunes away.
-        let param_shape = visitor.param_shape_seen.canonicalize();
+        // Slice 2.1c canonicalize → Some(concrete) for observed
+        // params, None for un-observed.
+        //
+        // Slice 2.3a — when canonicalize returns None (no taint
+        // observations were recorded), emit a polymorphic placeholder
+        // `Arg(arg_id)` so the summary carries this parameter's
+        // identity. Consumers at call sites (slice 2.3b) will be able
+        // to instantiate the placeholder with the caller's actual
+        // shape. ArgId is built from the function's stable name and
+        // 0-based parameter index per ADR 0006.
+        let param_shape = visitor.param_shape_seen.canonicalize().or_else(|| {
+            Some(Cell::arg_placeholder(stryx_taint::ArgId {
+                fn_id: name.to_string(),
+                idx: idx as u32,
+            }))
+        });
         params_out.push(ParamFlow {
             name: pname.clone(),
             reaches_db_sink_unsanitized: reaches,

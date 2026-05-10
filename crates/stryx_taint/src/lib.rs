@@ -223,6 +223,19 @@ impl Cell {
         }
     }
 
+    /// A polymorphic placeholder cell — `None+Arg(id)`. Slice 2.3a of
+    /// ADR 0006: emitted by the visitor for parameters with no
+    /// observed taint reads, so the summary records the parameter's
+    /// identity even when its concrete shape is unknown. Consumers
+    /// at call sites (slice 2.3b) will instantiate the placeholder
+    /// with whatever shape the caller passed.
+    pub fn arg_placeholder(id: ArgId) -> Self {
+        Self {
+            xtaint: Xtaint::None,
+            shape: Shape::Arg(id),
+        }
+    }
+
     /// Merge `source` into `self` in place, producing a cell that
     /// reflects the union of taint information from both. Slice 2.1d
     /// of ADR 0006 — the lattice-join used by cross-file
