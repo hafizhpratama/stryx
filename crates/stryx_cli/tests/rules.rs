@@ -487,6 +487,47 @@ fn unvalidated_body_to_db_local_shape_propagates_at_sink() {
     }
 }
 
+/// Symmetric counterpart to the param-side local-shape consumer:
+/// when a helper delegates through a chain helper and returns the
+/// local, `record_taint_in_return` reads the local's slice-3.5
+/// shape and propagates it into the helper's `return_shape`.
+/// Without this wiring, delegate's return_shape collapses to
+/// whole-value `Tainted+Bot`, dropping field info that future
+/// callers could otherwise consume.
+#[test]
+fn unvalidated_body_to_db_local_shape_propagates_at_return() {
+    use stryx_taint::{Offset, Shape};
+
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/local-shape-return");
+    let index = extract_index(&dir);
+    let lib = index
+        .files()
+        .find(|f| f.exports.contains_key("delegate") && f.exports.contains_key("pickId"))
+        .expect("local-shape-return lib summary present");
+    let delegate = lib.exports.get("delegate").expect("delegate export");
+    let param = delegate.params.first().expect("delegate has one param");
+    let rs = param
+        .return_shape
+        .as_ref()
+        .expect("delegate records a return_shape (chain reaches return)");
+    match &rs.shape {
+        Shape::Obj(map) => {
+            assert!(
+                map.contains_key(&Offset::Field("id".into())),
+                "expected Field(\"id\") at top level — slice 3.5 stored \
+                 Obj{{id: Tainted+Bot}} on the local `id`, the bare-ident \
+                 return consumer should propagate it into delegate's \
+                 return_shape; got {map:?}",
+            );
+        }
+        other => panic!(
+            "expected Obj shape from local-shape return propagation, got {other:?} \
+             — without the bare-ident consumer the chain collapses to whole-value \
+             Tainted+Bot at the return site, which is the regression this slice fixes",
+        ),
+    }
+}
+
 /// Slice 3.1 of ADR 0007 — the visitor populates `param.return_shape`
 /// from return-statement observations. Mirrors the slice-2.1c
 /// `param_shape` test but for the return side. Observation-only —

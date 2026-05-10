@@ -1003,8 +1003,22 @@ impl<'idx> FlowVisitor<'idx> {
     /// `return body.id` records `Obj{id: Tainted+Bot}`.
     /// `return {id: body.id}` records the same shape — the
     /// limitation is documented in ADR 0007, future slices refine.
+    ///
+    /// Bare-ident consumer: `return id` where `id` carries a slice-3.5
+    /// shape (e.g. `Obj{id: Tainted+Bot}` from `const id = pickId(b)`)
+    /// merges that shape into `return_shape_seen`. This mirrors the
+    /// param-side bare-ident wiring — without it, helpers that
+    /// delegate to a chain helper would lose all field info on the
+    /// return path even though the local already knows it.
     fn record_taint_in_return(&mut self, expr: &Expression<'_>) {
         if let Some(chain) = self.full_chain(expr) {
+            if chain.is_empty()
+                && let Some(cell) = self.expr_to_cell(expr)
+                && !matches!(cell.shape, Shape::Bot)
+            {
+                insert_shape_at_path(&mut self.return_shape_seen, &chain, &cell);
+                return;
+            }
             insert_tainted_at_path(
                 &mut self.return_shape_seen,
                 &chain,
