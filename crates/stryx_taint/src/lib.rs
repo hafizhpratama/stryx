@@ -9,7 +9,7 @@ use stryx_core::Span;
 /// A taint label classifies *what kind of trust* flows through a value.
 /// Labels are deliberately coarse — a rule reasons over labels, not over
 /// raw expressions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum TaintLabel {
     /// Anything coming off the network: `req.body`, query string, headers,
@@ -193,6 +193,79 @@ impl Cell {
         Self {
             xtaint: Xtaint::Clean,
             shape: Shape::Bot,
+        }
+    }
+
+    /// Bring `self` into canonical form per the two Phase 2
+    /// invariants documented on [`Cell`], returning `None` if the
+    /// cell carries no information and should be dropped from its
+    /// parent map. Recursive — every reachable sub-cell is also
+    /// canonicalized.
+    ///
+    /// What canonicalize does:
+    ///
+    /// 1. **Invariant 2 — `Clean ⇒ Bot`**: a `Clean` cell's shape is
+    ///    flattened to `Bot`. Sub-structure under a clean cell is
+    ///    semantically subsumed by the cleanness mark.
+    /// 2. **Label-set normalization**: a `Tainted(labels)` cell's
+    ///    label list is sorted and de-duplicated so cache keys per
+    ///    ADR 0005 are insertion-order-independent.
+    /// 3. **Recursive shape canonicalization**: each entry in an
+    ///    `Obj` map is canonicalized; entries that resolve to `None`
+    ///    are dropped. An `Obj` whose entries all dropped collapses
+    ///    to `Shape::Bot`.
+    /// 4. **Invariant 1 — `None + Bot ⇒ drop`**: a cell whose
+    ///    `xtaint` is `None` and whose (post-recursion) shape is
+    ///    `Bot` carries no information — return `None` so the
+    ///    parent omits it from its map.
+    ///
+    /// Idempotence: `canonicalize(canonicalize(c))` produces the
+    /// same result as `canonicalize(c)`. The property test
+    /// `cell_canonicalize_idempotent` enforces this on a
+    /// representative shape.
+    pub fn canonicalize(self) -> Option<Self> {
+        let Self { xtaint, shape } = self;
+        // Invariant 2: Clean shadows any sub-structure.
+        if matches!(xtaint, Xtaint::Clean) {
+            return Some(Self {
+                xtaint,
+                shape: Shape::Bot,
+            });
+        }
+        // Normalise Tainted's label list.
+        let xtaint = match xtaint {
+            Xtaint::Tainted(mut labels) => {
+                labels.sort();
+                labels.dedup();
+                Xtaint::Tainted(labels)
+            }
+            other => other,
+        };
+        let shape = canonicalize_shape(shape);
+        // Invariant 1: None + Bot is meaningless — drop.
+        match (&xtaint, &shape) {
+            (Xtaint::None, Shape::Bot) => None,
+            _ => Some(Self { xtaint, shape }),
+        }
+    }
+}
+
+/// Canonicalize a [`Shape`]. Recursive helper for
+/// [`Cell::canonicalize`]; an empty `Obj` (after entry-pruning)
+/// collapses to `Bot`.
+fn canonicalize_shape(shape: Shape) -> Shape {
+    match shape {
+        Shape::Bot => Shape::Bot,
+        Shape::Obj(map) => {
+            let pruned: std::collections::BTreeMap<Offset, Cell> = map
+                .into_iter()
+                .filter_map(|(off, cell)| cell.canonicalize().map(|c| (off, c)))
+                .collect();
+            if pruned.is_empty() {
+                Shape::Bot
+            } else {
+                Shape::Obj(pruned)
+            }
         }
     }
 }
@@ -404,5 +477,160 @@ mod tests {
             let back: Xtaint = serde_json::from_str(&json).unwrap();
             assert_eq!(x, back);
         }
+    }
+
+    // ── Canonicalize tests (slice 2.1b of ADR 0006) ─────────────────────
+
+    /// Build an `Obj` cell from a list of (offset, cell) pairs.
+    /// Convenience for the canonicalize tests; not part of the
+    /// public API.
+    fn obj(entries: Vec<(Offset, Cell)>) -> Cell {
+        let mut map = std::collections::BTreeMap::new();
+        for (off, cell) in entries {
+            map.insert(off, cell);
+        }
+        Cell {
+            xtaint: Xtaint::None,
+            shape: Shape::Obj(map),
+        }
+    }
+
+    #[test]
+    fn canonicalize_drops_bare_bot_cell() {
+        // Invariant 1: None + Bot ⇒ drop.
+        assert_eq!(Cell::bot().canonicalize(), None);
+    }
+
+    #[test]
+    fn canonicalize_keeps_tainted_cell() {
+        let t = Cell::tainted(vec![TaintLabel::UserInput]);
+        assert_eq!(t.clone().canonicalize(), Some(t));
+    }
+
+    #[test]
+    fn canonicalize_flattens_clean_cell_with_substructure() {
+        // Invariant 2: Clean ⇒ Bot. Any pre-existing Obj content is
+        // erased.
+        let c = Cell {
+            xtaint: Xtaint::Clean,
+            shape: Shape::Obj({
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(
+                    Offset::Field("a".into()),
+                    Cell::tainted(vec![TaintLabel::UserInput]),
+                );
+                m
+            }),
+        };
+        assert_eq!(c.canonicalize(), Some(Cell::clean()));
+    }
+
+    #[test]
+    fn canonicalize_normalises_tainted_label_list() {
+        // Labels arrive in arbitrary order with possible duplicates;
+        // canonicalize must sort + dedupe so cache keys are stable.
+        let unsorted = Cell {
+            xtaint: Xtaint::Tainted(vec![
+                TaintLabel::Secret,
+                TaintLabel::UserInput,
+                TaintLabel::Secret,
+                TaintLabel::AuthSubject,
+            ]),
+            shape: Shape::Bot,
+        };
+        let canonical = unsorted.canonicalize().expect("non-None");
+        assert_eq!(
+            canonical.xtaint,
+            Xtaint::Tainted(vec![
+                TaintLabel::UserInput,
+                TaintLabel::AuthSubject,
+                TaintLabel::Secret,
+            ]),
+        );
+    }
+
+    #[test]
+    fn canonicalize_prunes_useless_obj_entries_recursively() {
+        // Outer cell holds an Obj with two entries. One entry is a
+        // bare-bot leaf (drops via invariant 1); the other is a
+        // tainted leaf (stays). After pruning, the Obj has one entry,
+        // so the outer None+Obj still has structure and stays.
+        let c = obj(vec![
+            (Offset::Field("useless".into()), Cell::bot()),
+            (
+                Offset::Field("real".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            ),
+        ]);
+        let canonical = c.canonicalize().expect("not dropped");
+        match &canonical.shape {
+            Shape::Obj(map) => {
+                assert_eq!(map.len(), 1);
+                assert!(map.contains_key(&Offset::Field("real".into())));
+            }
+            other => panic!("expected Obj, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonicalize_drops_obj_when_all_entries_useless() {
+        // Outer None+Obj where every entry is a bare-bot leaf — the
+        // Obj prunes to empty, collapses to Bot, then the outer cell
+        // is None+Bot which drops.
+        let c = obj(vec![
+            (Offset::Field("a".into()), Cell::bot()),
+            (Offset::Field("b".into()), Cell::bot()),
+        ]);
+        assert_eq!(c.canonicalize(), None);
+    }
+
+    #[test]
+    fn canonicalize_collapses_obj_with_only_clean_to_clean_outer() {
+        // Edge case: an outer None+Obj whose only entry is a Clean
+        // leaf. The Clean cell stays (Cleanness is information),
+        // so the outer Obj keeps it, so the outer cell stays.
+        let c = obj(vec![(Offset::Field("a".into()), Cell::clean())]);
+        let canonical = c.canonicalize().expect("not dropped");
+        match &canonical.shape {
+            Shape::Obj(map) => {
+                assert_eq!(map.len(), 1);
+                assert_eq!(map.get(&Offset::Field("a".into())), Some(&Cell::clean()));
+            }
+            other => panic!("expected Obj with Clean leaf, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn canonicalize_is_idempotent() {
+        // canonicalize(canonicalize(c)) == canonicalize(c) for a
+        // representative non-trivial shape.
+        let mut inner = std::collections::BTreeMap::new();
+        inner.insert(
+            Offset::Field("nested".into()),
+            Cell::tainted(vec![
+                TaintLabel::Secret,
+                TaintLabel::UserInput,
+                TaintLabel::Secret, // dupe to force normalization
+            ]),
+        );
+        inner.insert(Offset::Field("dead".into()), Cell::bot());
+        let c = Cell {
+            xtaint: Xtaint::None,
+            shape: Shape::Obj({
+                let mut outer = std::collections::BTreeMap::new();
+                outer.insert(
+                    Offset::Field("a".into()),
+                    Cell {
+                        xtaint: Xtaint::None,
+                        shape: Shape::Obj(inner),
+                    },
+                );
+                outer.insert(Offset::Field("z".into()), Cell::clean());
+                outer
+            }),
+        };
+        let once = c.canonicalize().expect("not dropped");
+        let twice = once.clone().canonicalize().expect("not dropped");
+        assert_eq!(once, twice, "canonicalize must be idempotent");
     }
 }
