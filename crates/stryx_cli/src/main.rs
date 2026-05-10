@@ -68,9 +68,14 @@ fn main() -> ExitCode {
 fn init_tracing() {
     let filter =
         tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into());
+    // Logs go to stderr so `--format json` emits a clean JSON document
+    // on stdout that downstream tools can pipe into `jq`. The default
+    // tracing-subscriber writer is stdout, which is the wrong choice
+    // for a CLI that produces machine-readable output.
     let _ = tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_target(false)
+        .with_writer(std::io::stderr)
         .try_init();
 }
 
