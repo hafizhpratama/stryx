@@ -224,6 +224,46 @@ fn unvalidated_body_to_db_cross_file_good_silent() {
 }
 
 #[test]
+fn auth_bypass_via_wrapper_bad_fires() {
+    // route.ts wraps an admin handler in withAuth, but lib.ts's
+    // withAuth is a no-op `return handler`. Stryx should follow the
+    // import and flag the export at the call site.
+    let dir = fixtures_root().join("flow-auth-bypass-via-wrapper/bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/auth-bypass-via-wrapper")
+        .collect();
+    let route_path = dir.join("route.ts");
+    assert!(
+        findings.iter().any(|f| f.span.file == route_path
+            && f.message.contains("withAuth")),
+        "expected an auth-bypass finding on route.ts referencing withAuth; got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+    for f in &findings {
+        assert_eq!(f.severity, Severity::Critical);
+    }
+}
+
+#[test]
+fn auth_bypass_via_wrapper_good_silent() {
+    // Same shape, but lib.ts calls getServerSession and short-circuits.
+    let dir = fixtures_root().join("flow-auth-bypass-via-wrapper/good");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/auth-bypass-via-wrapper")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "good/'s wrapper calls getServerSession — expected zero findings, got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn secret_to_response_bad_fires() {
     let path = fixtures_root().join("flow-secret-to-response/bad.ts");
     let findings: Vec<_> = scan_file(&path)

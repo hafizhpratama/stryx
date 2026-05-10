@@ -29,3 +29,7 @@ harness = false
 [[bench]]
 name    = "secret_to_response"
 harness = false
+
+[[bench]]
+name    = "auth_bypass_via_wrapper"
+harness = false

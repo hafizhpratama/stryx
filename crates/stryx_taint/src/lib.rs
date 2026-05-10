@@ -54,6 +54,13 @@ pub struct ExportedFunctionSummary {
     pub params: Vec<ParamFlow>,
     /// Span of the function definition itself, for diagnostics.
     pub span: Span,
+    /// True iff the function's body contains a recognised auth-helper
+    /// call (`getServerSession`, `auth`, `getSession`, …). Consumed by
+    /// `flow/auth-bypass-via-wrapper` to tell apart wrappers that
+    /// actually verify authentication from no-op wrappers that just
+    /// claim to.
+    #[serde(default)]
+    pub contains_auth_check: bool,
 }
 
 impl ExportedFunctionSummary {

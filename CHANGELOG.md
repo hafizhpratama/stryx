@@ -43,6 +43,21 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `new Response(JSON.stringify(...))`. Sanitisers: `Boolean(secret)`,
   `redact/mask/fingerprint/hash(secret)`. Cross-file flow is deferred
   to slice 2.
+- `flow/auth-bypass-via-wrapper`. Catches route handlers wrapped in a
+  project-local `withAuth`-shaped function (`withAuth`, `withSession`,
+  `requireAuth`, `protected`, etc.) whose definition never calls a
+  recognised auth helper (`getServerSession`, `auth`, `getSession`,
+  `validateRequest`, `lucia.validateRequest`, `clerk.currentUser`,
+  …). Cross-file by design — the wrapper lives in `lib/auth.ts`,
+  the handler in `app/api/.../route.ts`. Reuses the project index
+  built by `flow/unvalidated-body-to-db`: every function summary
+  now carries a `contains_auth_check` flag populated at extract time
+  by a shared visitor. Fires only on exports named `GET`/`POST`/etc.
+  or `default`, and only when the wrapper resolves to a project-local
+  function — `node_modules`-imported wrappers are silently passed
+  for v0.0.1 (slice 2 will emit UncertainZones for those).
+  This completes the v0.1 flow rule trio (unvalidated-body-to-db,
+  secret-to-response, auth-bypass-via-wrapper).
 
 ### Coming soon (v0.1, planned)
 - Foundational crates `stryx_index` (project semantic index) and

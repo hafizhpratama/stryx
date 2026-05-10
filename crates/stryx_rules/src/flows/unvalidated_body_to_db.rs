@@ -32,6 +32,8 @@ use stryx_core::{Finding, Severity, Span};
 use stryx_index::{ClassInfo, FileSummary, ImportRef};
 use stryx_taint::{ExportedFunctionSummary, ParamFlow};
 
+use super::auth_bypass_via_wrapper::contains_auth_helper_call;
+
 use crate::{ExtractOutput, Rule, RuleContext, RuleMeta};
 
 const RULE_ID: &str = "flow/unvalidated-body-to-db";
@@ -1794,6 +1796,7 @@ fn build_summary(
         name: name.to_string(),
         params: params_out,
         span: Span::new(file.to_path_buf(), params.span.start, params.span.end),
+        contains_auth_check: contains_auth_helper_call(body),
     }
 }
 
