@@ -32,13 +32,17 @@ small subset of genuinely ambiguous zones to a cached LLM check.
 
 ## Install
 
-```bash
-# Cargo
-cargo install stryx-cli
+While Stryx is still in alpha, install from source:
 
-# Homebrew
-brew install stryx/tap/stryx
+```bash
+git clone https://github.com/hafizhpratama/stryx
+cd stryx
+cargo install --path crates/stryx_cli
 ```
+
+Cargo (`cargo install stryx-cli`), npm (`npx stryx scan`), and Homebrew
+(`brew install stryx/tap/stryx`) distribution channels open with the
+v0.1.0 release.
 
 ## First scan
 
@@ -105,18 +109,19 @@ with `--no-llm` for fully local deterministic scans (the default).
 
 ## Status
 
-**Pre-alpha.** Architecture and design docs are in place; the engine
-implementation is in progress. APIs may change before 1.0. See
+**Alpha.** All three v0.1 flow rules are implemented, tested, and
+benchmarked. APIs may still change before 1.0. See
 [ADR 0003](docs/decisions/0003-cross-file-and-taint-as-core.md) for
 the v0.1 commitment.
 
-- 📋 Architecture, ADRs, rule specs
-- 🚧 Foundational crates `stryx_index` and `stryx_taint`
-- 🚧 v0.1 flow rules: `flow/unvalidated-body-to-db`,
+- ✅ Architecture, ADRs, rule specs
+- ✅ Foundational crates `stryx_index` and `stryx_taint`
+- ✅ v0.1 flow rules: `flow/unvalidated-body-to-db`,
   `flow/auth-bypass-via-wrapper`, `flow/secret-to-response`
-- 🚧 CLI binary (`cargo install`, Homebrew)
+- ✅ CLI binary (`cargo install --path crates/stryx_cli`)
 - 🚧 GitHub Action
-- 📋 napi-rs npm distribution (Phase 2)
+- 🚧 napi-rs npm distribution
+- 🚧 Homebrew formula
 - 📋 Additional rules (Phase 2)
 - 📋 Hono / Express support via source/sink adapters (Phase 3)
 - 📋 Type-aware analysis, custom taint configs (Phase 4)
