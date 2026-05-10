@@ -406,6 +406,59 @@ fn unvalidated_body_to_db_propagates_offsets_cross_file() {
     );
 }
 
+/// Slice 2.1c of ADR 0006 — the visitor populates a `param_shape`
+/// `Cell` tree alongside the flat `tainted_offsets`. The shape is
+/// canonicalized, so a function with no member-chain reads gets
+/// `None` (whole-value taint canonicalizes to `None+Bot ⇒ drop`),
+/// while chain reads produce a nested `Obj`.
+#[test]
+fn unvalidated_body_to_db_populates_param_shape() {
+    use stryx_taint::{Offset, Shape, Xtaint};
+
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/offset-recording");
+    let index = extract_index(&dir);
+    let lib = index
+        .files()
+        .find(|f| f.exports.contains_key("upsertNamed"))
+        .expect("offset-recording lib summary present");
+
+    // upsertNamed reads body.name and body.email at the sink. The
+    // shape should be `None+Obj{ email: Tainted, name: Tainted }`.
+    let upsert = lib.exports.get("upsertNamed").expect("upsertNamed");
+    let upsert_param = upsert.params.first().expect("one param");
+    let shape = upsert_param
+        .param_shape
+        .as_ref()
+        .expect("upsertNamed records a shape (chain reads observed)");
+    assert_eq!(shape.xtaint, Xtaint::None);
+    match &shape.shape {
+        Shape::Obj(map) => {
+            assert!(map.contains_key(&Offset::Field("name".into())));
+            assert!(map.contains_key(&Offset::Field("email".into())));
+            assert!(matches!(
+                map.get(&Offset::Field("name".into())).map(|c| &c.xtaint),
+                Some(Xtaint::Tainted(_))
+            ));
+        }
+        other => panic!("expected Obj, got {other:?}"),
+    }
+
+    // createWhole spreads the param as-is into the sink — no
+    // member-chain reads, just whole-value pass-through. Since the
+    // visitor only records full-chain observations (and a bare
+    // tainted ident at a sink writes the whole shape's xtaint to
+    // Tainted), the canonicalize result here is `Some(Tainted/Bot)`
+    // — the param itself is whole-tainted with no sub-structure.
+    let whole = lib.exports.get("createWhole").expect("createWhole");
+    let whole_param = whole.params.first().expect("one param");
+    let whole_shape = whole_param
+        .param_shape
+        .as_ref()
+        .expect("whole-value flow records a top-level Tainted cell");
+    assert!(matches!(whole_shape.xtaint, Xtaint::Tainted(_)));
+    assert_eq!(whole_shape.shape, Shape::Bot);
+}
+
 #[test]
 fn unvalidated_body_to_db_barrel_re_export() {
     // route imports from "./lib" which is a barrel index that

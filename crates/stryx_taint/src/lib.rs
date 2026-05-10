@@ -196,6 +196,22 @@ impl Cell {
         }
     }
 
+    /// Recursively count Tainted leaves reachable through this cell.
+    /// Used by [`ConvergenceSignal::tainted_leaf_total`] in
+    /// `stryx_cli` to detect shape growth across fix-point
+    /// iterations — a monotone-non-decreasing axis under the visitor's
+    /// observation-only producer (it never adds Clean cells, so the
+    /// count only grows). Per ADR 0004's contract, every summary
+    /// axis that can change must be in the convergence tuple.
+    pub fn count_tainted_leaves(&self) -> usize {
+        let here = matches!(self.xtaint, Xtaint::Tainted(_)) as usize;
+        let nested = match &self.shape {
+            Shape::Bot => 0,
+            Shape::Obj(map) => map.values().map(Self::count_tainted_leaves).sum(),
+        };
+        here + nested
+    }
+
     /// Bring `self` into canonical form per the two Phase 2
     /// invariants documented on [`Cell`], returning `None` if the
     /// cell carries no information and should be dropped from its
@@ -296,6 +312,18 @@ pub struct ParamFlow {
     /// See ADR 0006 (shape lattice) for the migration plan.
     #[serde(default)]
     pub tainted_offsets: Vec<Offset>,
+    /// Phase 2 of ADR 0006 — full-chain shape of how this parameter
+    /// flows. `Some(canonical_cell)` when the visitor recorded any
+    /// taint observations; `None` when nothing reached a sink. The
+    /// shape captures field/index *chains* — `body.where.id` produces
+    /// `Cell { None, Obj { where -> Cell { None, Obj { id -> Cell { Tainted, Bot } } } } }`
+    /// — beyond what the flat `tainted_offsets` first-field list can
+    /// express. Slice 2.1c populates it from the local-sink site only;
+    /// cross-file shape composition lands in slice 2.1d. No consumer
+    /// reads this yet — the boolean and `tainted_offsets` remain the
+    /// source of truth through Phase 2's observation-only window.
+    #[serde(default)]
+    pub param_shape: Option<Cell>,
     /// True iff the parameter's value flows back to the function's
     /// return value (directly, or via member access / object/array
     /// literal containment). Helpers like `toPaymentStatus(input)`

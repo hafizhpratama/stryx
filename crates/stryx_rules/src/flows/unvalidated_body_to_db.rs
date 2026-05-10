@@ -31,7 +31,7 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity, Span};
 use stryx_index::{ClassInfo, FileSummary, ImportRef};
-use stryx_taint::{ExportedFunctionSummary, Offset, ParamFlow};
+use stryx_taint::{Cell, ExportedFunctionSummary, Offset, ParamFlow, Shape, TaintLabel, Xtaint};
 
 use super::auth_bypass_via_wrapper::contains_auth_helper_call;
 
@@ -139,6 +139,14 @@ struct FlowVisitor<'idx> {
     /// (where-vs-data placement in the call shape) is a follow-up
     /// slice; full chains land with the Phase 2 shape lattice.
     top_offsets_seen: HashSet<Offset>,
+    /// Slice 2.1c of ADR 0006 — full-chain shape of observed tainted
+    /// reads, accumulated as a `Cell` tree. `body.where.id` produces a
+    /// nested `Obj { where -> Obj { id -> Tainted } }`; multiple chain
+    /// observations merge into the same tree (shared prefixes share
+    /// intermediate cells). Drained in `build_summary` via
+    /// `Cell::canonicalize` before being attached to `ParamFlow`.
+    /// Same per-param-fresh discipline as `top_offsets_seen`.
+    param_shape_seen: Cell,
 }
 
 impl<'idx> FlowVisitor<'idx> {
@@ -155,6 +163,7 @@ impl<'idx> FlowVisitor<'idx> {
             body_source_suppressed: 0,
             pending_binding_name: None,
             top_offsets_seen: HashSet::new(),
+            param_shape_seen: Cell::bot(),
         }
     }
 
@@ -795,6 +804,18 @@ impl<'idx> FlowVisitor<'idx> {
     fn record_top_offsets_in_arg(&mut self, expr: &Expression<'_>) {
         if let Some(off) = self.top_offset_of(expr) {
             self.top_offsets_seen.insert(off);
+        }
+        // Slice 2.1c — if `expr` is a tainted-rooted member chain,
+        // record the *full* chain into the shape tree as well. The
+        // first-field record above stays as the slice-2 substrate;
+        // the shape tree is the new substrate consumers will read in
+        // slice 2.2+.
+        if let Some(chain) = self.full_chain(expr) {
+            insert_tainted_at_path(
+                &mut self.param_shape_seen,
+                &chain,
+                vec![TaintLabel::UserInput],
+            );
             return;
         }
         match expr {
@@ -831,6 +852,33 @@ impl<'idx> FlowVisitor<'idx> {
                 self.record_top_offsets_in_arg(&b.right);
             }
             _ => {}
+        }
+    }
+
+    /// If `expr` is a member-chain rooted in a tainted ident, return
+    /// the *full* offset chain (from base to leaf). `body.where.id`
+    /// returns `Some([Field("where"), Field("id")])`. Bare tainted
+    /// ident returns `Some(vec![])` (the empty chain — whole-value
+    /// taint). Non-tainted or non-member returns `None`.
+    fn full_chain(&self, expr: &Expression<'_>) -> Option<Vec<Offset>> {
+        match expr {
+            Expression::ParenthesizedExpression(p) => self.full_chain(&p.expression),
+            Expression::TSAsExpression(t) => self.full_chain(&t.expression),
+            Expression::TSNonNullExpression(t) => self.full_chain(&t.expression),
+            Expression::TSSatisfiesExpression(t) => self.full_chain(&t.expression),
+            Expression::TSTypeAssertion(t) => self.full_chain(&t.expression),
+            Expression::Identifier(id) if self.is_tainted(id.name.as_str()) => Some(Vec::new()),
+            Expression::StaticMemberExpression(m) => {
+                let mut chain = self.full_chain(&m.object)?;
+                chain.push(Offset::Field(m.property.name.to_string()));
+                Some(chain)
+            }
+            Expression::ComputedMemberExpression(m) => {
+                let mut chain = self.full_chain(&m.object)?;
+                chain.push(literal_offset_or_any(&m.expression));
+                Some(chain)
+            }
+            _ => None,
         }
     }
 
@@ -1512,6 +1560,31 @@ fn strip_casts<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
         Expression::TSSatisfiesExpression(t) => strip_casts(&t.expression),
         Expression::TSTypeAssertion(t) => strip_casts(&t.expression),
         _ => expr,
+    }
+}
+
+/// Mutate `cell` so that the offset chain `path` ends in a Tainted
+/// leaf carrying `labels`. Empty `path` means "this whole value is
+/// tainted" — the cell's own xtaint is set. Otherwise we walk down,
+/// inserting `Cell::bot()` placeholders along the way and converting
+/// `Shape::Bot` into an empty `Obj` when we need to descend through
+/// it. Slice 2.1c of ADR 0006.
+///
+/// Repeated calls compose: two observations sharing a prefix
+/// (`body.where.id` and `body.where.email`) will share their
+/// `body.where` intermediate cell and produce two siblings under it.
+/// `Cell::canonicalize` is run once at summary time to clean up.
+fn insert_tainted_at_path(cell: &mut Cell, path: &[Offset], labels: Vec<TaintLabel>) {
+    if path.is_empty() {
+        cell.xtaint = Xtaint::Tainted(labels);
+        return;
+    }
+    if matches!(cell.shape, Shape::Bot) {
+        cell.shape = Shape::Obj(std::collections::BTreeMap::new());
+    }
+    if let Shape::Obj(map) = &mut cell.shape {
+        let entry = map.entry(path[0].clone()).or_insert_with(Cell::bot);
+        insert_tainted_at_path(entry, &path[1..], labels);
     }
 }
 
@@ -2197,12 +2270,17 @@ fn build_summary(
         // whole-value taint was observed (no member-chain reads).
         let mut tainted_offsets: Vec<Offset> = visitor.top_offsets_seen.into_iter().collect();
         tainted_offsets.sort_by(offset_sort_key);
+        // Slice 2.1c — canonicalize the accumulated shape. None when
+        // the visitor recorded no observations or only useless
+        // sub-structure that canonicalize prunes away.
+        let param_shape = visitor.param_shape_seen.canonicalize();
         params_out.push(ParamFlow {
             name: pname.clone(),
             reaches_db_sink_unsanitized: reaches,
             propagates_to_return,
             sink_span,
             tainted_offsets,
+            param_shape,
         });
     }
 

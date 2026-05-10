@@ -371,6 +371,13 @@ struct ConvergenceSignal {
     /// boolean (e.g., a cross-file callee resolved on round N+1
     /// surfaces additional reads at the same param).
     tainted_offset_total: usize,
+    /// Per ADR 0006 slice 2.1c — total Tainted leaves across every
+    /// summarised param's `param_shape` tree. Finer-grained than
+    /// `tainted_offsets`: two shapes can share the same first-field
+    /// set while differing on chain depth (`body.where.id` vs
+    /// `body.where`). Tracked separately so the convergence loop
+    /// notices shape growth even when the offset list is unchanged.
+    tainted_leaf_total: usize,
 }
 
 fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
@@ -378,6 +385,7 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
     let mut propagating_params = 0;
     let mut body_validated_handlers = 0;
     let mut tainted_offset_total = 0;
+    let mut tainted_leaf_total = 0;
     for file in index.files() {
         for export in file.exports.values() {
             for param in &export.params {
@@ -388,6 +396,9 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
                     propagating_params += 1;
                 }
                 tainted_offset_total += param.tainted_offsets.len();
+                if let Some(shape) = &param.param_shape {
+                    tainted_leaf_total += shape.count_tainted_leaves();
+                }
             }
         }
         for local in file.locals.values() {
@@ -399,6 +410,9 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
                     propagating_params += 1;
                 }
                 tainted_offset_total += param.tainted_offsets.len();
+                if let Some(shape) = &param.param_shape {
+                    tainted_leaf_total += shape.count_tainted_leaves();
+                }
             }
         }
         body_validated_handlers += file.body_validated_handlers.len();
@@ -408,6 +422,7 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
         propagating_params,
         body_validated_handlers,
         tainted_offset_total,
+        tainted_leaf_total,
     }
 }
 
@@ -444,7 +459,7 @@ mod tests {
     use super::*;
     use stryx_core::Span;
     use stryx_index::FileSummary;
-    use stryx_taint::{ExportedFunctionSummary, Offset, ParamFlow};
+    use stryx_taint::{Cell, ExportedFunctionSummary, Offset, ParamFlow, TaintLabel};
 
     /// Build a single-export `FileSummary` containing one param so each
     /// convergence-axis test can mutate just that one axis.
@@ -520,5 +535,42 @@ mod tests {
             ..Default::default()
         }));
         assert_ne!(one, two, "growing offset list must shift the signal");
+    }
+
+    /// Slice 2.1c of ADR 0006 added `param_shape`. Per ADR 0004, the
+    /// shape's Tainted-leaf count must be in the convergence tuple
+    /// — without it, a deeper shape (e.g. `body.where.id` instead of
+    /// just `body.where`) on iteration N+1 wouldn't shift the signal
+    /// and the loop would falsely declare convergence.
+    #[test]
+    fn convergence_signal_reflects_param_shape() {
+        let zero = signal_for(fixture_with_param(ParamFlow::default()));
+        let one = signal_for(fixture_with_param(ParamFlow {
+            param_shape: Some(Cell::tainted(vec![TaintLabel::UserInput])),
+            ..Default::default()
+        }));
+        assert_ne!(zero, one, "tainted_leaf_total axis must affect the signal");
+        // A shape with two tainted leaves is distinguishable from one
+        // with a single leaf — chain growth (deeper structure) is the
+        // case this guards against.
+        use std::collections::BTreeMap;
+        let mut deeper = BTreeMap::new();
+        deeper.insert(
+            Offset::Field("a".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        );
+        deeper.insert(
+            Offset::Field("b".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        );
+        let deeper_shape = Cell {
+            xtaint: stryx_taint::Xtaint::None,
+            shape: stryx_taint::Shape::Obj(deeper),
+        };
+        let two = signal_for(fixture_with_param(ParamFlow {
+            param_shape: Some(deeper_shape),
+            ..Default::default()
+        }));
+        assert_ne!(one, two, "shape growth must shift the signal");
     }
 }
