@@ -406,6 +406,51 @@ fn unvalidated_body_to_db_propagates_offsets_cross_file() {
     );
 }
 
+/// Slice 2.2 of ADR 0006 — first consumer of `param_shape`. When a
+/// cross-file finding fires and the callee's shape reveals specific
+/// top-level Field offsets, the finding message lists them so users
+/// see which body fields flow through the helper.
+#[test]
+fn unvalidated_body_to_db_cross_file_message_lists_callee_fields() {
+    // route.ts: POST handler sources `body = req.json()` and calls
+    // saveProfile(body). saveProfile reads input.name and input.email
+    // at the sink, so its param_shape is `Obj{email, name}` and the
+    // cross-file finding in route.ts lists both fields.
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/cross-file-fields");
+    let result = stryx_cli::scan(&dir).expect("scan");
+    let route_path = dir.join("route.ts");
+    let cross_file: Vec<_> = result
+        .findings
+        .iter()
+        .filter(|f| {
+            f.rule_id == "flow/unvalidated-body-to-db"
+                && f.span.file == route_path
+                && f.message.contains("`saveProfile`")
+        })
+        .collect();
+    assert!(
+        !cross_file.is_empty(),
+        "expected cross-file finding through saveProfile in route.ts; got: {:?}",
+        result
+            .findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+    for f in &cross_file {
+        assert!(
+            f.message.contains("`email`") && f.message.contains("`name`"),
+            "cross-file finding should list both `email` and `name`; got: {}",
+            f.message,
+        );
+        assert!(
+            f.message.contains("fields:"),
+            "expected `fields:` prefix in: {}",
+            f.message,
+        );
+    }
+}
+
 /// Slice 2.1d of ADR 0006 — at the cross-file site the caller's
 /// `param_shape` absorbs the callee's `param_shape`, grafted at the
 /// caller's offset chain. `callerBare(body)` calling

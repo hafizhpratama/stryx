@@ -1277,12 +1277,27 @@ impl FlowVisitor<'_> {
                 .and_then(|p| p.sink_span.as_ref())
                 .map(|s| format!(" The sink lives in {}.", s.file.display()))
                 .unwrap_or_default();
+            // Slice 2.2 of ADR 0006 — when the callee's `param_shape`
+            // reveals specific top-level fields, surface them in the
+            // finding so the user sees *which* parts of the body flow.
+            // Whole-value flow (Tainted+Bot) yields no field list, so
+            // the parenthetical stays the way slice 3c emitted it.
+            let fields_hint = summary
+                .params
+                .get(i)
+                .and_then(|p| p.param_shape.as_ref())
+                .and_then(top_level_field_names)
+                .map(|names| {
+                    let quoted: Vec<String> = names.iter().map(|n| format!("`{n}`")).collect();
+                    format!(", fields: {}", quoted.join(", "))
+                })
+                .unwrap_or_default();
             self.findings.push(
                 Finding::ast(
                     RULE_ID,
                     Severity::High,
                     format!(
-                        "Untrusted request body flows into `{}` (param `{}`), which writes to the database without validating it.{sink_hint}",
+                        "Untrusted request body flows into `{}` (param `{}`{fields_hint}), which writes to the database without validating it.{sink_hint}",
                         callee_label,
                         summary.params.get(i).map(|p| p.name.as_str()).unwrap_or("?"),
                     ),
@@ -1594,6 +1609,30 @@ fn insert_tainted_at_path(cell: &mut Cell, path: &[Offset], labels: Vec<TaintLab
     if let Shape::Obj(map) = &mut cell.shape {
         let entry = map.entry(path[0].clone()).or_insert_with(Cell::bot);
         insert_tainted_at_path(entry, &path[1..], labels);
+    }
+}
+
+/// Extract top-level Field names from a [`Cell`]'s shape. Slice 2.2
+/// of ADR 0006 — first consumer of `param_shape`. Returns `None`
+/// when the shape carries no structural information (the cell is
+/// whole-value tainted or just has a non-Field offset like `Index`
+/// or `Any`); returns `Some(["name", "email"])` when the shape is
+/// `Obj { name: ..., email: ... }`. The returned names are
+/// already in `BTreeMap` iteration order (`Offset::Ord`), so the
+/// rendered message is deterministic.
+fn top_level_field_names(cell: &Cell) -> Option<Vec<String>> {
+    match &cell.shape {
+        Shape::Obj(map) => {
+            let names: Vec<String> = map
+                .keys()
+                .filter_map(|off| match off {
+                    Offset::Field(s) => Some(s.clone()),
+                    _ => None,
+                })
+                .collect();
+            if names.is_empty() { None } else { Some(names) }
+        }
+        Shape::Bot => None,
     }
 }
 
