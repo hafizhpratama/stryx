@@ -378,6 +378,13 @@ struct ConvergenceSignal {
     /// `body.where`). Tracked separately so the convergence loop
     /// notices shape growth even when the offset list is unchanged.
     tainted_leaf_total: usize,
+    /// Per ADR 0007 slice 3.1 — total Tainted leaves across every
+    /// summarised param's `return_shape` tree. Mirrors
+    /// `tainted_leaf_total` but for the return side. Required so the
+    /// fix-point loop notices return-shape growth across iterations
+    /// (an iteration can refine return shapes independently of
+    /// param shapes — different axis).
+    return_leaf_total: usize,
 }
 
 fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
@@ -386,6 +393,7 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
     let mut body_validated_handlers = 0;
     let mut tainted_offset_total = 0;
     let mut tainted_leaf_total = 0;
+    let mut return_leaf_total = 0;
     for file in index.files() {
         for export in file.exports.values() {
             for param in &export.params {
@@ -398,6 +406,9 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
                 tainted_offset_total += param.tainted_offsets.len();
                 if let Some(shape) = &param.param_shape {
                     tainted_leaf_total += shape.count_tainted_leaves();
+                }
+                if let Some(shape) = &param.return_shape {
+                    return_leaf_total += shape.count_tainted_leaves();
                 }
             }
         }
@@ -413,6 +424,9 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
                 if let Some(shape) = &param.param_shape {
                     tainted_leaf_total += shape.count_tainted_leaves();
                 }
+                if let Some(shape) = &param.return_shape {
+                    return_leaf_total += shape.count_tainted_leaves();
+                }
             }
         }
         body_validated_handlers += file.body_validated_handlers.len();
@@ -423,6 +437,7 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
         body_validated_handlers,
         tainted_offset_total,
         tainted_leaf_total,
+        return_leaf_total,
     }
 }
 
@@ -572,5 +587,41 @@ mod tests {
             ..Default::default()
         }));
         assert_ne!(one, two, "shape growth must shift the signal");
+    }
+
+    /// Slice 3.1 of ADR 0007 added `return_shape`. Per ADR 0004, it
+    /// must be in the convergence tuple — without it, iteration N+1
+    /// could refine a callee's return shape but the loop would
+    /// declare convergence anyway.
+    #[test]
+    fn convergence_signal_reflects_return_shape() {
+        let zero = signal_for(fixture_with_param(ParamFlow::default()));
+        let one = signal_for(fixture_with_param(ParamFlow {
+            return_shape: Some(Cell::tainted(vec![TaintLabel::UserInput])),
+            ..Default::default()
+        }));
+        assert_ne!(zero, one, "return_leaf_total axis must affect the signal");
+        // A return shape with two tainted leaves is distinguishable
+        // from one with a single leaf — chain growth (deeper return
+        // structure) is the case this guards against.
+        use std::collections::BTreeMap;
+        let mut deeper = BTreeMap::new();
+        deeper.insert(
+            Offset::Field("a".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        );
+        deeper.insert(
+            Offset::Field("b".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        );
+        let deeper_shape = Cell {
+            xtaint: stryx_taint::Xtaint::None,
+            shape: stryx_taint::Shape::Obj(deeper),
+        };
+        let two = signal_for(fixture_with_param(ParamFlow {
+            return_shape: Some(deeper_shape),
+            ..Default::default()
+        }));
+        assert_ne!(one, two, "return-shape growth must shift the signal");
     }
 }

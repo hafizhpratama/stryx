@@ -406,6 +406,82 @@ fn unvalidated_body_to_db_propagates_offsets_cross_file() {
     );
 }
 
+/// Slice 3.1 of ADR 0007 — the visitor populates `param.return_shape`
+/// from return-statement observations. Mirrors the slice-2.1c
+/// `param_shape` test but for the return side. Observation-only —
+/// the existing `propagates_to_return` boolean still drives
+/// cross-file finding emission.
+#[test]
+fn unvalidated_body_to_db_populates_return_shape() {
+    use stryx_taint::{Offset, Shape, Xtaint};
+
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/return-shape");
+    let index = extract_index(&dir);
+    let lib = index
+        .files()
+        .find(|f| f.exports.contains_key("passthrough") && f.exports.contains_key("pickId"))
+        .expect("return-shape lib summary present");
+
+    // passthrough(b): return b — whole-value. return_shape is
+    // Tainted+Bot.
+    let pt = lib.exports.get("passthrough").expect("passthrough");
+    let rs = pt
+        .params
+        .first()
+        .and_then(|p| p.return_shape.as_ref())
+        .expect("passthrough has return_shape");
+    assert!(matches!(rs.xtaint, Xtaint::Tainted(_)));
+    assert_eq!(rs.shape, Shape::Bot);
+
+    // pickId(b): return b.id — chain. return_shape =
+    // Obj{id: Tainted+Bot}.
+    let pi = lib.exports.get("pickId").expect("pickId");
+    let rs = pi
+        .params
+        .first()
+        .and_then(|p| p.return_shape.as_ref())
+        .expect("pickId has return_shape");
+    assert_eq!(rs.xtaint, Xtaint::None);
+    match &rs.shape {
+        Shape::Obj(map) => {
+            let id_cell = map.get(&Offset::Field("id".into())).expect("id key");
+            assert!(matches!(id_cell.xtaint, Xtaint::Tainted(_)));
+        }
+        other => panic!("expected Obj{{id}}, got {other:?}"),
+    }
+
+    // shape(body): return {id: body.id, data: body.data} — slice 3.1
+    // limitation means the recorded shape carries both .id and
+    // .data on the param side, not the return-object structure.
+    let sh = lib.exports.get("shape").expect("shape");
+    let rs = sh
+        .params
+        .first()
+        .and_then(|p| p.return_shape.as_ref())
+        .expect("shape has return_shape");
+    match &rs.shape {
+        Shape::Obj(map) => {
+            assert!(map.contains_key(&Offset::Field("id".into())));
+            assert!(map.contains_key(&Offset::Field("data".into())));
+        }
+        other => panic!("expected Obj{{id, data}}, got {other:?}"),
+    }
+
+    // noop(b): return 42 — nothing tainted flows out. return_shape
+    // is None (canonicalize prunes the bare-bot recording).
+    let nm = lib.exports.get("noop").expect("noop");
+    let nm_param = nm.params.first().expect("one param");
+    assert!(
+        nm_param.return_shape.is_none(),
+        "noop should have no return_shape; got {:?}",
+        nm_param.return_shape
+    );
+
+    // constant(b): same — return doesn't reference the param.
+    let ct = lib.exports.get("constant").expect("constant");
+    assert!(ct.params.first().expect("one param").return_shape.is_none());
+}
+
 /// Slice 2.3a of ADR 0006 — the producer emits an `Arg(arg_id)`
 /// placeholder for parameters with no observed taint reads, instead
 /// of leaving `param_shape` as `None`. Concrete observations still

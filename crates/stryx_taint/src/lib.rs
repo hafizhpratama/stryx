@@ -500,6 +500,27 @@ pub struct ParamFlow {
     /// source of truth through Phase 2's observation-only window.
     #[serde(default)]
     pub param_shape: Option<Cell>,
+    /// Phase 3 of ADR 0007 — shape of what flows through the
+    /// function's return value when *this param* is tainted. Recorded
+    /// per-param-simulation: each visitor sees one parameter as
+    /// pre-tainted at function entry, observes return statements'
+    /// argument expressions, and records the chain at which the
+    /// tainted value flows to the leaf.
+    ///
+    /// `function passthrough(b) { return b; }` records
+    /// `Cell { Tainted, Bot }` (whole-value flows). `function pick(b)
+    /// { return b.id; }` records `Cell { None, Obj { id: Tainted+Bot } }`
+    /// (id-offset flows). `function noop() { return 42; }` records
+    /// `None` (nothing tainted flows out).
+    ///
+    /// Slice 3.1 (this slice) populates it from local return
+    /// statements only. Cross-file return-shape propagation and
+    /// `Cell::instantiate_arg`-driven precision land in slices
+    /// 3.4–3.5 per ADR 0007. No consumer reads this yet; the
+    /// existing `propagates_to_return: bool` remains the source of
+    /// truth through Phase 3's observation-only window.
+    #[serde(default)]
+    pub return_shape: Option<Cell>,
     /// True iff the parameter's value flows back to the function's
     /// return value (directly, or via member access / object/array
     /// literal containment). Helpers like `toPaymentStatus(input)`

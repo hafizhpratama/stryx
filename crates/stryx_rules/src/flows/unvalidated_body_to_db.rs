@@ -139,6 +139,15 @@ struct FlowVisitor<'idx> {
     /// The previous `top_offsets_seen: HashSet<Offset>` parallel
     /// state is gone.
     param_shape_seen: Cell,
+    /// Slice 3.1 of ADR 0007 — full-chain shape of what flows through
+    /// return statements. Same recording model as `param_shape_seen`,
+    /// but driven by `Statement::ReturnStatement` rather than sink
+    /// calls. The drain attaches to `ParamFlow.return_shape`.
+    ///
+    /// `tainted_return: bool` continues to ship and is set in lockstep;
+    /// slice 3.7 will collapse it onto a derived accessor once
+    /// consumers migrate.
+    return_shape_seen: Cell,
 }
 
 impl<'idx> FlowVisitor<'idx> {
@@ -155,6 +164,7 @@ impl<'idx> FlowVisitor<'idx> {
             body_source_suppressed: 0,
             pending_binding_name: None,
             param_shape_seen: Cell::bot(),
+            return_shape_seen: Cell::bot(),
         }
     }
 
@@ -379,6 +389,11 @@ impl<'idx> FlowVisitor<'idx> {
                         self.tainted_return = true;
                     }
                     self.scan_for_sinks(arg);
+                    // Slice 3.1 of ADR 0007 — record return-shape
+                    // observations alongside the existing boolean.
+                    // Observation-only; `tainted_return` remains the
+                    // source of truth through Phase 3's window.
+                    self.record_taint_in_return(arg);
                 }
             }
             Statement::BlockStatement(bs) => {
@@ -838,6 +853,64 @@ impl<'idx> FlowVisitor<'idx> {
             Expression::LogicalExpression(b) => {
                 self.record_taint_in_arg(&b.left);
                 self.record_taint_in_arg(&b.right);
+            }
+            _ => {}
+        }
+    }
+
+    /// Walk a return-statement argument expression and record taint
+    /// observations into `return_shape_seen`. Slice 3.1 of ADR 0007 —
+    /// mirrors `record_taint_in_arg` but drives the return-shape tree
+    /// instead of the param-shape tree. Recurses through structural
+    /// shapes (object/array literals, spreads, casts, ternaries,
+    /// logical exprs) but not through call expressions — return-shape
+    /// composition through callees lands in slice 3.5.
+    ///
+    /// `return body` records `Tainted+Bot` (whole-value flows out).
+    /// `return body.id` records `Obj{id: Tainted+Bot}`.
+    /// `return {id: body.id}` records the same shape — the
+    /// limitation is documented in ADR 0007, future slices refine.
+    fn record_taint_in_return(&mut self, expr: &Expression<'_>) {
+        if let Some(chain) = self.full_chain(expr) {
+            insert_tainted_at_path(
+                &mut self.return_shape_seen,
+                &chain,
+                vec![TaintLabel::UserInput],
+            );
+            return;
+        }
+        match expr {
+            Expression::ObjectExpression(obj) => {
+                for prop in &obj.properties {
+                    match prop {
+                        ObjectPropertyKind::ObjectProperty(p) => {
+                            self.record_taint_in_return(&p.value);
+                        }
+                        ObjectPropertyKind::SpreadProperty(s) => {
+                            self.record_taint_in_return(&s.argument);
+                        }
+                    }
+                }
+            }
+            Expression::ArrayExpression(arr) => {
+                for el in &arr.elements {
+                    if let Some(e) = el.as_expression() {
+                        self.record_taint_in_return(e);
+                    }
+                }
+            }
+            Expression::ParenthesizedExpression(p) => self.record_taint_in_return(&p.expression),
+            Expression::TSAsExpression(t) => self.record_taint_in_return(&t.expression),
+            Expression::TSNonNullExpression(t) => self.record_taint_in_return(&t.expression),
+            Expression::TSSatisfiesExpression(t) => self.record_taint_in_return(&t.expression),
+            Expression::TSTypeAssertion(t) => self.record_taint_in_return(&t.expression),
+            Expression::ConditionalExpression(c) => {
+                self.record_taint_in_return(&c.consequent);
+                self.record_taint_in_return(&c.alternate);
+            }
+            Expression::LogicalExpression(b) => {
+                self.record_taint_in_return(&b.left);
+                self.record_taint_in_return(&b.right);
             }
             _ => {}
         }
@@ -2314,6 +2387,23 @@ fn build_summary(
             .map(Cell::top_tainted_offsets)
             .unwrap_or_default();
         tainted_offsets.sort_by(offset_sort_key);
+        // Slice 3.1 of ADR 0007 — drain the per-param simulation's
+        // return-shape observations. None when no tainted return was
+        // observed; some(canonical) otherwise. The boolean
+        // `tainted_return` is set by `expr_taint`, which walks
+        // through call expressions ("call with tainted arg ⇒
+        // tainted") whereas `record_taint_in_return` only follows
+        // structural shapes (object/array/casts). So a tainted-leaf
+        // shape implies `tainted_return`, but not the converse:
+        // `return helper(body)` with helper not yet summarised sets
+        // the boolean but records no shape (cross-file return-shape
+        // propagation lands in slice 3.5).
+        let return_shape = visitor.return_shape_seen.canonicalize();
+        debug_assert!(
+            !return_shape.as_ref().is_some_and(Cell::has_tainted_leaf) || propagates_to_return,
+            "return_shape has tainted leaves but tainted_return = false; \
+             a return-statement path is missing its record_taint_in_return call",
+        );
         params_out.push(ParamFlow {
             name: pname.clone(),
             reaches_db_sink_unsanitized: reaches,
@@ -2321,6 +2411,7 @@ fn build_summary(
             sink_span,
             tainted_offsets,
             param_shape,
+            return_shape,
         });
     }
 
