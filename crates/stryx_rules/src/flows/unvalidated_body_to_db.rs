@@ -1189,6 +1189,31 @@ impl FlowVisitor<'_> {
             if !summary.taints_through_param(i) {
                 continue;
             }
+            // Slice 3c of ADR 0006 — record offsets at the cross-file
+            // site too, not just at local sinks. Captures cases like
+            // `helper(body.user)` where the caller's first-field on
+            // its tainted ident is `Field("user")` even though the
+            // sink itself lives in another file.
+            //
+            // Composing the callee's `tainted_offsets` with the
+            // caller's chain (so `body.user` + callee reads `.name`
+            // → caller records both `.user` AND propagation through)
+            // is a follow-on slice once we move from first-field to
+            // full-chain semantics.
+            self.record_top_offsets_in_arg(arg_expr);
+            // For bare-ident args (no member chain on the caller's
+            // side) the local walker records nothing — the callee's
+            // own first-field offsets carry the precision. Absorb
+            // them so the caller's summary reflects what the callee
+            // actually consumed.
+            if matches!(strip_casts(arg_expr), Expression::Identifier(id)
+                if self.is_tainted(id.name.as_str()))
+                && let Some(callee_param) = summary.params.get(i)
+            {
+                for off in &callee_param.tainted_offsets {
+                    self.top_offsets_seen.insert(off.clone());
+                }
+            }
             let sink_hint = summary
                 .params
                 .get(i)

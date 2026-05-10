@@ -347,6 +347,65 @@ fn unvalidated_body_to_db_records_param_side_offsets() {
     );
 }
 
+/// Slice 3c of ADR 0006 — cross-file site records caller-side offsets
+/// AND absorbs the callee's offsets when the caller passes a bare
+/// tainted ident (no chain to capture locally).
+#[test]
+fn unvalidated_body_to_db_propagates_offsets_cross_file() {
+    use stryx_taint::Offset;
+
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/offset-recording-crossfile");
+    let index = extract_index(&dir);
+    let lib = index
+        .files()
+        .find(|f| {
+            f.exports.contains_key("writeName")
+                && f.exports.contains_key("callerWithChain")
+                && f.exports.contains_key("callerBare")
+        })
+        .expect("offset-recording-crossfile/lib.ts summary present");
+
+    // The leaf callee reads its param's `.name` field locally — the
+    // first-field walker on the local sink picks this up.
+    let writer = lib.exports.get("writeName").expect("writeName export");
+    let writer_param = writer.params.first().expect("one param");
+    assert_eq!(
+        writer_param.tainted_offsets,
+        vec![Offset::Field("name".into())],
+        "writeName: local sink should record Field(\"name\") — got {:?}",
+        writer_param.tainted_offsets,
+    );
+
+    // Caller passes `body.user`. The caller's own walk on the chain
+    // records `Field("user")`. Composing the callee's `Field("name")`
+    // through the chain is a follow-on slice; here we just assert the
+    // chain-side offset lands.
+    let chain_caller = lib
+        .exports
+        .get("callerWithChain")
+        .expect("callerWithChain export");
+    let chain_param = chain_caller.params.first().expect("one param");
+    assert!(
+        chain_param
+            .tainted_offsets
+            .contains(&Offset::Field("user".into())),
+        "callerWithChain: expected `user` in {:?}",
+        chain_param.tainted_offsets,
+    );
+
+    // Caller passes bare `body`. The caller's own walk records
+    // nothing (no chain). The callee's `Field("name")` should be
+    // absorbed via the bare-ident composition path.
+    let bare_caller = lib.exports.get("callerBare").expect("callerBare export");
+    let bare_param = bare_caller.params.first().expect("one param");
+    assert_eq!(
+        bare_param.tainted_offsets,
+        vec![Offset::Field("name".into())],
+        "callerBare: expected callee's Field(\"name\") absorbed — got {:?}",
+        bare_param.tainted_offsets,
+    );
+}
+
 #[test]
 fn unvalidated_body_to_db_barrel_re_export() {
     // route imports from "./lib" which is a barrel index that
