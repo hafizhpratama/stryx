@@ -63,11 +63,14 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
     // reachability is monotonic.
     //
     // Convergence is detected against a *tuple* of independent
-    // counts — sink-param flips, propagates-to-return flips, and
-    // body-validated-handler insertions. Comparing against just the
-    // first count was the original implementation, but it could
-    // declare convergence early while a propagation flag was still
-    // mid-flight, leading to silent under-detection.
+    // counts — sink-param flips, propagates-to-return flips,
+    // body-validated-handler insertions, and tainted-offset growth.
+    // Comparing against just the first count was the original
+    // implementation, but it could declare convergence early while
+    // another axis was still mid-flight, leading to silent
+    // under-detection. See ADR 0004 for the contract; new summary
+    // axes must be added in lockstep with their `ConvergenceSignal`
+    // counterpart and a per-axis test in `mod tests` below.
     const MAX_ITER: usize = 10;
     let mut project_index = ProjectIndex::new();
     let mut prev_signal: Option<ConvergenceSignal> = None;
@@ -347,20 +350,34 @@ fn extract_file(
 /// Per-round convergence signal — a tuple of independent counts so
 /// the loop doesn't declare convergence early while one flag is
 /// still propagating but the others happen to land on the same
-/// total. All three counts are monotone non-decreasing under the
-/// taint sub-lattice, so equality across two consecutive rounds is
-/// a sound fixed-point witness.
+/// total. All counts are monotone non-decreasing under the taint
+/// sub-lattice, so equality across two consecutive rounds is a
+/// sound fixed-point witness.
+///
+/// **Contract (ADR 0004):** every summary axis that can change
+/// across iterations must be reflected here, otherwise the loop
+/// silently under-detects via the missing axis. When you add a new
+/// axis to [`ParamFlow`] or [`ExportedFunctionSummary`], add a
+/// matching count below — even if the existing counts subsume it
+/// in practice, the redundancy is the safety net.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 struct ConvergenceSignal {
     sink_params: usize,
     propagating_params: usize,
     body_validated_handlers: usize,
+    /// Per ADR 0006 slice 2 — total `tainted_offsets` length across
+    /// all summarised params. Tracked separately from `sink_params`
+    /// because a param's offset list can grow without flipping the
+    /// boolean (e.g., a cross-file callee resolved on round N+1
+    /// surfaces additional reads at the same param).
+    tainted_offset_total: usize,
 }
 
 fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
     let mut sink_params = 0;
     let mut propagating_params = 0;
     let mut body_validated_handlers = 0;
+    let mut tainted_offset_total = 0;
     for file in index.files() {
         for export in file.exports.values() {
             for param in &export.params {
@@ -370,6 +387,7 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
                 if param.propagates_to_return {
                     propagating_params += 1;
                 }
+                tainted_offset_total += param.tainted_offsets.len();
             }
         }
         for local in file.locals.values() {
@@ -380,6 +398,7 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
                 if param.propagates_to_return {
                     propagating_params += 1;
                 }
+                tainted_offset_total += param.tainted_offsets.len();
             }
         }
         body_validated_handlers += file.body_validated_handlers.len();
@@ -388,6 +407,7 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
         sink_params,
         propagating_params,
         body_validated_handlers,
+        tainted_offset_total,
     }
 }
 
@@ -417,4 +437,88 @@ fn run_file(
         findings.extend(rule.run(&ctx));
     }
     findings
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stryx_core::Span;
+    use stryx_index::FileSummary;
+    use stryx_taint::{ExportedFunctionSummary, Offset, ParamFlow};
+
+    /// Build a single-export `FileSummary` containing one param so each
+    /// convergence-axis test can mutate just that one axis.
+    fn fixture_with_param(p: ParamFlow) -> FileSummary {
+        let mut summary = FileSummary {
+            path: PathBuf::from("/virt/file.ts"),
+            ..Default::default()
+        };
+        summary.exports.insert(
+            "handler".into(),
+            ExportedFunctionSummary {
+                name: "handler".into(),
+                params: vec![p],
+                span: Span::new(PathBuf::from("/virt/file.ts"), 0, 0),
+                contains_auth_check: false,
+                validates_request_body: false,
+            },
+        );
+        summary
+    }
+
+    fn signal_for(file: FileSummary) -> ConvergenceSignal {
+        let mut idx = ProjectIndex::new();
+        idx.insert_file(file);
+        idx.finalize();
+        convergence_signal(&idx)
+    }
+
+    /// ADR 0004 contract — the convergence signal must distinguish
+    /// every taint-flow axis on `ParamFlow`. When you add a new
+    /// boolean/collection axis, add a per-axis test here in lockstep
+    /// or the fixed-point loop will silently under-detect through
+    /// the missing axis.
+    #[test]
+    fn convergence_signal_reflects_reaches_db_sink_unsanitized() {
+        let zero = signal_for(fixture_with_param(ParamFlow::default()));
+        let one = signal_for(fixture_with_param(ParamFlow {
+            reaches_db_sink_unsanitized: true,
+            ..Default::default()
+        }));
+        assert_ne!(zero, one, "sink_params axis must affect the signal");
+    }
+
+    #[test]
+    fn convergence_signal_reflects_propagates_to_return() {
+        let zero = signal_for(fixture_with_param(ParamFlow::default()));
+        let one = signal_for(fixture_with_param(ParamFlow {
+            propagates_to_return: true,
+            ..Default::default()
+        }));
+        assert_ne!(zero, one, "propagating_params axis must affect the signal");
+    }
+
+    /// Slice 2 of ADR 0006 added `tainted_offsets`. Per ADR 0004, it
+    /// must be in the convergence tuple — this test guards against
+    /// the silent-under-detection regression where the loop declares
+    /// convergence while a callee's offset list is still growing.
+    #[test]
+    fn convergence_signal_reflects_tainted_offsets() {
+        let zero = signal_for(fixture_with_param(ParamFlow::default()));
+        let one = signal_for(fixture_with_param(ParamFlow {
+            tainted_offsets: vec![Offset::Field("id".into())],
+            ..Default::default()
+        }));
+        assert_ne!(
+            zero, one,
+            "tainted_offset_total axis must affect the signal"
+        );
+        // Two offsets distinguishable from one — the count, not just
+        // presence, is what matters.
+        let two = signal_for(fixture_with_param(ParamFlow {
+            tainted_offsets: vec![Offset::Field("id".into()), Offset::Field("name".into())],
+            ..Default::default()
+        }));
+        assert_ne!(one, two, "growing offset list must shift the signal");
+    }
 }
