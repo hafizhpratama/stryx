@@ -1633,6 +1633,9 @@ fn top_level_field_names(cell: &Cell) -> Option<Vec<String>> {
             if names.is_empty() { None } else { Some(names) }
         }
         Shape::Bot => None,
+        // `Arg` is an opaque placeholder until instantiated at a
+        // call site (slice 2.3b). No visible fields to surface.
+        Shape::Arg(_) => None,
     }
 }
 

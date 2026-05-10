@@ -85,13 +85,30 @@ pub enum Xtaint {
     Clean,
 }
 
+/// Content-stable identity for a function parameter — the
+/// `(function-id, parameter-index)` pair that uniquely names a
+/// parameter slot across summaries. Used by [`Shape::Arg`] as the
+/// polymorphic-shape-variable identity.
+///
+/// `fn_id` is the function's stable name (export name for exported
+/// functions, mangled `local::name` for locals). `idx` is the
+/// 0-based parameter position. Together they're stable across runs
+/// so cache keys per ADR 0005 stay valid.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct ArgId {
+    pub fn_id: String,
+    pub idx: u32,
+}
+
 /// A taint shape — Semgrep's `shape` from `Shape_and_sig.ml`. A shape
 /// approximates the *structure* of a value being tracked, with each
 /// reachable cell carrying its own [`Xtaint`].
 ///
-/// Slice 2.1a ships only [`Shape::Bot`] and [`Shape::Obj`]. The
-/// polymorphic-parameter constructor (`Arg`) lands in slice 2.3 and
-/// the higher-order-function constructor (`Fun`) in slice 2.4.
+/// Slice 2.1a shipped [`Shape::Bot`] and [`Shape::Obj`]. Slice 2.3
+/// adds [`Shape::Arg`] — the polymorphic shape variable, used as a
+/// placeholder for "this parameter's shape is whatever the caller
+/// passed; we'll instantiate at the call site." The higher-order-
+/// function constructor (`Fun`) lands in slice 2.4.
 ///
 /// `Obj` keys are [`Offset`]s, sorted via the derived `Ord` so
 /// serialised summaries are deterministic. JS/TS dot-vs-bracket
@@ -114,6 +131,15 @@ pub enum Shape {
     /// constant indexes and `Offset::Any` for the wildcard. Missing
     /// keys inherit from the surrounding cell's xtaint.
     Obj(#[serde(with = "offset_map_serde")] std::collections::BTreeMap<Offset, Cell>),
+    /// Polymorphic shape variable — a placeholder for "this
+    /// parameter's shape is whatever the caller passes." The
+    /// summary records `Arg(arg_id)` during extraction; consumers
+    /// at call sites instantiate the variable with the caller's
+    /// actual shape (slice 2.3b will wire that in). Until then,
+    /// `Arg` is treated as informational-but-opaque: it is
+    /// preserved by canonicalize and merge, contributes no Tainted
+    /// leaves, and exposes no visible fields.
+    Arg(ArgId),
 }
 
 /// Serde adapter that encodes a `BTreeMap<Offset, V>` as a sorted
@@ -153,13 +179,14 @@ mod offset_map_serde {
 /// 2.1b, documented here so producers can build canonical cells
 /// directly when convenient):
 ///
-/// 1. If `xtaint == Xtaint::None`, then `shape != Shape::Bot` and
-///    the shape transitively reaches a `Tainted`/`Clean` cell.
-///    Otherwise the cell carries no information and should be
-///    omitted from its parent map.
+/// 1. If `xtaint == Xtaint::None`, then `shape` carries information
+///    — either a non-empty `Obj` that transitively reaches a
+///    `Tainted`/`Clean` cell, or an `Arg(...)` placeholder (slice
+///    2.3). Plain `None+Bot` carries no information and is dropped
+///    by canonicalize.
 /// 2. If `xtaint == Xtaint::Clean`, then `shape == Shape::Bot`.
-///    Cleanness shadows sub-structure; any `Obj` content under a
-///    `Clean` cell is meaningless.
+///    Cleanness shadows sub-structure; any `Obj`/`Arg` content
+///    under a `Clean` cell is meaningless.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     pub xtaint: Xtaint,
@@ -219,10 +246,14 @@ impl Cell {
     pub fn merge_into(&mut self, source: &Cell) {
         // Xtaint join.
         self.xtaint = merge_xtaint(&self.xtaint, &source.xtaint);
-        // Shape join.
+        // Shape join. Concrete `Obj` beats opaque `Arg` beats `Bot`.
+        // Two `Arg`s with the same id collapse to one; different ids
+        // fall back to `Bot` (we don't have a representation for "two
+        // different polymorphic placeholders" — slice 2.3b can revisit
+        // when a producer comes online).
         match (&source.shape, &mut self.shape) {
             (Shape::Bot, _) => { /* nothing to add */ }
-            (src @ Shape::Obj(_), Shape::Bot) => {
+            (src @ Shape::Obj(_), Shape::Bot | Shape::Arg(_)) => {
                 self.shape = src.clone();
             }
             (Shape::Obj(s_map), Shape::Obj(t_map)) => {
@@ -231,6 +262,17 @@ impl Cell {
                     t_cell.merge_into(s_cell);
                 }
             }
+            (src @ Shape::Arg(_), Shape::Bot) => {
+                self.shape = src.clone();
+            }
+            (Shape::Arg(s_id), Shape::Arg(t_id)) => {
+                if s_id != t_id {
+                    // Different placeholders — conservatively drop to Bot.
+                    self.shape = Shape::Bot;
+                }
+                // Same id: leave self alone (already Arg(t_id)).
+            }
+            (Shape::Arg(_), Shape::Obj(_)) => { /* concrete wins; leave self */ }
         }
     }
 
@@ -245,6 +287,7 @@ impl Cell {
         let here = matches!(self.xtaint, Xtaint::Tainted(_)) as usize;
         let nested = match &self.shape {
             Shape::Bot => 0,
+            Shape::Arg(_) => 0,
             Shape::Obj(map) => map.values().map(Self::count_tainted_leaves).sum(),
         };
         here + nested
@@ -296,7 +339,8 @@ impl Cell {
             other => other,
         };
         let shape = canonicalize_shape(shape);
-        // Invariant 1: None + Bot is meaningless — drop.
+        // Invariant 1: None + Bot is meaningless — drop. None + Arg
+        // is preserved (the placeholder identity is information).
         match (&xtaint, &shape) {
             (Xtaint::None, Shape::Bot) => None,
             _ => Some(Self { xtaint, shape }),
@@ -328,10 +372,13 @@ fn merge_xtaint(a: &Xtaint, b: &Xtaint) -> Xtaint {
 
 /// Canonicalize a [`Shape`]. Recursive helper for
 /// [`Cell::canonicalize`]; an empty `Obj` (after entry-pruning)
-/// collapses to `Bot`.
+/// collapses to `Bot`. `Arg` is preserved as-is — it's a
+/// placeholder identity that is meaningful even without internal
+/// structure (slice 2.3 of ADR 0006).
 fn canonicalize_shape(shape: Shape) -> Shape {
     match shape {
         Shape::Bot => Shape::Bot,
+        Shape::Arg(id) => Shape::Arg(id),
         Shape::Obj(map) => {
             let pruned: std::collections::BTreeMap<Offset, Cell> = map
                 .into_iter()
@@ -793,6 +840,114 @@ mod tests {
         let mut target = original.clone();
         target.merge_into(&Cell::bot());
         assert_eq!(target.shape, original.shape);
+    }
+
+    // ── Arg placeholder tests (slice 2.3 of ADR 0006) ───────────────────
+
+    fn arg_id(name: &str, idx: u32) -> ArgId {
+        ArgId {
+            fn_id: name.into(),
+            idx,
+        }
+    }
+
+    fn arg_cell(id: ArgId) -> Cell {
+        Cell {
+            xtaint: Xtaint::None,
+            shape: Shape::Arg(id),
+        }
+    }
+
+    #[test]
+    fn arg_placeholder_serde_roundtrips() {
+        let cell = arg_cell(arg_id("createUser", 0));
+        let json = serde_json::to_string(&cell).unwrap();
+        let back: Cell = serde_json::from_str(&json).unwrap();
+        assert_eq!(cell, back);
+    }
+
+    #[test]
+    fn canonicalize_preserves_none_arg_cell() {
+        // Unlike `None+Bot`, `None+Arg` carries the placeholder
+        // identity and must survive canonicalize. Slice 2.3b will
+        // instantiate this at call sites; until then it must stick
+        // around in summaries.
+        let cell = arg_cell(arg_id("pickField", 0));
+        assert_eq!(cell.clone().canonicalize(), Some(cell));
+    }
+
+    #[test]
+    fn canonicalize_clean_still_flattens_arg() {
+        // Invariant 2: Clean shadows everything, including Arg.
+        let cell = Cell {
+            xtaint: Xtaint::Clean,
+            shape: Shape::Arg(arg_id("anywhere", 1)),
+        };
+        let canonical = cell.canonicalize().expect("not dropped");
+        assert_eq!(canonical.shape, Shape::Bot);
+    }
+
+    #[test]
+    fn merge_into_obj_beats_arg() {
+        // Concrete sub-structure beats opaque placeholder.
+        let mut target = arg_cell(arg_id("f", 0));
+        let source = obj(vec![(
+            Offset::Field("a".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        )]);
+        target.merge_into(&source);
+        assert!(matches!(target.shape, Shape::Obj(_)));
+    }
+
+    #[test]
+    fn merge_into_arg_beats_bot() {
+        let mut target = Cell::bot();
+        let id = arg_id("f", 0);
+        target.merge_into(&arg_cell(id.clone()));
+        assert_eq!(target.shape, Shape::Arg(id));
+    }
+
+    #[test]
+    fn merge_into_same_arg_id_is_idempotent() {
+        let id = arg_id("pickField", 0);
+        let mut target = arg_cell(id.clone());
+        target.merge_into(&arg_cell(id.clone()));
+        assert_eq!(target.shape, Shape::Arg(id));
+    }
+
+    #[test]
+    fn merge_into_different_arg_ids_drops_to_bot() {
+        // We don't have a representation for two different
+        // polymorphic placeholders — conservatively drop.
+        let mut target = arg_cell(arg_id("f", 0));
+        target.merge_into(&arg_cell(arg_id("g", 0)));
+        assert_eq!(target.shape, Shape::Bot);
+    }
+
+    #[test]
+    fn merge_into_obj_target_keeps_obj_when_source_is_arg() {
+        // Concrete target wins over opaque source.
+        let mut target = obj(vec![(
+            Offset::Field("a".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        )]);
+        target.merge_into(&arg_cell(arg_id("f", 0)));
+        assert!(matches!(target.shape, Shape::Obj(_)));
+    }
+
+    #[test]
+    fn arg_contributes_no_tainted_leaves() {
+        // A placeholder by itself is not tainted; it only becomes
+        // tainted after instantiation. count_tainted_leaves must
+        // return 0 for `None+Arg`.
+        let cell = arg_cell(arg_id("f", 0));
+        assert_eq!(cell.count_tainted_leaves(), 0);
+        // But a Tainted+Arg would count its own xtaint:
+        let tainted_arg = Cell {
+            xtaint: Xtaint::Tainted(vec![TaintLabel::UserInput]),
+            shape: Shape::Arg(arg_id("f", 0)),
+        };
+        assert_eq!(tainted_arg.count_tainted_leaves(), 1);
     }
 
     #[test]

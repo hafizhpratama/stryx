@@ -532,6 +532,9 @@ fn unvalidated_body_to_db_composes_shapes_cross_file() {
                     // shape gets installed via the Bot→Obj branch.
                     panic!("expected user to have Obj sub-shape from cross-file composition");
                 }
+                Shape::Arg(_) => {
+                    panic!("Arg placeholder shouldn't appear here — no producer yet");
+                }
             }
         }
         other => panic!("callerWithChain: expected Obj{{user}}, got {other:?}"),
