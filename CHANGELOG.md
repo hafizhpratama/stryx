@@ -81,6 +81,30 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   hooks. Will be swapped to a release-binary download path once
   v0.1.0 ships prebuilt artifacts.
 
+### Changed
+- `flow/unvalidated-body-to-db` now downgrades where-only Prisma
+  writes from High to Medium. When `req.body` flows ONLY into a
+  `prisma.X.update/delete({ where: {...} })` clause (used as a
+  primary-key filter, not stored content), the finding fires at
+  Medium so a `--fail-on=high` CI gate doesn't break on the
+  lower-impact pattern. Drizzle / TypeORM / Mongoose sinks (whole
+  arg is content) keep High.
+- `flow/unvalidated-body-to-db` now detects validation-wrapper
+  patterns at export. When a handler is wrapped at export by a
+  function whose body calls `<schema>.parse(req.body)` /
+  `safeParse(...)`, the inner handler's `req.body` reads are
+  treated as already structurally validated. Inverse of
+  `flow/auth-bypass-via-wrapper`: every function summary now
+  carries a `validates_request_body` flag populated at extract
+  time; FileSummary tracks `body_validated_handlers` for run-pass
+  suppression. Recovers the cal.com `vital/save.ts` FP.
+- `flow/secret-to-response` no longer taints destructure keys whose
+  name is exactly a secret keyword (bare `key`, `token`, `secret`,
+  etc.). Compound names (`apiKey`, `accessToken`,
+  `STRIPE_SECRET_KEY`) still taint. Recovers the documenso S3
+  presigned-URL `key` FP — a name like `key` is overwhelmingly an
+  S3 object key, not a credential.
+
 ### Coming soon (v0.1, planned)
 - Foundational crates `stryx_index` (project semantic index) and
   `stryx_taint` (inter-procedural taint engine), per ADR 0003

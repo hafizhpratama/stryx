@@ -73,6 +73,16 @@ impl Rule for UnvalidatedBodyToDb {
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
         let mut visitor = FlowVisitor::new(ctx.file.path.clone(), ctx.index);
         visitor.collect_allow_lists(&ctx.file.program);
+        // Pull pre-validated handler names from the file's summary,
+        // built during the extract pass. Inside these handlers, body
+        // taint sourcing is suppressed.
+        if let Some(index) = ctx.index
+            && let Some(summary) = index.file(&ctx.file.path)
+        {
+            visitor
+                .body_validated_handlers
+                .clone_from(&summary.body_validated_handlers);
+        }
         visitor.visit_program(&ctx.file.program);
         visitor.findings
     }
@@ -101,6 +111,20 @@ struct FlowVisitor<'idx> {
     /// methods so `this.<member>.<method>(arg)` can resolve `<member>`
     /// against the enclosing class's `field_types`.
     class_stack: Vec<String>,
+    /// Names of handlers whose `req.body` is suppressed as a taint
+    /// source — populated from
+    /// `FileSummary::body_validated_handlers` at run time.
+    body_validated_handlers: HashSet<String>,
+    /// Suppression depth. Incremented when entering a function that
+    /// matches `body_validated_handlers`; while > 0, body-source
+    /// recognition (`req.body`, `req.json()`, `@Body()` decorator
+    /// pre-taint) is disabled.
+    body_source_suppressed: u32,
+    /// Last-seen binding-identifier name from a `VariableDeclarator`,
+    /// consumed by the next `visit_arrow_function_expression` /
+    /// `visit_function` to recover the function's effective name for
+    /// arrow / anonymous-function expressions assigned to a const.
+    pending_binding_name: Option<String>,
 }
 
 impl<'idx> FlowVisitor<'idx> {
@@ -113,6 +137,9 @@ impl<'idx> FlowVisitor<'idx> {
             tainted_return: false,
             allow_lists: HashSet::new(),
             class_stack: Vec::new(),
+            body_validated_handlers: HashSet::new(),
+            body_source_suppressed: 0,
+            pending_binding_name: None,
         }
     }
 
@@ -130,6 +157,25 @@ impl<'idx> FlowVisitor<'idx> {
 
     fn is_tainted(&self, name: &str) -> bool {
         self.scopes.iter().rev().any(|scope| scope.contains(name))
+    }
+
+    /// Body-source recognition gated by the validation-wrapper
+    /// suppression depth. When the visitor is inside a handler whose
+    /// outer wrapper validates `req.body` against a schema, both
+    /// `req.body`-shape access and `req.json()`-shape calls are
+    /// treated as already-clean — the wrapper has already enforced
+    /// the schema before delegating, so the inner handler's body
+    /// reads are guaranteed to be structured.
+    fn body_source_active(&self) -> bool {
+        self.body_source_suppressed == 0
+    }
+
+    fn matches_body_member(&self, object: &Expression<'_>, prop: &str) -> bool {
+        self.body_source_active() && is_request_body_member(object, prop)
+    }
+
+    fn matches_body_call(&self, call: &CallExpression<'_>) -> bool {
+        self.body_source_active() && is_body_source_call(call)
     }
 
     fn taint(&mut self, name: String) {
@@ -496,7 +542,7 @@ impl<'idx> FlowVisitor<'idx> {
                     return false;
                 }
                 // A request-body source call returns tainted data.
-                if is_body_source_call(call) {
+                if self.matches_body_call(call) {
                     return true;
                 }
                 // For any other call, taint propagates if a tainted
@@ -522,7 +568,7 @@ impl<'idx> FlowVisitor<'idx> {
 
             Expression::StaticMemberExpression(m) => {
                 // `req.body` / `request.body` are body sources.
-                if is_request_body_member(&m.object, m.property.name.as_str()) {
+                if self.matches_body_member(&m.object, m.property.name.as_str()) {
                     return true;
                 }
                 self.expr_taint(&m.object)
@@ -641,7 +687,7 @@ impl<'idx> FlowVisitor<'idx> {
                 if is_sanitizer_call(call) || is_db_read_call(call) {
                     return false;
                 }
-                if is_body_source_call(call) {
+                if self.matches_body_call(call) {
                     return true;
                 }
                 let summary = self.lookup_callee_summary(&call.callee);
@@ -658,13 +704,113 @@ impl<'idx> FlowVisitor<'idx> {
             }
             ChainElement::TSNonNullExpression(t) => self.expr_taint(&t.expression),
             ChainElement::StaticMemberExpression(m) => {
-                if is_request_body_member(&m.object, m.property.name.as_str()) {
+                if self.matches_body_member(&m.object, m.property.name.as_str()) {
                     return true;
                 }
                 self.expr_taint(&m.object)
             }
             ChainElement::ComputedMemberExpression(m) => self.expr_taint(&m.object),
             ChainElement::PrivateFieldExpression(m) => self.expr_taint(&m.object),
+        }
+    }
+
+    /// Classify *how* the tainted value flows into a DB write call, then
+    /// emit a finding at the appropriate severity. Splitting the verdict
+    /// matters because:
+    ///
+    /// - `prisma.X.update({ where: { email }, data: { lockedAt: null } })`
+    ///   uses `email` as a primary-key lookup. The `data` block is
+    ///   hardcoded; no untrusted content reaches storage. Worth
+    ///   surfacing (still wrong to skip schema validation), but lower
+    ///   priority than a real content write — emit at `Medium`.
+    /// - `prisma.X.update({ where: {...}, data: { ...body } })` writes
+    ///   untrusted content into the row. This is the original failure
+    ///   mode the rule was built for — emit at `High`.
+    ///
+    /// For drizzle / TypeORM / Mongoose sinks, the whole call argument
+    /// is content (no `where`/`data` split), so we always emit `High`
+    /// when any argument is tainted.
+    fn emit_db_sink_finding(&mut self, call: &CallExpression<'_>) {
+        let (severity, where_only) = self.classify_db_sink_taint(call);
+        let Some(severity) = severity else {
+            return;
+        };
+        let callee_label = callee_chain(&call.callee).unwrap_or_else(|| "db sink".into());
+        let (message, help) = if where_only {
+            (
+                format!(
+                    "Untrusted request body reaches `{callee_label}` as a `where` lookup key without validation.",
+                ),
+                "The body field is used as a primary-key filter, not stored content — but a schema check still rules out type-confusion attacks against the lookup.",
+            )
+        } else {
+            (
+                format!(
+                    "Untrusted request body reaches `{callee_label}` without a validating parser along the path.",
+                ),
+                "Validate the body with zod/valibot/yup before passing it to the DB write.",
+            )
+        };
+        self.findings.push(
+            Finding::ast(RULE_ID, severity, message, to_span(&self.file, call.span))
+                .with_help(help),
+        );
+    }
+
+    /// Returns `(Some(severity), where_only)` if the call has tainted
+    /// arguments, `(None, _)` if it doesn't fire. `where_only` is true
+    /// when the only tainted property of a Prisma write argument is
+    /// under a `where` key.
+    fn classify_db_sink_taint(&self, call: &CallExpression<'_>) -> (Option<Severity>, bool) {
+        let any_tainted = call.arguments.iter().any(|arg| {
+            argument_expr(arg)
+                .map(|e| self.expr_is_tainted_readonly(e))
+                .unwrap_or(false)
+        });
+        if !any_tainted {
+            return (None, false);
+        }
+        // Only Prisma writes get the where-vs-data split — drizzle and
+        // TypeORM-shape sinks pass the content directly as the call arg.
+        if !is_prisma_write_sink(call) {
+            return (Some(Severity::High), false);
+        }
+        let Some(first) = call.arguments.first().and_then(argument_expr) else {
+            return (Some(Severity::High), false);
+        };
+        let obj = match first {
+            Expression::ObjectExpression(o) => o,
+            _ => return (Some(Severity::High), false),
+        };
+        let mut where_tainted = false;
+        let mut content_tainted = false;
+        for prop in &obj.properties {
+            let ObjectPropertyKind::ObjectProperty(p) = prop else {
+                // Spread (`{ ...body }`) bypasses the where/data split —
+                // treat as content-tainted to be safe.
+                if let ObjectPropertyKind::SpreadProperty(s) = prop
+                    && self.expr_is_tainted_readonly(&s.argument)
+                {
+                    content_tainted = true;
+                }
+                continue;
+            };
+            let key = match &p.key {
+                PropertyKey::StaticIdentifier(id) => id.name.as_str(),
+                _ => continue,
+            };
+            if !self.expr_is_tainted_readonly(&p.value) {
+                continue;
+            }
+            match key {
+                "where" => where_tainted = true,
+                "data" | "create" | "update" => content_tainted = true,
+                _ => content_tainted = true,
+            }
+        }
+        match (where_tainted, content_tainted) {
+            (true, false) => (Some(Severity::Medium), true),
+            _ => (Some(Severity::High), false),
         }
     }
 
@@ -679,27 +825,7 @@ impl<'idx> FlowVisitor<'idx> {
                 self.check_cross_file_call(call);
 
                 if is_db_write_sink(call) {
-                    let any_tainted = call.arguments.iter().any(|arg| {
-                        argument_expr(arg)
-                            .map(|e| self.expr_is_tainted_readonly(e))
-                            .unwrap_or(false)
-                    });
-                    if any_tainted {
-                        self.findings.push(
-                            Finding::ast(
-                                RULE_ID,
-                                Severity::High,
-                                format!(
-                                    "Untrusted request body reaches `{}` without a validating parser along the path.",
-                                    callee_chain(&call.callee).unwrap_or_else(|| "db sink".into())
-                                ),
-                                to_span(&self.file, call.span),
-                            )
-                            .with_help(
-                                "Validate the body with zod/valibot/yup before passing it to the DB write.",
-                            ),
-                        );
-                    }
+                    self.emit_db_sink_finding(call);
                 }
                 // Recurse into callee + args to catch nested sinks.
                 self.scan_for_sinks(&call.callee);
@@ -735,27 +861,7 @@ impl<'idx> FlowVisitor<'idx> {
                 ChainElement::CallExpression(call) => {
                     self.check_cross_file_call(call);
                     if is_db_write_sink(call) {
-                        let any_tainted = call.arguments.iter().any(|arg| {
-                            argument_expr(arg)
-                                .map(|e| self.expr_is_tainted_readonly(e))
-                                .unwrap_or(false)
-                        });
-                        if any_tainted {
-                            self.findings.push(
-                                Finding::ast(
-                                    RULE_ID,
-                                    Severity::High,
-                                    format!(
-                                        "Untrusted request body reaches `{}` without a validating parser along the path.",
-                                        callee_chain(&call.callee).unwrap_or_else(|| "db sink".into())
-                                    ),
-                                    to_span(&self.file, call.span),
-                                )
-                                .with_help(
-                                    "Validate the body with zod/valibot/yup before passing it to the DB write.",
-                                ),
-                            );
-                        }
+                        self.emit_db_sink_finding(call);
                     }
                     self.scan_for_sinks(&call.callee);
                     for arg in &call.arguments {
@@ -790,7 +896,7 @@ impl<'idx> FlowVisitor<'idx> {
             Expression::AwaitExpression(a) => self.expr_is_tainted_readonly(&a.argument),
             Expression::ParenthesizedExpression(p) => self.expr_is_tainted_readonly(&p.expression),
             Expression::StaticMemberExpression(m) => {
-                if is_request_body_member(&m.object, m.property.name.as_str()) {
+                if self.matches_body_member(&m.object, m.property.name.as_str()) {
                     return true;
                 }
                 self.expr_is_tainted_readonly(&m.object)
@@ -800,7 +906,7 @@ impl<'idx> FlowVisitor<'idx> {
                 if is_sanitizer_call(call) || is_db_read_call(call) {
                     return false;
                 }
-                if is_body_source_call(call) {
+                if self.matches_body_call(call) {
                     return true;
                 }
                 let summary = self.lookup_callee_summary(&call.callee);
@@ -842,7 +948,7 @@ impl<'idx> FlowVisitor<'idx> {
                     if is_sanitizer_call(call) || is_db_read_call(call) {
                         return false;
                     }
-                    if is_body_source_call(call) {
+                    if self.matches_body_call(call) {
                         return true;
                     }
                     let summary = self.lookup_callee_summary(&call.callee);
@@ -859,7 +965,7 @@ impl<'idx> FlowVisitor<'idx> {
                     self.expr_is_tainted_readonly(&t.expression)
                 }
                 ChainElement::StaticMemberExpression(m) => {
-                    if is_request_body_member(&m.object, m.property.name.as_str()) {
+                    if self.matches_body_member(&m.object, m.property.name.as_str()) {
                         return true;
                     }
                     self.expr_is_tainted_readonly(&m.object)
@@ -880,27 +986,66 @@ impl<'idx> FlowVisitor<'idx> {
 }
 
 impl<'a, 'idx> Visit<'a> for FlowVisitor<'idx> {
+    fn visit_variable_declarator(&mut self, decl: &stryx_ast::ast::VariableDeclarator<'a>) {
+        // Capture the binding name so the next visit_arrow / visit_function
+        // can recover its effective name. `const handler = async (req) => {}`
+        // has no `Function::id`, but the surrounding declarator does.
+        let prev = self.pending_binding_name.take();
+        if let BindingPattern::BindingIdentifier(id) = &decl.id {
+            self.pending_binding_name = Some(id.name.to_string());
+        }
+        stryx_ast::walk::walk_variable_declarator(self, decl);
+        self.pending_binding_name = prev;
+    }
+
     fn visit_function(&mut self, func: &Function<'a>, flags: ScopeFlags) {
+        let name = func
+            .id
+            .as_ref()
+            .map(|id| id.name.to_string())
+            .or_else(|| self.pending_binding_name.clone());
+        let suppress = name
+            .as_deref()
+            .is_some_and(|n| self.body_validated_handlers.contains(n));
+        if suppress {
+            self.body_source_suppressed += 1;
+        }
         self.enter_fn();
         // NestJS and similar frameworks declare body sources via parameter
         // decorators (`@Body() dto: CreateUserDto`). Pre-taint any param
         // marked with one — the framework will inject body data there.
-        for name in body_decorated_param_names(&func.params) {
-            self.taint(name);
+        // Skip when the enclosing wrapper has already validated the body.
+        if self.body_source_active() {
+            for pname in body_decorated_param_names(&func.params) {
+                self.taint(pname);
+            }
         }
         if let Some(body) = &func.body {
             self.handle_function_body(&body.statements);
         }
         self.exit_fn();
+        if suppress {
+            self.body_source_suppressed -= 1;
+        }
         let _ = flags;
     }
 
     fn visit_arrow_function_expression(&mut self, arrow: &ArrowFunctionExpression<'a>) {
+        let suppress = self
+            .pending_binding_name
+            .as_deref()
+            .is_some_and(|n| self.body_validated_handlers.contains(n));
+        if suppress {
+            self.body_source_suppressed += 1;
+        }
         self.enter_fn();
         // Arrow body is always a FunctionBody; its `statements` contains the
         // expression-bodied case wrapped as a single ExpressionStatement.
         self.handle_function_body(&arrow.body.statements);
         self.exit_fn();
+        if suppress {
+            self.body_source_suppressed -= 1;
+        }
     }
 
     fn visit_class(&mut self, class: &Class<'a>) {
@@ -1499,7 +1644,59 @@ fn extract_summary(
         }
     }
 
+    // Second pass: detect `export default <wrapper>(<inner>)` and
+    // `export const X = <wrapper>(<inner>)` patterns where <wrapper>
+    // resolves to a same-file function whose body validates
+    // `req.body`. The <inner> handler's body taint is suppressed at
+    // run time. Cross-file wrappers are handled in slice 2.
+    for stmt in &program.body {
+        if let Some(inner) = wrap_at_export_inner(stmt, &summary) {
+            summary.body_validated_handlers.insert(inner);
+        }
+    }
+
     summary
+}
+
+/// Detects `export default <wrapper>(<inner>)` and
+/// `export const _ = <wrapper>(<inner>)` patterns. Returns the inner
+/// handler's local name when the wrapper is a same-file function
+/// whose body validates `req.body`.
+fn wrap_at_export_inner(stmt: &Statement<'_>, summary: &FileSummary) -> Option<String> {
+    let call = match stmt {
+        Statement::ExportDefaultDeclaration(decl) => match &decl.declaration {
+            ExportDefaultDeclarationKind::CallExpression(c) => c,
+            _ => return None,
+        },
+        Statement::ExportNamedDeclaration(decl) => match decl.declaration.as_ref()? {
+            Declaration::VariableDeclaration(var) => {
+                let declarator = var.declarations.first()?;
+                match &declarator.init {
+                    Some(Expression::CallExpression(c)) => c,
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        },
+        _ => return None,
+    };
+    let Expression::Identifier(wrapper_id) = &call.callee else {
+        return None;
+    };
+    let wrapper_name = wrapper_id.name.as_str();
+    let wrapper_summary = summary
+        .exports
+        .get(wrapper_name)
+        .or_else(|| summary.locals.get(wrapper_name))?;
+    if !wrapper_summary.validates_request_body {
+        return None;
+    }
+    // The inner handler is the wrapper's first argument, expected to
+    // be a bare identifier referring to a local function or arrow.
+    let Expression::Identifier(inner_id) = call.arguments.first()?.as_expression()? else {
+        return None;
+    };
+    Some(inner_id.name.to_string())
 }
 
 fn collect_imports(decl: &ImportDeclaration<'_>, summary: &mut FileSummary) {
@@ -1796,6 +1993,75 @@ fn build_summary(
         params: params_out,
         span: Span::new(file.to_path_buf(), params.span.start, params.span.end),
         contains_auth_check: contains_auth_helper_call(body),
+        validates_request_body: body_validates_request(body),
+    }
+}
+
+/// True if `body` contains a call shaped like
+/// `<schema>.parse(req.body)` or `<schema>.safeParse(req.body)`. Used
+/// to mark validation-wrapper functions whose presence at an export
+/// site (`export default validate(handler)`) lets us treat the inner
+/// handler's `req.body` as already structurally validated.
+pub(crate) fn body_validates_request(body: &[Statement<'_>]) -> bool {
+    let mut visitor = BodyValidationVisitor { found: false };
+    for stmt in body {
+        visitor.visit_statement(stmt);
+        if visitor.found {
+            return true;
+        }
+    }
+    false
+}
+
+struct BodyValidationVisitor {
+    found: bool,
+}
+
+impl<'a> Visit<'a> for BodyValidationVisitor {
+    fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
+        if self.found {
+            return;
+        }
+        if call_validates_request_body(call) {
+            self.found = true;
+            return;
+        }
+        stryx_ast::walk::walk_call_expression(self, call);
+    }
+}
+
+fn call_validates_request_body(call: &CallExpression<'_>) -> bool {
+    // `<expr>.parse(<arg>)` or `<expr>.safeParse(<arg>)` where <arg>
+    // is a request-body source. The receiver expression is opaque —
+    // any zod-like schema works.
+    let Some(MemberExpression::StaticMemberExpression(method)) = call.callee.as_member_expression()
+    else {
+        return false;
+    };
+    if !matches!(
+        method.property.name.as_str(),
+        "parse" | "safeParse" | "parseAsync" | "safeParseAsync"
+    ) {
+        return false;
+    }
+    let Some(first) = call.arguments.first().and_then(argument_expr) else {
+        return false;
+    };
+    expression_reads_request_body(first)
+}
+
+/// `req.body`, `request.body`, or an `await req.json()` / `req.text()`
+/// / `req.formData()` call — anything we'd taint in expr_taint as a
+/// fresh body source.
+fn expression_reads_request_body(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::StaticMemberExpression(m) => {
+            is_request_body_member(&m.object, m.property.name.as_str())
+        }
+        Expression::AwaitExpression(a) => expression_reads_request_body(&a.argument),
+        Expression::ParenthesizedExpression(p) => expression_reads_request_body(&p.expression),
+        Expression::CallExpression(c) => is_body_source_call(c),
+        _ => false,
     }
 }
 

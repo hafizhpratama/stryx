@@ -73,6 +73,15 @@ pub struct FileSummary {
     /// where the controller's method delegates to an injected service.
     #[serde(default)]
     pub classes: HashMap<String, ClassInfo>,
+    /// Local handler names that are wrapped at export by a function
+    /// whose body validates `req.body` (e.g.
+    /// `export default validate(handler)` where `validate`'s body
+    /// calls `Schema.parse(req.body)`). Inside these handlers,
+    /// `flow/unvalidated-body-to-db` suppresses `req.body` as a
+    /// taint source — the body has already been schema-checked by
+    /// the wrapper.
+    #[serde(default)]
+    pub body_validated_handlers: std::collections::HashSet<String>,
 }
 
 /// Project-wide index produced at the end of pass 1. Pass 2 hands a

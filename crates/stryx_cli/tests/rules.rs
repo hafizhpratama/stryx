@@ -231,6 +231,81 @@ fn unvalidated_body_to_db_cross_file_good_silent() {
 }
 
 #[test]
+fn unvalidated_body_to_db_validate_wrapper_silent() {
+    // `export default validate(handler)` where `validate`'s body
+    // calls `Schema.parse(req.body)` before delegating. The inner
+    // handler's `req.body` reads should NOT taint — the wrapper has
+    // already enforced the schema. Real-world FP from cal.com
+    // vital/save.ts.
+    let path = fixtures_root().join("flow-unvalidated-body-to-db/validate-wrapper/good.ts");
+    let source = std::fs::read_to_string(&path).expect("read fixture");
+    let allocator = Allocator::default();
+    let parsed = parse(&allocator, &path, &source).expect("parse fixture");
+    let registry = builtin_rules();
+
+    // Run extract once to populate the index, then run.
+    let mut index = ProjectIndex::new();
+    let summaries: Vec<_> = {
+        let extract_index = ProjectIndex::new();
+        let ctx = RuleContext {
+            file: &parsed,
+            index: Some(&extract_index),
+        };
+        registry
+            .rules()
+            .iter()
+            .filter_map(|r| r.extract(&ctx))
+            .collect()
+    };
+    for s in summaries {
+        index.insert_file(s);
+    }
+    index.finalize();
+    let ctx = RuleContext {
+        file: &parsed,
+        index: Some(&index),
+    };
+    let findings: Vec<_> = registry
+        .rules()
+        .iter()
+        .flat_map(|r| r.run(&ctx))
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "wrapper validates req.body via Schema.parse — expected zero findings, got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unvalidated_body_to_db_where_only_emits_medium() {
+    // Body field used purely as a primary-key filter in a Prisma where
+    // clause; the data block is hardcoded. Rule fires at Medium, not
+    // High — `--fail-on=high` CI gates won't break, but the issue is
+    // surfaced for review.
+    let path = fixtures_root().join("flow-unvalidated-body-to-db/where-only/bad.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert_eq!(findings.len(), 1, "expected exactly one where-only finding");
+    let f = &findings[0];
+    assert_eq!(
+        f.severity,
+        Severity::Medium,
+        "where-only path must downgrade to Medium, got {:?}; message: {}",
+        f.severity,
+        f.message,
+    );
+    assert!(
+        f.message.contains("`where`"),
+        "message should call out the where-clause shape; got: {}",
+        f.message,
+    );
+}
+
+#[test]
 fn auth_bypass_via_wrapper_bad_fires() {
     // route.ts wraps an admin handler in withAuth, but lib.ts's
     // withAuth is a no-op `return handler`. Stryx should follow the

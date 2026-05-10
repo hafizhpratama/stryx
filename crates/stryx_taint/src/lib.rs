@@ -61,6 +61,14 @@ pub struct ExportedFunctionSummary {
     /// claim to.
     #[serde(default)]
     pub contains_auth_check: bool,
+    /// True iff the function's body validates `req.body` against a
+    /// schema before calling its inner handler — the inverse of
+    /// `contains_auth_check`. Consumed by `flow/unvalidated-body-to-db`
+    /// to suppress body-taint sourcing inside handlers wrapped by a
+    /// `validate(handler)`-shaped function whose body calls
+    /// `<schema>.parse(req.body)` or `<schema>.safeParse(...)`.
+    #[serde(default)]
+    pub validates_request_body: bool,
 }
 
 impl ExportedFunctionSummary {

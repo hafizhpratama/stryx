@@ -49,6 +49,23 @@ const PUBLIC_ENV_EXACT: &[&str] = &[
 /// from the secret.
 const REDACT_FN_NAMES: &[&str] = &["redact", "mask", "fingerprint", "hash"];
 
+/// Bare keyword names that are too generic to taint a binding on their
+/// own — `const { key } = getPresignPostUrl(...)` is overwhelmingly an
+/// S3 object key, not a credential. We only flag destructure keys that
+/// look like *compound* secret names (`apiKey`, `accessToken`,
+/// `STRIPE_SECRET_KEY`). A standalone keyword is too thin a signal.
+const TOO_GENERIC_BARE_NAMES: &[&str] = &[
+    "key",
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "private",
+    "jwt",
+    "dsn",
+];
+
 pub struct SecretToResponse {
     secret_name_re: Regex,
     credential_patterns: Vec<Regex>,
@@ -227,7 +244,10 @@ impl<'r> SecretFlowVisitor<'r> {
                     let BindingPattern::BindingIdentifier(b) = &prop.value else {
                         continue;
                     };
-                    if self.rule.secret_name_re.is_match(id.name.as_str()) {
+                    let key_name = id.name.as_str();
+                    if self.rule.secret_name_re.is_match(key_name)
+                        && !is_too_generic_bare_name(key_name)
+                    {
                         self.taint(b.name.to_string());
                     }
                 }
@@ -538,6 +558,18 @@ fn is_boolean_coercion(call: &CallExpression<'_>) -> bool {
         &call.callee,
         Expression::Identifier(id) if id.name == "Boolean"
     )
+}
+
+/// True if `name` is a bare secret-keyword (e.g. `key`, `token`)
+/// rather than a compound identifier (`apiKey`, `accessToken`,
+/// `STRIPE_SECRET_KEY`). Used to suppress destructure-key taint on
+/// generic names whose value most often isn't a credential — S3
+/// presigned-URL `key`, JSON parse-result `token` correlation IDs,
+/// and similar.
+fn is_too_generic_bare_name(name: &str) -> bool {
+    TOO_GENERIC_BARE_NAMES
+        .iter()
+        .any(|g| name.eq_ignore_ascii_case(g))
 }
 
 /// `JSON.stringify(x)` — preserves taint into a string. Recognised so

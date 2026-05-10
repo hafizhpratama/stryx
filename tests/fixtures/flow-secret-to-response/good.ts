@@ -43,3 +43,17 @@ export async function configEcho(config: any) {
 export async function honoSafe(c: any) {
   return c.json({ tokenPresent: Boolean(process.env.GITHUB_TOKEN) });
 }
+
+// 6. Bare-keyword destructure — `key` and `token` are too generic to
+// taint on their own. S3 presigned-URL `key` is an object path, not a
+// credential. `token` from a parse result is often a public correlation
+// ID. Compound names (`apiKey`, `accessToken`) still taint.
+declare function getPresignPostUrl(name: string): Promise<{ key: string; url: string }>;
+export async function presignSafe(c: any, fileName: string) {
+  const { key, url } = await getPresignPostUrl(fileName);
+  return c.json({ key, url });
+}
+export async function correlationSafe(c: any, raw: string) {
+  const { token } = JSON.parse(raw);
+  return c.json({ token });
+}
