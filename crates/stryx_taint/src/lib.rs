@@ -196,6 +196,44 @@ impl Cell {
         }
     }
 
+    /// Merge `source` into `self` in place, producing a cell that
+    /// reflects the union of taint information from both. Slice 2.1d
+    /// of ADR 0006 — the lattice-join used by cross-file
+    /// composition (caller absorbing a callee's parameter shape).
+    ///
+    /// Xtaint join semantics (over-approximating for security):
+    ///
+    /// - `Tainted(L1) ⊔ Tainted(L2) = Tainted(L1 ∪ L2)` — sorted+deduped
+    /// - `Tainted(L) ⊔ None | Clean    = Tainted(L)` — taint dominates
+    /// - `None | Clean ⊔ Tainted(L)    = Tainted(L)` — taint dominates
+    /// - `Clean ⊔ Clean = Clean`
+    /// - `Clean ⊔ None | None ⊔ Clean = None` — only mark Clean if
+    ///   both sides agree (we don't yet know the parent's xtaint, so
+    ///   downgrading is the conservative choice)
+    /// - `None ⊔ None = None`
+    ///
+    /// Shape join: `Bot` is the identity, and `Obj` maps merge by
+    /// key with recursive cell-merge on shared keys. The result is
+    /// not necessarily canonical — call [`Cell::canonicalize`] after
+    /// a sequence of merges to restore minimality.
+    pub fn merge_into(&mut self, source: &Cell) {
+        // Xtaint join.
+        self.xtaint = merge_xtaint(&self.xtaint, &source.xtaint);
+        // Shape join.
+        match (&source.shape, &mut self.shape) {
+            (Shape::Bot, _) => { /* nothing to add */ }
+            (src @ Shape::Obj(_), Shape::Bot) => {
+                self.shape = src.clone();
+            }
+            (Shape::Obj(s_map), Shape::Obj(t_map)) => {
+                for (off, s_cell) in s_map {
+                    let t_cell = t_map.entry(off.clone()).or_insert_with(Cell::bot);
+                    t_cell.merge_into(s_cell);
+                }
+            }
+        }
+    }
+
     /// Recursively count Tainted leaves reachable through this cell.
     /// Used by [`ConvergenceSignal::tainted_leaf_total`] in
     /// `stryx_cli` to detect shape growth across fix-point
@@ -263,6 +301,28 @@ impl Cell {
             (Xtaint::None, Shape::Bot) => None,
             _ => Some(Self { xtaint, shape }),
         }
+    }
+}
+
+/// Lattice-join on [`Xtaint`] — used by [`Cell::merge_into`] when
+/// combining two taint observations. Tainted dominates; Clean
+/// requires agreement on both sides; None is the identity.
+/// Documented in detail on `Cell::merge_into`.
+fn merge_xtaint(a: &Xtaint, b: &Xtaint) -> Xtaint {
+    match (a, b) {
+        (Xtaint::Tainted(l1), Xtaint::Tainted(l2)) => {
+            let mut combined: Vec<TaintLabel> = l1.iter().chain(l2.iter()).copied().collect();
+            combined.sort();
+            combined.dedup();
+            Xtaint::Tainted(combined)
+        }
+        (Xtaint::Tainted(l), _) | (_, Xtaint::Tainted(l)) => Xtaint::Tainted(l.clone()),
+        (Xtaint::Clean, Xtaint::Clean) => Xtaint::Clean,
+        // Clean + None: conservative — only retain Clean if both
+        // sides agree. The None side might inherit Tainted from a
+        // parent, which would dominate Clean anyway.
+        (Xtaint::Clean, Xtaint::None) | (Xtaint::None, Xtaint::Clean) => Xtaint::None,
+        (Xtaint::None, Xtaint::None) => Xtaint::None,
     }
 }
 
@@ -626,6 +686,113 @@ mod tests {
             }
             other => panic!("expected Obj with Clean leaf, got {other:?}"),
         }
+    }
+
+    // ── merge_into tests (slice 2.1d of ADR 0006) ───────────────────────
+
+    #[test]
+    fn merge_into_xtaint_tainted_unions_label_sets() {
+        let mut t = Cell::tainted(vec![TaintLabel::UserInput]);
+        t.merge_into(&Cell::tainted(vec![
+            TaintLabel::Secret,
+            TaintLabel::UserInput,
+        ]));
+        // Sorted + de-duped.
+        assert_eq!(
+            t.xtaint,
+            Xtaint::Tainted(vec![TaintLabel::UserInput, TaintLabel::Secret])
+        );
+    }
+
+    #[test]
+    fn merge_into_xtaint_tainted_dominates_clean_and_none() {
+        let mut none = Cell::bot();
+        none.merge_into(&Cell::tainted(vec![TaintLabel::UserInput]));
+        assert_eq!(none.xtaint, Xtaint::Tainted(vec![TaintLabel::UserInput]));
+
+        let mut clean = Cell::clean();
+        clean.merge_into(&Cell::tainted(vec![TaintLabel::Secret]));
+        assert_eq!(clean.xtaint, Xtaint::Tainted(vec![TaintLabel::Secret]));
+    }
+
+    #[test]
+    fn merge_into_clean_plus_none_downgrades_to_none() {
+        // Conservative: only mark Clean if both sides agree. The
+        // None side might still inherit Tainted from a parent, in
+        // which case Clean would be wrong.
+        let mut clean = Cell::clean();
+        clean.merge_into(&Cell::bot());
+        assert_eq!(clean.xtaint, Xtaint::None);
+    }
+
+    #[test]
+    fn merge_into_obj_unions_keys_and_recurses() {
+        // target = Obj{ a: Tainted }
+        // source = Obj{ b: Tainted }
+        // result = Obj{ a: Tainted, b: Tainted }
+        let mut target = obj(vec![(
+            Offset::Field("a".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        )]);
+        let source = obj(vec![(
+            Offset::Field("b".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        )]);
+        target.merge_into(&source);
+        match &target.shape {
+            Shape::Obj(map) => {
+                assert_eq!(map.len(), 2);
+                assert!(map.contains_key(&Offset::Field("a".into())));
+                assert!(map.contains_key(&Offset::Field("b".into())));
+            }
+            other => panic!("expected Obj, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_into_obj_recurses_on_shared_keys() {
+        // target = Obj{ a: Obj{ x: Tainted } }
+        // source = Obj{ a: Obj{ y: Tainted } }
+        // result = Obj{ a: Obj{ x: Tainted, y: Tainted } }
+        let mut target = obj(vec![(
+            Offset::Field("a".into()),
+            obj(vec![(
+                Offset::Field("x".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            )]),
+        )]);
+        let source = obj(vec![(
+            Offset::Field("a".into()),
+            obj(vec![(
+                Offset::Field("y".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            )]),
+        )]);
+        target.merge_into(&source);
+        // Drill into the nested Obj.
+        let nested = match &target.shape {
+            Shape::Obj(map) => map.get(&Offset::Field("a".into())).expect("a"),
+            _ => panic!("expected Obj"),
+        };
+        match &nested.shape {
+            Shape::Obj(inner) => {
+                assert!(inner.contains_key(&Offset::Field("x".into())));
+                assert!(inner.contains_key(&Offset::Field("y".into())));
+            }
+            other => panic!("expected nested Obj, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn merge_into_bot_is_identity() {
+        // Merging Bot into anything is a no-op on the shape side.
+        let original = obj(vec![(
+            Offset::Field("a".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        )]);
+        let mut target = original.clone();
+        target.merge_into(&Cell::bot());
+        assert_eq!(target.shape, original.shape);
     }
 
     #[test]

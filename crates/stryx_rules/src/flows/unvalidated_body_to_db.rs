@@ -1242,12 +1242,6 @@ impl FlowVisitor<'_> {
             // `helper(body.user)` where the caller's first-field on
             // its tainted ident is `Field("user")` even though the
             // sink itself lives in another file.
-            //
-            // Composing the callee's `tainted_offsets` with the
-            // caller's chain (so `body.user` + callee reads `.name`
-            // → caller records both `.user` AND propagation through)
-            // is a follow-on slice once we move from first-field to
-            // full-chain semantics.
             self.record_top_offsets_in_arg(arg_expr);
             // For bare-ident args (no member chain on the caller's
             // side) the local walker records nothing — the callee's
@@ -1261,6 +1255,21 @@ impl FlowVisitor<'_> {
                 for off in &callee_param.tainted_offsets {
                     self.top_offsets_seen.insert(off.clone());
                 }
+            }
+            // Slice 2.1d — compose callee's full param_shape into
+            // the caller's shape tree at the caller's offset chain.
+            // Generalises slice 3c's bare-ident absorption to handle
+            // chain args too: `helper(body.user)` where the helper
+            // reads `.name` produces caller body.user.name as a
+            // tainted leaf. `full_chain` returns Some(vec![]) for
+            // bare ident (uniform handling), Some(chain) for chain
+            // args, None when the arg isn't a tainted-rooted member
+            // chain (in which case the local walker already covered it).
+            if let Some(chain) = self.full_chain(arg_expr)
+                && let Some(callee_param) = summary.params.get(i)
+                && let Some(callee_shape) = &callee_param.param_shape
+            {
+                insert_shape_at_path(&mut self.param_shape_seen, &chain, callee_shape);
             }
             let sink_hint = summary
                 .params
@@ -1585,6 +1594,30 @@ fn insert_tainted_at_path(cell: &mut Cell, path: &[Offset], labels: Vec<TaintLab
     if let Shape::Obj(map) = &mut cell.shape {
         let entry = map.entry(path[0].clone()).or_insert_with(Cell::bot);
         insert_tainted_at_path(entry, &path[1..], labels);
+    }
+}
+
+/// Graft the entire `source` cell into `target` at offset chain
+/// `path`. Slice 2.1d of ADR 0006 — used at the cross-file site to
+/// compose a callee's parameter shape into the caller's tree.
+///
+/// `path = []` merges `source` into `target` directly (bare-ident
+/// pass-through). `path = [user]` walks one level down, creating an
+/// intermediate `Obj{user: ...}` if needed, then merges `source`
+/// into that cell — this captures the case where the caller passes
+/// `body.user` to a helper whose summary describes shape rooted at
+/// the helper's parameter.
+fn insert_shape_at_path(target: &mut Cell, path: &[Offset], source: &Cell) {
+    if path.is_empty() {
+        target.merge_into(source);
+        return;
+    }
+    if matches!(target.shape, Shape::Bot) {
+        target.shape = Shape::Obj(std::collections::BTreeMap::new());
+    }
+    if let Shape::Obj(map) = &mut target.shape {
+        let entry = map.entry(path[0].clone()).or_insert_with(Cell::bot);
+        insert_shape_at_path(entry, &path[1..], source);
     }
 }
 

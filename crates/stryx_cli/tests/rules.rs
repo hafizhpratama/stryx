@@ -406,6 +406,93 @@ fn unvalidated_body_to_db_propagates_offsets_cross_file() {
     );
 }
 
+/// Slice 2.1d of ADR 0006 — at the cross-file site the caller's
+/// `param_shape` absorbs the callee's `param_shape`, grafted at the
+/// caller's offset chain. `callerBare(body)` calling
+/// `writeName(input)` (which records `Obj{name: Tainted}`) should
+/// produce `body.param_shape = Obj{name: Tainted}`. `callerWithChain
+/// (body)` calling `writeName(body.user)` should produce
+/// `body.param_shape = Obj{user: Obj{name: Tainted}}`.
+#[test]
+fn unvalidated_body_to_db_composes_shapes_cross_file() {
+    use stryx_taint::{Offset, Shape, Xtaint};
+
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/offset-recording-crossfile");
+    let index = extract_index(&dir);
+    let lib = index
+        .files()
+        .find(|f| f.exports.contains_key("writeName"))
+        .expect("offset-recording-crossfile lib summary present");
+
+    // The leaf callee records Obj{name: Tainted} on its param.
+    let writer = lib.exports.get("writeName").expect("writeName");
+    let writer_shape = writer
+        .params
+        .first()
+        .and_then(|p| p.param_shape.as_ref())
+        .expect("writeName has a param_shape");
+    match &writer_shape.shape {
+        Shape::Obj(map) => {
+            assert!(map.contains_key(&Offset::Field("name".into())));
+        }
+        other => panic!("writeName: expected Obj, got {other:?}"),
+    }
+
+    // Bare-ident caller: shape is the callee's, merged at root.
+    let bare = lib.exports.get("callerBare").expect("callerBare");
+    let bare_shape = bare
+        .params
+        .first()
+        .and_then(|p| p.param_shape.as_ref())
+        .expect("callerBare absorbs callee shape");
+    match &bare_shape.shape {
+        Shape::Obj(map) => {
+            let name_cell = map
+                .get(&Offset::Field("name".into()))
+                .expect("name field grafted at root");
+            assert!(matches!(name_cell.xtaint, Xtaint::Tainted(_)));
+        }
+        other => panic!("callerBare: expected Obj{{name}}, got {other:?}"),
+    }
+
+    // Chain caller: shape is callee's, grafted under `.user`.
+    let chain = lib.exports.get("callerWithChain").expect("callerWithChain");
+    let chain_shape = chain
+        .params
+        .first()
+        .and_then(|p| p.param_shape.as_ref())
+        .expect("callerWithChain absorbs callee shape under chain");
+    match &chain_shape.shape {
+        Shape::Obj(map) => {
+            let user = map
+                .get(&Offset::Field("user".into()))
+                .expect("user field at root from local-side chain record");
+            // Under .user the callee's shape lives; .user.name is
+            // tainted from the cross-file composition.
+            match &user.shape {
+                Shape::Obj(inner) => {
+                    let name = inner
+                        .get(&Offset::Field("name".into()))
+                        .expect("user.name leaf grafted from callee");
+                    assert!(matches!(name.xtaint, Xtaint::Tainted(_)));
+                }
+                Shape::Bot => {
+                    // The local-side full_chain records `body.user`
+                    // as Tainted at .user (bare leaf, no inner Obj).
+                    // The cross-file insert_shape_at_path then walks
+                    // into .user and merges the callee's Obj{name}
+                    // there. `merge_into` says "Obj over Bot
+                    // replaces Bot with Obj," but our existing entry
+                    // is Tainted/Bot, not None/Bot, so the source's
+                    // shape gets installed via the Bot→Obj branch.
+                    panic!("expected user to have Obj sub-shape from cross-file composition");
+                }
+            }
+        }
+        other => panic!("callerWithChain: expected Obj{{user}}, got {other:?}"),
+    }
+}
+
 /// Slice 2.1c of ADR 0006 — the visitor populates a `param_shape`
 /// `Cell` tree alongside the flat `tainted_offsets`. The shape is
 /// canonicalized, so a function with no member-chain reads gets
