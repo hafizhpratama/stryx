@@ -1389,6 +1389,7 @@ dependencies = [
  "stryx_index",
  "stryx_reporter",
  "stryx_rules",
+ "stryx_taint",
  "tracing",
  "tracing-subscriber",
 ]

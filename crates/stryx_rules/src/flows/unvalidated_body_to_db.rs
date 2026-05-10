@@ -31,7 +31,7 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity, Span};
 use stryx_index::{ClassInfo, FileSummary, ImportRef};
-use stryx_taint::{ExportedFunctionSummary, ParamFlow};
+use stryx_taint::{ExportedFunctionSummary, Offset, ParamFlow};
 
 use super::auth_bypass_via_wrapper::contains_auth_helper_call;
 
@@ -125,6 +125,20 @@ struct FlowVisitor<'idx> {
     /// `visit_function` to recover the function's effective name for
     /// arrow / anonymous-function expressions assigned to a const.
     pending_binding_name: Option<String>,
+    /// Slice 2 of ADR 0006 — first-field offsets of the tainted
+    /// parameter that were observed reading into a same-file DB sink.
+    /// Empty during the run pass (where `is_tainted` may include
+    /// arbitrary names from intra-function flow); populated only in
+    /// the per-param `build_summary` simulation, where exactly one
+    /// name (`pname`) carries source taint at function entry.
+    ///
+    /// Records the *outermost* field of each member-chain read on
+    /// the tainted ident — `body.where.id` records `Field("where")`,
+    /// not `Field("id")`. This matches the where-clause severity
+    /// signal and is the simplest useful slice. Sink-side recording
+    /// (where-vs-data placement in the call shape) is a follow-up
+    /// slice; full chains land with the Phase 2 shape lattice.
+    top_offsets_seen: HashSet<Offset>,
 }
 
 impl<'idx> FlowVisitor<'idx> {
@@ -140,6 +154,7 @@ impl<'idx> FlowVisitor<'idx> {
             body_validated_handlers: HashSet::new(),
             body_source_suppressed: 0,
             pending_binding_name: None,
+            top_offsets_seen: HashSet::new(),
         }
     }
 
@@ -735,6 +750,15 @@ impl<'idx> FlowVisitor<'idx> {
         let Some(severity) = severity else {
             return;
         };
+        // Record param-side first-field offsets for slice 2 of ADR 0006.
+        // Observation only — no consumer reads from `top_offsets_seen`
+        // yet; the boolean `reaches_db_sink_unsanitized` remains the
+        // source of truth for findings and severity.
+        for arg in &call.arguments {
+            if let Some(e) = argument_expr(arg) {
+                self.record_top_offsets_in_arg(e);
+            }
+        }
         let callee_label = callee_chain(&call.callee).unwrap_or_else(|| "db sink".into());
         let (message, help) = if where_only {
             (
@@ -755,6 +779,88 @@ impl<'idx> FlowVisitor<'idx> {
             Finding::ast(RULE_ID, severity, message, to_span(&self.file, call.span))
                 .with_help(help),
         );
+    }
+
+    /// Walk a sink-call argument expression and record the *outermost*
+    /// field of each tainted member-chain read into `top_offsets_seen`.
+    /// Recurses through structural shapes (object/array literals,
+    /// spreads, casts) but not through call expressions — propagation
+    /// through callees is a follow-up slice.
+    ///
+    /// `body` records nothing (whole-value taint signalled via the
+    /// existing boolean). `body.id` records `Field("id")`.
+    /// `body.where.id` records `Field("where")` — the field closest to
+    /// the tainted base, not the leaf. Computed access with a literal
+    /// key matches as `Field`/`Index`; non-literal collapses to `Any`.
+    fn record_top_offsets_in_arg(&mut self, expr: &Expression<'_>) {
+        if let Some(off) = self.top_offset_of(expr) {
+            self.top_offsets_seen.insert(off);
+            return;
+        }
+        match expr {
+            Expression::ObjectExpression(obj) => {
+                for prop in &obj.properties {
+                    match prop {
+                        ObjectPropertyKind::ObjectProperty(p) => {
+                            self.record_top_offsets_in_arg(&p.value);
+                        }
+                        ObjectPropertyKind::SpreadProperty(s) => {
+                            self.record_top_offsets_in_arg(&s.argument);
+                        }
+                    }
+                }
+            }
+            Expression::ArrayExpression(arr) => {
+                for el in &arr.elements {
+                    if let Some(e) = el.as_expression() {
+                        self.record_top_offsets_in_arg(e);
+                    }
+                }
+            }
+            Expression::ParenthesizedExpression(p) => self.record_top_offsets_in_arg(&p.expression),
+            Expression::TSAsExpression(t) => self.record_top_offsets_in_arg(&t.expression),
+            Expression::TSNonNullExpression(t) => self.record_top_offsets_in_arg(&t.expression),
+            Expression::TSSatisfiesExpression(t) => self.record_top_offsets_in_arg(&t.expression),
+            Expression::TSTypeAssertion(t) => self.record_top_offsets_in_arg(&t.expression),
+            Expression::ConditionalExpression(c) => {
+                self.record_top_offsets_in_arg(&c.consequent);
+                self.record_top_offsets_in_arg(&c.alternate);
+            }
+            Expression::LogicalExpression(b) => {
+                self.record_top_offsets_in_arg(&b.left);
+                self.record_top_offsets_in_arg(&b.right);
+            }
+            _ => {}
+        }
+    }
+
+    /// If `expr` is a member-chain rooted in a tainted ident, return
+    /// the field/index applied directly to that ident — `body.where`
+    /// returns `Some(Field("where"))`, `body.where.id` also returns
+    /// `Some(Field("where"))` (the outermost step on the base).
+    /// Returns `None` for a bare tainted ident (whole-value taint),
+    /// for any non-tainted base, or for non-member expressions.
+    fn top_offset_of(&self, expr: &Expression<'_>) -> Option<Offset> {
+        match expr {
+            Expression::ParenthesizedExpression(p) => self.top_offset_of(&p.expression),
+            Expression::TSAsExpression(t) => self.top_offset_of(&t.expression),
+            Expression::TSNonNullExpression(t) => self.top_offset_of(&t.expression),
+            Expression::TSSatisfiesExpression(t) => self.top_offset_of(&t.expression),
+            Expression::TSTypeAssertion(t) => self.top_offset_of(&t.expression),
+            Expression::StaticMemberExpression(m) => match strip_casts(&m.object) {
+                Expression::Identifier(id) if self.is_tainted(id.name.as_str()) => {
+                    Some(Offset::Field(m.property.name.to_string()))
+                }
+                _ => self.top_offset_of(&m.object),
+            },
+            Expression::ComputedMemberExpression(m) => match strip_casts(&m.object) {
+                Expression::Identifier(id) if self.is_tainted(id.name.as_str()) => {
+                    Some(literal_offset_or_any(&m.expression))
+                }
+                _ => self.top_offset_of(&m.object),
+            },
+            _ => None,
+        }
     }
 
     /// Returns `(Some(severity), where_only)` if the call has tainted
@@ -1367,6 +1473,55 @@ fn argument_expr<'a>(arg: &'a Argument<'_>) -> Option<&'a Expression<'a>> {
     match arg {
         Argument::SpreadElement(s) => Some(&s.argument),
         _ => arg.as_expression(),
+    }
+}
+
+/// Peel TS-cast and parenthesis wrappers off an expression, exposing
+/// the underlying value. Used by offset extraction so that
+/// `(body as Body).id` and `body!.id` both record `Field("id")`.
+fn strip_casts<'a>(expr: &'a Expression<'a>) -> &'a Expression<'a> {
+    match expr {
+        Expression::ParenthesizedExpression(p) => strip_casts(&p.expression),
+        Expression::TSAsExpression(t) => strip_casts(&t.expression),
+        Expression::TSNonNullExpression(t) => strip_casts(&t.expression),
+        Expression::TSSatisfiesExpression(t) => strip_casts(&t.expression),
+        Expression::TSTypeAssertion(t) => strip_casts(&t.expression),
+        _ => expr,
+    }
+}
+
+/// Stable ordering for offsets so serialised summaries are
+/// deterministic across runs (the cache-key contract from ADR 0005
+/// requires it).
+fn offset_sort_key(a: &Offset, b: &Offset) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    match (a, b) {
+        (Offset::Field(x), Offset::Field(y)) => x.cmp(y),
+        (Offset::Index(x), Offset::Index(y)) => x.cmp(y),
+        (Offset::Any, Offset::Any) => Ordering::Equal,
+        (Offset::Field(_), _) => Ordering::Less,
+        (_, Offset::Field(_)) => Ordering::Greater,
+        (Offset::Index(_), Offset::Any) => Ordering::Less,
+        (Offset::Any, Offset::Index(_)) => Ordering::Greater,
+    }
+}
+
+/// Best-effort offset extraction from a computed-member key. Literal
+/// numeric / string keys record as `Index` / `Field`; anything else
+/// collapses to `Any` (the wildcard that Phase 2's shape lattice
+/// handles natively as `Oany`).
+fn literal_offset_or_any(expr: &Expression<'_>) -> Offset {
+    match strip_casts(expr) {
+        Expression::NumericLiteral(n) => {
+            let v = n.value;
+            if v.is_finite() && v >= 0.0 && v <= u32::MAX as f64 && v.fract() == 0.0 {
+                Offset::Index(v as u32)
+            } else {
+                Offset::Any
+            }
+        }
+        Expression::StringLiteral(s) => Offset::Field(s.value.to_string()),
+        _ => Offset::Any,
     }
 }
 
@@ -2011,15 +2166,18 @@ fn build_summary(
         let reaches = !visitor.findings.is_empty();
         let sink_span = visitor.findings.first().map(|f| f.span.clone());
         let propagates_to_return = visitor.tainted_return;
+        // Slice 2 of ADR 0006 — drain the per-param simulation's
+        // observed first-field offsets into a sorted Vec for stable
+        // serialization. Empty when `reaches` is false, or when only
+        // whole-value taint was observed (no member-chain reads).
+        let mut tainted_offsets: Vec<Offset> = visitor.top_offsets_seen.into_iter().collect();
+        tainted_offsets.sort_by(offset_sort_key);
         params_out.push(ParamFlow {
             name: pname.clone(),
             reaches_db_sink_unsanitized: reaches,
             propagates_to_return,
             sink_span,
-            // Slice-2 of ADR 0006 will populate this from the visitor's
-            // recorded offsets. For now the boolean above is the source
-            // of truth.
-            tainted_offsets: Vec::new(),
+            tainted_offsets,
         });
     }
 

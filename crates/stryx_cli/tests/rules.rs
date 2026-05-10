@@ -103,6 +103,59 @@ fn scan_dir(dir: &Path) -> Vec<Finding> {
     findings
 }
 
+/// Variant of `scan_dir` that returns the converged index instead of
+/// the findings, so tests can inspect summary-level state (param
+/// flows, offsets) without re-running the engine.
+fn extract_index(dir: &Path) -> ProjectIndex {
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read fixture dir") {
+        let entry = entry.expect("dir entry");
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) == Some("ts")
+            || p.extension().and_then(|e| e.to_str()) == Some("tsx")
+        {
+            files.push(p);
+        }
+    }
+    let registry = builtin_rules();
+    let mut sources: std::collections::HashMap<PathBuf, String> = Default::default();
+    for path in &files {
+        sources.insert(path.clone(), std::fs::read_to_string(path).expect("read"));
+    }
+    let mut index = ProjectIndex::new();
+    let mut prev_signal = 0usize;
+    for round in 0..10 {
+        let mut next = ProjectIndex::new();
+        for path in &files {
+            let allocator = Allocator::default();
+            let source = sources.get(path).unwrap();
+            let parsed = parse(&allocator, path, source).expect("parse");
+            let ctx = RuleContext {
+                file: &parsed,
+                index: Some(&index),
+            };
+            for rule in registry.rules() {
+                if let Some(summary) = rule.extract(&ctx) {
+                    next.insert_file(summary);
+                }
+            }
+        }
+        next.finalize();
+        let signal: usize = next
+            .files()
+            .flat_map(|f| f.exports.values())
+            .flat_map(|e| e.params.iter())
+            .filter(|p| p.reaches_db_sink_unsanitized)
+            .count();
+        index = next;
+        if round > 0 && signal == prev_signal {
+            break;
+        }
+        prev_signal = signal;
+    }
+    index
+}
+
 #[test]
 fn hardcoded_secret_bad_fixture_fires() {
     let path = fixtures_root().join("generic-hardcoded-secret/bad.ts");
@@ -227,6 +280,70 @@ fn unvalidated_body_to_db_cross_file_good_silent() {
         findings.is_empty(),
         "expected zero flow findings on good/, got: {:?}",
         findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+/// Slice 2 of ADR 0006 — the per-param simulation should now record
+/// first-field offsets for member-chain reads on the tainted param.
+/// The boolean signal continues to be authoritative for findings; this
+/// test only inspects the new field.
+#[test]
+fn unvalidated_body_to_db_records_param_side_offsets() {
+    use stryx_taint::Offset;
+
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/offset-recording");
+    let index = extract_index(&dir);
+    let lib = index
+        .files()
+        .find(|f| {
+            f.exports.contains_key("upsertNamed")
+                && f.exports.contains_key("createWhole")
+                && f.exports.contains_key("updateLiteralKey")
+                && f.exports.contains_key("updateAnyKey")
+        })
+        .expect("offset-recording/lib.ts summary present in index");
+
+    let upsert = lib.exports.get("upsertNamed").expect("upsertNamed export");
+    let upsert_param = upsert.params.first().expect("one param");
+    assert!(upsert_param.reaches_db_sink_unsanitized);
+    assert_eq!(
+        upsert_param.tainted_offsets,
+        vec![Offset::Field("email".into()), Offset::Field("name".into())],
+        "upsertNamed: expected sorted Field(email), Field(name) — got {:?}",
+        upsert_param.tainted_offsets
+    );
+
+    let whole = lib.exports.get("createWhole").expect("createWhole export");
+    let whole_param = whole.params.first().expect("one param");
+    assert!(whole_param.reaches_db_sink_unsanitized);
+    assert!(
+        whole_param.tainted_offsets.is_empty(),
+        "createWhole: bare-ident pass-through should record no offsets — got {:?}",
+        whole_param.tainted_offsets
+    );
+
+    let lit = lib
+        .exports
+        .get("updateLiteralKey")
+        .expect("updateLiteralKey export");
+    let lit_param = lit.params.first().expect("one param");
+    assert_eq!(
+        lit_param.tainted_offsets,
+        vec![Offset::Field("password".into())],
+        "updateLiteralKey: computed[lit] should record Field(\"password\") — got {:?}",
+        lit_param.tainted_offsets
+    );
+
+    let any = lib
+        .exports
+        .get("updateAnyKey")
+        .expect("updateAnyKey export");
+    let any_param = any.params.first().expect("one param");
+    assert_eq!(
+        any_param.tainted_offsets,
+        vec![Offset::Any],
+        "updateAnyKey: computed[non-literal] should collapse to Any — got {:?}",
+        any_param.tainted_offsets
     );
 }
 
