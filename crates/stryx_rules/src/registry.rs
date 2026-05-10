@@ -1,4 +1,4 @@
-use crate::{flows, generic, Rule};
+use crate::{Rule, flows, generic};
 use std::sync::Arc;
 
 /// Registry of all enabled rules for a scan. Rules are stored as `Arc<dyn Rule>`

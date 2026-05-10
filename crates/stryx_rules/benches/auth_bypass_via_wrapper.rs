@@ -8,10 +8,10 @@
 use std::hint::black_box;
 use std::path::{Path, PathBuf};
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use stryx_ast::{parse, Allocator};
+use criterion::{Criterion, criterion_group, criterion_main};
+use stryx_ast::{Allocator, parse};
 use stryx_index::ProjectIndex;
-use stryx_rules::{builtin_rules, RuleContext};
+use stryx_rules::{RuleContext, builtin_rules};
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -43,7 +43,10 @@ fn scan_dir(dir: &Path) -> usize {
         for path in &files {
             let allocator = Allocator::default();
             let parsed = parse(&allocator, path, sources.get(path).unwrap()).expect("parse");
-            let ctx = RuleContext { file: &parsed, index: Some(&index) };
+            let ctx = RuleContext {
+                file: &parsed,
+                index: Some(&index),
+            };
             for rule in registry.rules() {
                 if let Some(s) = rule.extract(&ctx) {
                     next.insert_file(s);
@@ -59,7 +62,10 @@ fn scan_dir(dir: &Path) -> usize {
     for path in &files {
         let allocator = Allocator::default();
         let parsed = parse(&allocator, path, sources.get(path).unwrap()).expect("parse");
-        let ctx = RuleContext { file: &parsed, index: Some(&index) };
+        let ctx = RuleContext {
+            file: &parsed,
+            index: Some(&index),
+        };
         for rule in registry.rules() {
             count += rule.run(&ctx).len();
         }

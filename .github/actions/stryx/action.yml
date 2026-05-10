@@ -1,0 +1,56 @@
+name: "Stryx scan"
+description: "Run the Stryx static analyzer on a TypeScript codebase."
+author: "Stryx contributors"
+branding:
+  icon: "shield"
+  color: "purple"
+
+inputs:
+  path:
+    description: "Path to scan. Defaults to the repository root."
+    required: false
+    default: "."
+  format:
+    description: "Output format: human or json."
+    required: false
+    default: "human"
+  fail-on:
+    description: "Minimum severity that fails the action: info, low, medium, high, critical."
+    required: false
+    default: "high"
+  ref:
+    description: "Stryx git ref to install (tag, branch, or commit)."
+    required: false
+    default: "main"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: "1.93"
+
+    - name: Cache Stryx install
+      id: cache
+      uses: actions/cache@v4
+      with:
+        path: ~/.cargo/bin/stryx
+        key: stryx-${{ runner.os }}-${{ inputs.ref }}
+
+    - name: Install Stryx CLI from source
+      if: steps.cache.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        cargo install \
+          --git https://github.com/hafizhpratama/stryx \
+          --rev ${{ inputs.ref }} \
+          --bin stryx \
+          --root ~/.cargo
+
+    - name: Run scan
+      shell: bash
+      run: |
+        stryx scan ${{ inputs.path }} \
+          --format ${{ inputs.format }} \
+          --fail-on ${{ inputs.fail-on }}

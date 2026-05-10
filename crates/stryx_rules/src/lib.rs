@@ -57,4 +57,4 @@ pub trait Rule: Send + Sync {
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding>;
 }
 
-pub use registry::{builtin_rules, RuleRegistry};
+pub use registry::{RuleRegistry, builtin_rules};

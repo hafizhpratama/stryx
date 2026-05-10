@@ -1,10 +1,7 @@
 use crate::{Rule, RuleContext, RuleMeta};
 use regex::Regex;
 use std::path::PathBuf;
-use stryx_ast::{
-    ast::StringLiteral,
-    to_span, Visit,
-};
+use stryx_ast::{Visit, ast::StringLiteral, to_span};
 use stryx_core::{Finding, Severity};
 
 const RULE_ID: &str = "generic/hardcoded-secret";
@@ -94,9 +91,7 @@ impl<'a> Visit<'a> for SecretVisitor<'_> {
                 let span = to_span(&self.file, lit.span);
                 self.findings.push(
                     Finding::ast(RULE_ID, *severity, (*message).to_string(), span)
-                        .with_help(
-                            "Move secrets to environment variables or a secret manager.",
-                        ),
+                        .with_help("Move secrets to environment variables or a secret manager."),
                 );
                 break;
             }

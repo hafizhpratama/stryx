@@ -10,8 +10,8 @@ members = [
     "crates/stryx_llm",
     "crates/stryx_reporter",
     "crates/stryx_cli",
+    "crates/stryx_napi",
 ]
-# stryx_napi excluded until the napi-rs build chain is set up.
 
 [workspace.package]
 version      = "0.1.0-alpha.1"
@@ -73,6 +73,7 @@ stryx_taint     = { path = "crates/stryx_taint",     version = "0.1.0-alpha.1" }
 stryx_rules     = { path = "crates/stryx_rules",     version = "0.1.0-alpha.1" }
 stryx_llm       = { path = "crates/stryx_llm",       version = "0.1.0-alpha.1" }
 stryx_reporter  = { path = "crates/stryx_reporter",  version = "0.1.0-alpha.1" }
+stryx_cli       = { path = "crates/stryx_cli",       version = "0.1.0-alpha.1" }
 
 [profile.release]
 lto = "thin"

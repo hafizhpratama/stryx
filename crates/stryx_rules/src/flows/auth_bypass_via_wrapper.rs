@@ -15,11 +15,12 @@
 
 use regex::Regex;
 use stryx_ast::{
+    Visit,
     ast::{
         BindingPattern, CallExpression, Declaration, ExportDefaultDeclarationKind,
         ExportNamedDeclaration, Expression, Statement, VariableDeclarator,
     },
-    to_span, Visit,
+    to_span,
 };
 use stryx_core::{Finding, Severity};
 
@@ -86,8 +87,7 @@ impl Rule for AuthBypassViaWrapper {
         RuleMeta {
             id: RULE_ID,
             default_severity: Severity::Critical,
-            description:
-                "Route handler wrapped in an auth-named function whose body never verifies authentication.",
+            description: "Route handler wrapped in an auth-named function whose body never verifies authentication.",
         }
     }
 
@@ -197,12 +197,12 @@ impl AuthBypassViaWrapper {
         }
         // Resolve the wrapper's summary. Cross-file via imports first,
         // then same-file exports/locals.
-        let summary = index
-            .resolve_summary(file, wrapper_name)
-            .or_else(|| {
-                let f = index.file(file)?;
-                f.exports.get(wrapper_name).or_else(|| f.locals.get(wrapper_name))
-            });
+        let summary = index.resolve_summary(file, wrapper_name).or_else(|| {
+            let f = index.file(file)?;
+            f.exports
+                .get(wrapper_name)
+                .or_else(|| f.locals.get(wrapper_name))
+        });
         let Some(summary) = summary else {
             // Wrapper is imported from `node_modules` or another
             // unresolved source. v0.0.1 doesn't escalate; we silently
@@ -300,14 +300,6 @@ fn single_binding_name(pat: &BindingPattern<'_>) -> Option<String> {
 fn is_route_handler_name(name: &str) -> bool {
     matches!(
         name,
-        "GET" | "POST"
-            | "PUT"
-            | "PATCH"
-            | "DELETE"
-            | "OPTIONS"
-            | "HEAD"
-            | "handler"
-            | "default"
+        "GET" | "POST" | "PUT" | "PATCH" | "DELETE" | "OPTIONS" | "HEAD" | "handler" | "default"
     )
 }
-

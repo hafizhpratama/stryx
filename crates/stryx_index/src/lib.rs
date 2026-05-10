@@ -156,11 +156,9 @@ impl ProjectIndex {
                 if !is_relative_specifier(&import.module_specifier) {
                     continue;
                 }
-                let Some(target_path) = resolve_relative_path(
-                    caller_path,
-                    &import.module_specifier,
-                    &self.files,
-                ) else {
+                let Some(target_path) =
+                    resolve_relative_path(caller_path, &import.module_specifier, &self.files)
+                else {
                     continue;
                 };
                 resolved.insert(

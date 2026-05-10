@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  check:
+    name: ${{ matrix.task }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        task: [test, clippy, fmt]
+        exclude:
+          # fmt is platform-independent; only run it once.
+          - os: macos-latest
+            task: fmt
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: ${{ matrix.os }}-${{ matrix.task }}
+
+      - name: cargo test
+        if: matrix.task == 'test'
+        # stryx_napi is a cdylib that requires Node headers; skip in
+        # the cargo-only test matrix and exercise it in a separate
+        # napi job below.
+        run: cargo test --workspace --exclude stryx_napi
+
+      - name: cargo clippy
+        if: matrix.task == 'clippy'
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: cargo fmt --check
+        if: matrix.task == 'fmt'
+        run: cargo fmt --check

@@ -58,6 +58,28 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   for v0.0.1 (slice 2 will emit UncertainZones for those).
   This completes the v0.1 flow rule trio (unvalidated-body-to-db,
   secret-to-response, auth-bypass-via-wrapper).
+- Library entry point: `stryx_cli::scan(path) -> ScanResult`. Extracts
+  the two-pass extract→run pipeline out of `main.rs` so bindings
+  (napi-rs and future python/wasm) can call the engine without
+  re-implementing the loop. The CLI binary is now a thin clap
+  wrapper around the same function.
+- `stryx_napi` crate. napi-rs 3 bindings exposing a single `scan(path)`
+  function that returns a `ScanReport { findings, total }` to Node.
+  `Finding` is flattened to a JS-friendly shape (lowercase severity
+  string, file path as string, byte offsets as numbers). The crate
+  builds locally with `cd crates/stryx_napi && npm install && npm run
+  build`; npm publishing pipeline is intentionally deferred to a
+  follow-up commit (CI matrix, code signing, npm credentials).
+- `.github/workflows/ci.yml`. Test + clippy + fmt matrix on
+  Ubuntu and macOS, gated by `RUSTFLAGS=-D warnings`. Excludes
+  `stryx_napi` from the cargo-only lane so the Node toolchain isn't
+  required for the basic CI lane.
+- `.github/actions/stryx/action.yml`. Composite GitHub Action that
+  installs the CLI from source via `cargo install --git` (with cache)
+  and runs `stryx scan` on the consumer repo. Inputs: `path`,
+  `format`, `fail-on`, `ref`. Suitable for PR gating and pre-deploy
+  hooks. Will be swapped to a release-binary download path once
+  v0.1.0 ships prebuilt artifacts.
 
 ### Coming soon (v0.1, planned)
 - Foundational crates `stryx_index` (project semantic index) and

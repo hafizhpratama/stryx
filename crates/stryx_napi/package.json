@@ -1,0 +1,48 @@
+{
+  "name": "stryx",
+  "version": "0.1.0-alpha.1",
+  "description": "Sees what your AI missed — across files. Static analyzer for AI-generated TypeScript.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hafizhpratama/stryx"
+  },
+  "homepage": "https://github.com/hafizhpratama/stryx",
+  "bugs": "https://github.com/hafizhpratama/stryx/issues",
+  "keywords": [
+    "static-analysis",
+    "linter",
+    "typescript",
+    "security",
+    "ai",
+    "taint-analysis"
+  ],
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "stryx.*.node"
+  ],
+  "napi": {
+    "binaryName": "stryx",
+    "targets": [
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "prepublishOnly": "napi prepublish -t npm"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

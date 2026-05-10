@@ -14,11 +14,12 @@ use std::path::PathBuf;
 
 use regex::Regex;
 use stryx_ast::{
+    ScopeFlags, Visit,
     ast::{
         ArrowFunctionExpression, BindingPattern, CallExpression, Expression, Function,
         MemberExpression, ObjectPropertyKind, Statement, VariableDeclaration,
     },
-    to_span, ScopeFlags, Visit,
+    to_span,
 };
 use stryx_core::{Finding, Severity};
 
@@ -480,8 +481,7 @@ fn process_env_name(expr: &Expression<'_>) -> Option<String> {
 /// Returns a label like "Response.json" when `call` is a recognised
 /// response-body sink.
 fn response_sink_label(call: &CallExpression<'_>) -> Option<String> {
-    let MemberExpression::StaticMemberExpression(method) =
-        call.callee.as_member_expression()?
+    let MemberExpression::StaticMemberExpression(method) = call.callee.as_member_expression()?
     else {
         return None;
     };
@@ -543,8 +543,7 @@ fn is_boolean_coercion(call: &CallExpression<'_>) -> bool {
 /// `JSON.stringify(x)` — preserves taint into a string. Recognised so
 /// `new Response(JSON.stringify({ password: ... }))` still fires.
 fn is_json_stringify(call: &CallExpression<'_>) -> bool {
-    let Some(MemberExpression::StaticMemberExpression(method)) =
-        call.callee.as_member_expression()
+    let Some(MemberExpression::StaticMemberExpression(method)) = call.callee.as_member_expression()
     else {
         return false;
     };

@@ -25,8 +25,7 @@ pub struct EscalationVerdict {
 
 #[async_trait]
 pub trait LlmClient: Send + Sync {
-    async fn escalate(&self, req: EscalationRequest)
-        -> Result<EscalationVerdict, LlmError>;
+    async fn escalate(&self, req: EscalationRequest) -> Result<EscalationVerdict, LlmError>;
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -43,10 +42,7 @@ pub struct NullLlmClient;
 
 #[async_trait]
 impl LlmClient for NullLlmClient {
-    async fn escalate(
-        &self,
-        _req: EscalationRequest,
-    ) -> Result<EscalationVerdict, LlmError> {
+    async fn escalate(&self, _req: EscalationRequest) -> Result<EscalationVerdict, LlmError> {
         Err(LlmError::Disabled)
     }
 }

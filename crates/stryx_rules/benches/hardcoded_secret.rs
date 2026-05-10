@@ -6,9 +6,9 @@
 use std::hint::black_box;
 use std::path::PathBuf;
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use stryx_ast::{parse, Allocator};
-use stryx_rules::{builtin_rules, RuleContext};
+use criterion::{Criterion, criterion_group, criterion_main};
+use stryx_ast::{Allocator, parse};
+use stryx_rules::{RuleContext, builtin_rules};
 
 fn fixtures_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -21,7 +21,10 @@ fn run_rules(source: &str, path: &std::path::Path) -> usize {
     let allocator = Allocator::default();
     let parsed = parse(&allocator, path, source).expect("parse");
     let registry = builtin_rules();
-    let ctx = RuleContext { file: &parsed, index: None };
+    let ctx = RuleContext {
+        file: &parsed,
+        index: None,
+    };
     registry.rules().iter().map(|r| r.run(&ctx).len()).sum()
 }
 

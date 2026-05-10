@@ -18,6 +18,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use stryx_ast::{
+    ScopeFlags, Visit,
     ast::{
         Argument, ArrowFunctionExpression, BinaryOperator, BindingPattern, CallExpression,
         ChainElement, Class, ClassElement, Declaration, ExportDefaultDeclarationKind,
@@ -26,7 +27,7 @@ use stryx_ast::{
         MemberExpression, MethodDefinitionKind, ObjectPropertyKind, Program, PropertyKey,
         Statement, SwitchCase, TSType, TSTypeName, UnaryOperator, VariableDeclaration,
     },
-    to_span, ScopeFlags, Visit,
+    to_span,
 };
 use stryx_core::{Finding, Severity, Span};
 use stryx_index::{ClassInfo, FileSummary, ImportRef};
@@ -128,10 +129,7 @@ impl<'idx> FlowVisitor<'idx> {
     }
 
     fn is_tainted(&self, name: &str) -> bool {
-        self.scopes
-            .iter()
-            .rev()
-            .any(|scope| scope.contains(name))
+        self.scopes.iter().rev().any(|scope| scope.contains(name))
     }
 
     fn taint(&mut self, name: String) {
@@ -244,7 +242,9 @@ impl<'idx> FlowVisitor<'idx> {
                 let Some(name) = single_binding_name(&declarator.id) else {
                     continue;
                 };
-                let Some(init) = &declarator.init else { continue };
+                let Some(init) = &declarator.init else {
+                    continue;
+                };
                 let array_expr = match init {
                     Expression::ArrayExpression(a) => a,
                     Expression::TSAsExpression(t) => match &t.expression {
@@ -443,7 +443,9 @@ impl<'idx> FlowVisitor<'idx> {
 
     fn handle_var_decl(&mut self, decl: &VariableDeclaration<'_>) {
         for declarator in &decl.declarations {
-            let Some(init) = &declarator.init else { continue };
+            let Some(init) = &declarator.init else {
+                continue;
+            };
             let tainted = self.expr_taint(init);
             self.scan_for_sinks(init);
             if !tainted {
@@ -508,7 +510,9 @@ impl<'idx> FlowVisitor<'idx> {
                 let summary = self.lookup_callee_summary(&call.callee);
                 let mut any_tainted = false;
                 for (i, arg) in call.arguments.iter().enumerate() {
-                    let Some(e) = argument_expr(arg) else { continue };
+                    let Some(e) = argument_expr(arg) else {
+                        continue;
+                    };
                     if self.expr_taint(e) && self.callee_propagates_arg(summary, i) {
                         any_tainted = true;
                     }
@@ -643,7 +647,9 @@ impl<'idx> FlowVisitor<'idx> {
                 let summary = self.lookup_callee_summary(&call.callee);
                 let mut any_tainted = false;
                 for (i, arg) in call.arguments.iter().enumerate() {
-                    let Some(e) = argument_expr(arg) else { continue };
+                    let Some(e) = argument_expr(arg) else {
+                        continue;
+                    };
                     if self.expr_taint(e) && self.callee_propagates_arg(summary, i) {
                         any_tainted = true;
                     }
@@ -816,16 +822,16 @@ impl<'idx> FlowVisitor<'idx> {
                     .map(|e| self.expr_is_tainted_readonly(e))
                     .unwrap_or(false)
             }),
-            Expression::TemplateLiteral(t) => {
-                t.expressions.iter().any(|e| self.expr_is_tainted_readonly(e))
-            }
+            Expression::TemplateLiteral(t) => t
+                .expressions
+                .iter()
+                .any(|e| self.expr_is_tainted_readonly(e)),
             Expression::ConditionalExpression(c) => {
                 self.expr_is_tainted_readonly(&c.consequent)
                     || self.expr_is_tainted_readonly(&c.alternate)
             }
             Expression::LogicalExpression(b) => {
-                self.expr_is_tainted_readonly(&b.left)
-                    || self.expr_is_tainted_readonly(&b.right)
+                self.expr_is_tainted_readonly(&b.left) || self.expr_is_tainted_readonly(&b.right)
             }
             Expression::TSAsExpression(t) => self.expr_is_tainted_readonly(&t.expression),
             Expression::TSNonNullExpression(t) => self.expr_is_tainted_readonly(&t.expression),
@@ -861,9 +867,7 @@ impl<'idx> FlowVisitor<'idx> {
                 ChainElement::ComputedMemberExpression(m) => {
                     self.expr_is_tainted_readonly(&m.object)
                 }
-                ChainElement::PrivateFieldExpression(m) => {
-                    self.expr_is_tainted_readonly(&m.object)
-                }
+                ChainElement::PrivateFieldExpression(m) => self.expr_is_tainted_readonly(&m.object),
             },
             Expression::TaggedTemplateExpression(t) => t
                 .quasi
@@ -923,8 +927,7 @@ impl FlowVisitor<'_> {
         let Some(summary) = self.lookup_callee_summary(&call.callee) else {
             return;
         };
-        let callee_label =
-            callee_chain(&call.callee).unwrap_or_else(|| "<call>".to_string());
+        let callee_label = callee_chain(&call.callee).unwrap_or_else(|| "<call>".to_string());
         for (i, arg) in call.arguments.iter().enumerate() {
             let Some(arg_expr) = argument_expr(arg) else {
                 continue;
@@ -1484,7 +1487,9 @@ fn extract_summary(
                     let Some(name) = single_binding_name(&declarator.id) else {
                         continue;
                     };
-                    let Some(init) = &declarator.init else { continue };
+                    let Some(init) = &declarator.init else {
+                        continue;
+                    };
                     if let Some(s) = summarise_initialiser(&file, &name, init, index) {
                         summary.locals.insert(name, s);
                     }
@@ -1546,14 +1551,8 @@ fn collect_named_exports(
     match declaration {
         Declaration::FunctionDeclaration(func) => {
             if let Some(name) = func.id.as_ref().map(|id| id.name.to_string())
-                && let Some(s) = summarise_function(
-                    file,
-                    &name,
-                    &func.params,
-                    func.body.as_deref(),
-                    index,
-                    None,
-                )
+                && let Some(s) =
+                    summarise_function(file, &name, &func.params, func.body.as_deref(), index, None)
             {
                 summary.exports.insert(name, s);
             }
@@ -1563,7 +1562,9 @@ fn collect_named_exports(
                 let Some(name) = single_binding_name(&declarator.id) else {
                     continue;
                 };
-                let Some(init) = &declarator.init else { continue };
+                let Some(init) = &declarator.init else {
+                    continue;
+                };
                 if let Some(s) = summarise_initialiser(file, &name, init, index) {
                     summary.exports.insert(name, s);
                 }
@@ -1758,9 +1759,7 @@ fn build_summary(
     let param_names: Vec<String> = params
         .items
         .iter()
-        .map(|p| {
-            single_binding_name(&p.pattern).unwrap_or_else(|| format!("_arg{}", p.span.start))
-        })
+        .map(|p| single_binding_name(&p.pattern).unwrap_or_else(|| format!("_arg{}", p.span.start)))
         .collect();
 
     let mut params_out = Vec::with_capacity(param_names.len());

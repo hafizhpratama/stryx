@@ -5,10 +5,10 @@
 //! regressions in parsing, traversal, and reporter wiring, not just rule logic.
 
 use std::path::{Path, PathBuf};
-use stryx_ast::{parse, Allocator};
+use stryx_ast::{Allocator, parse};
 use stryx_core::{Finding, Severity};
 use stryx_index::ProjectIndex;
-use stryx_rules::{builtin_rules, RuleContext};
+use stryx_rules::{RuleContext, builtin_rules};
 
 fn fixtures_root() -> PathBuf {
     // CARGO_MANIFEST_DIR points at crates/stryx_cli; fixtures live in
@@ -24,12 +24,11 @@ fn scan_file(path: &Path) -> Vec<Finding> {
     let allocator = Allocator::default();
     let parsed = parse(&allocator, path, &source).expect("parse fixture");
     let registry = builtin_rules();
-    let ctx = RuleContext { file: &parsed, index: None };
-    registry
-        .rules()
-        .iter()
-        .flat_map(|r| r.run(&ctx))
-        .collect()
+    let ctx = RuleContext {
+        file: &parsed,
+        index: None,
+    };
+    registry.rules().iter().flat_map(|r| r.run(&ctx)).collect()
 }
 
 /// Run the engine's two-pass pipeline over a fixture directory and collect
@@ -174,7 +173,10 @@ fn unvalidated_body_to_db_cross_file_bad_fires() {
     assert!(
         cross_file_finding.is_some(),
         "expected a cross-file finding on route.ts referencing createUser; got: {:?}",
-        findings.iter().map(|f| (&f.span.file, &f.message)).collect::<Vec<_>>(),
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -189,9 +191,14 @@ fn unvalidated_body_to_db_three_level_chain_bad_fires() {
         .collect();
     let route_path = dir.join("route.ts");
     assert!(
-        findings.iter().any(|f| f.span.file == route_path && f.message.contains("signupUser")),
+        findings
+            .iter()
+            .any(|f| f.span.file == route_path && f.message.contains("signupUser")),
         "expected a finding on route.ts referencing signupUser; got: {:?}",
-        findings.iter().map(|f| (&f.span.file, &f.message)).collect::<Vec<_>>(),
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -235,8 +242,9 @@ fn auth_bypass_via_wrapper_bad_fires() {
         .collect();
     let route_path = dir.join("route.ts");
     assert!(
-        findings.iter().any(|f| f.span.file == route_path
-            && f.message.contains("withAuth")),
+        findings
+            .iter()
+            .any(|f| f.span.file == route_path && f.message.contains("withAuth")),
         "expected an auth-bypass finding on route.ts referencing withAuth; got: {:?}",
         findings
             .iter()
@@ -310,10 +318,9 @@ fn unvalidated_body_to_db_nest_bad_fires() {
         .collect();
     let controller_path = dir.join("controller.ts");
     assert!(
-        findings
-            .iter()
-            .any(|f| f.span.file == controller_path
-                && f.message.contains("this.userService.create")),
+        findings.iter().any(
+            |f| f.span.file == controller_path && f.message.contains("this.userService.create")
+        ),
         "expected a cross-class finding on controller.ts referencing this.userService.create; got: {:?}",
         findings
             .iter()
