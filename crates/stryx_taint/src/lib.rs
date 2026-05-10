@@ -289,6 +289,60 @@ impl Cell {
         }
     }
 
+    /// Replace every `Xtaint::Tainted(_)` cell reachable through
+    /// this cell with `replacement`'s xtaint and shape, merging the
+    /// existing sub-structure into the replacement. Slice 3.4 of
+    /// ADR 0007 — the substitution primitive used to instantiate a
+    /// callee's `return_shape` with the caller's shape for the
+    /// matching argument.
+    ///
+    /// In Phase 3 model: `return_shape` carries `Tainted+Bot` leaves
+    /// at the offsets where the param's value flows out. At a call
+    /// site, the caller's shape for the arg passed in slot `idx`
+    /// becomes the substitution target. Substituting "Tainted at
+    /// offset chain in return_shape" with "caller's arg shape"
+    /// produces the caller-side view of the call's result.
+    ///
+    /// Recursion: walks `Obj` cells to find Tainted leaves. `Arg`
+    /// and `Bot` shapes are unchanged; their xtaint side is also
+    /// unchanged unless it's `Tainted`, in which case it gets the
+    /// replacement.
+    ///
+    /// **Wiring status (honest):** the cross-file consumer (slice
+    /// 3.5) needs per-local shape tracking before this primitive
+    /// can be applied at `const x = helper(arg)` sites. The visitor
+    /// today tracks only `HashSet<String>` of tainted names; the
+    /// jump to `HashMap<String, Cell>` is a multi-hundred-line
+    /// refactor deferred to its own slice. This primitive ships
+    /// here as substrate that slice 3.5 will consume.
+    pub fn instantiate_tainted(&mut self, replacement: &Cell) {
+        if matches!(self.xtaint, Xtaint::Tainted(_)) {
+            let original_shape = std::mem::replace(&mut self.shape, Shape::Bot);
+            if matches!(original_shape, Shape::Bot) {
+                // No sub-structure to preserve; just take the
+                // replacement wholesale.
+                *self = replacement.clone();
+            } else {
+                // Has sub-structure; merge the replacement with it.
+                // Wraps the original shape in a None+Obj cell so the
+                // merge respects that we want to KEEP the structure,
+                // not let it shadow the replacement's xtaint.
+                let mut new_self = replacement.clone();
+                new_self.merge_into(&Cell {
+                    xtaint: Xtaint::None,
+                    shape: original_shape,
+                });
+                *self = new_self;
+            }
+            return;
+        }
+        if let Shape::Obj(map) = &mut self.shape {
+            for cell in map.values_mut() {
+                cell.instantiate_tainted(replacement);
+            }
+        }
+    }
+
     /// Replace every `Shape::Arg(id)` reachable through this cell
     /// where `id.fn_id == fn_id_to_strip` with `Shape::Bot`. Slice
     /// 2.3b of ADR 0006 — the instantiation primitive used to
@@ -1023,6 +1077,86 @@ mod tests {
         )]);
         target.merge_into(&arg_cell(arg_id("f", 0)));
         assert!(matches!(target.shape, Shape::Obj(_)));
+    }
+
+    // ── instantiate_tainted tests (slice 3.4 of ADR 0007) ───────────────
+
+    #[test]
+    fn instantiate_tainted_replaces_leaf_with_replacement() {
+        // Single Tainted+Bot cell — replaced wholesale.
+        let mut cell = Cell::tainted(vec![TaintLabel::UserInput]);
+        let replacement = Cell::clean();
+        cell.instantiate_tainted(&replacement);
+        assert_eq!(cell, replacement);
+    }
+
+    #[test]
+    fn instantiate_tainted_recurses_into_obj() {
+        // Obj{a: Tainted, b: Tainted} — both leaves get the
+        // replacement.
+        let mut cell = obj(vec![
+            (
+                Offset::Field("a".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            ),
+            (
+                Offset::Field("b".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            ),
+        ]);
+        let replacement = arg_cell(arg_id("caller_param", 0));
+        cell.instantiate_tainted(&replacement);
+        match &cell.shape {
+            Shape::Obj(map) => {
+                let a = map.get(&Offset::Field("a".into())).unwrap();
+                let b = map.get(&Offset::Field("b".into())).unwrap();
+                assert!(matches!(a.shape, Shape::Arg(_)));
+                assert!(matches!(b.shape, Shape::Arg(_)));
+            }
+            other => panic!("expected Obj, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn instantiate_tainted_leaves_non_tainted_cells_alone() {
+        // None+Obj structure with no Tainted leaves stays unchanged.
+        let cell = obj(vec![(Offset::Field("a".into()), Cell::clean())]);
+        let mut copy = cell.clone();
+        copy.instantiate_tainted(&Cell::tainted(vec![TaintLabel::UserInput]));
+        assert_eq!(copy, cell);
+    }
+
+    #[test]
+    fn instantiate_tainted_preserves_substructure_under_tainted() {
+        // Tainted cell with Obj sub-structure — the replacement
+        // merges with the existing sub-structure rather than
+        // discarding it. This matters because a return shape can
+        // carry both "this cell is tainted" AND "we know its .x
+        // sub-cell"; instantiation should preserve both.
+        let mut cell = Cell {
+            xtaint: Xtaint::Tainted(vec![TaintLabel::UserInput]),
+            shape: Shape::Obj({
+                let mut m = std::collections::BTreeMap::new();
+                m.insert(Offset::Field("known".into()), Cell::clean());
+                m
+            }),
+        };
+        let replacement = obj(vec![(
+            Offset::Field("from_caller".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        )]);
+        cell.instantiate_tainted(&replacement);
+        // Result: an Obj with both `known` (from original) and
+        // `from_caller` (from replacement). The xtaint of the cell
+        // is the replacement's (None, since replacement was None+Obj).
+        assert_eq!(cell.xtaint, Xtaint::None);
+        match &cell.shape {
+            Shape::Obj(map) => {
+                assert!(map.contains_key(&Offset::Field("known".into())));
+                assert!(map.contains_key(&Offset::Field("from_caller".into())));
+            }
+            other => panic!("expected merged Obj, got {other:?}"),
+        }
     }
 
     // ── strip_arg_for tests (slice 2.3b of ADR 0006) ────────────────────
