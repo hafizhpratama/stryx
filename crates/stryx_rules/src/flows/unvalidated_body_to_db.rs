@@ -929,8 +929,24 @@ impl<'idx> FlowVisitor<'idx> {
     /// `tainted_offsets` and `reaches_db_sink_unsanitized` fields on
     /// `ParamFlow` are derived from the canonicalized shape at
     /// summary time.
+    ///
+    /// Bare-ident consumer (slice 3.5 cont'd): when the chain
+    /// resolves to a bare tainted local, prefer the local's stored
+    /// `Cell` (set by `taint_with_shape` from `compute_call_return_shape`)
+    /// over a flat `Tainted+Bot`. This is what carries field info
+    /// from `const id = pickId(body); sink(id)` into the caller's
+    /// `param_shape` — without it, the chain collapses to whole-value
+    /// taint at the sink site even though slice 3.5 already knows
+    /// the precise shape.
     fn record_taint_in_arg(&mut self, expr: &Expression<'_>) {
         if let Some(chain) = self.full_chain(expr) {
+            if chain.is_empty()
+                && let Some(cell) = self.expr_to_cell(expr)
+                && !matches!(cell.shape, Shape::Bot)
+            {
+                insert_shape_at_path(&mut self.param_shape_seen, &chain, &cell);
+                return;
+            }
             insert_tainted_at_path(
                 &mut self.param_shape_seen,
                 &chain,
