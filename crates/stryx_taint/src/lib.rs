@@ -317,6 +317,34 @@ impl Cell {
         }
     }
 
+    /// True iff any cell reachable through this one has
+    /// `Xtaint::Tainted`. Slice 2.5 of ADR 0006 — the derivation
+    /// rule for the legacy `reaches_db_sink_unsanitized` boolean.
+    pub fn has_tainted_leaf(&self) -> bool {
+        self.count_tainted_leaves() > 0
+    }
+
+    /// Top-level field/index offsets that are themselves tainted or
+    /// have a Tainted descendant. Returns the same set Phase 1's
+    /// `top_offsets_seen` recorded directly: when the visitor saw
+    /// `body.where.id` flow to a sink, this returns
+    /// `[Field("where")]` (the field closest to the base, not the
+    /// leaf). Slice 2.5 of ADR 0006 — the derivation rule for the
+    /// legacy `tainted_offsets` field.
+    ///
+    /// Returns `[]` for whole-value taint (`Tainted+Bot`) and for
+    /// non-`Obj` shapes (`Bot`, `Arg`).
+    pub fn top_tainted_offsets(&self) -> Vec<Offset> {
+        match &self.shape {
+            Shape::Obj(map) => map
+                .iter()
+                .filter(|(_, cell)| cell.has_tainted_leaf())
+                .map(|(off, _)| off.clone())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Recursively count Tainted leaves reachable through this cell.
     /// Used by [`ConvergenceSignal::tainted_leaf_total`] in
     /// `stryx_cli` to detect shape growth across fix-point
@@ -1026,6 +1054,71 @@ mod tests {
         let original = cell.clone();
         cell.strip_arg_for("anywhere");
         assert_eq!(cell, original);
+    }
+
+    // ── derivation methods (slice 2.5 of ADR 0006) ──────────────────────
+
+    #[test]
+    fn has_tainted_leaf_matches_count_predicate() {
+        // Bare-bot, Arg, and Clean cells have no tainted leaves.
+        assert!(!Cell::bot().has_tainted_leaf());
+        assert!(!arg_cell(arg_id("f", 0)).has_tainted_leaf());
+        assert!(!Cell::clean().has_tainted_leaf());
+        // Tainted-rooted is a leaf.
+        assert!(Cell::tainted(vec![TaintLabel::UserInput]).has_tainted_leaf());
+        // Nested: tainted under an Obj is also a leaf.
+        let nested = obj(vec![(
+            Offset::Field("a".into()),
+            Cell::tainted(vec![TaintLabel::UserInput]),
+        )]);
+        assert!(nested.has_tainted_leaf());
+    }
+
+    #[test]
+    fn top_tainted_offsets_includes_only_tainted_subtrees() {
+        // Mix of useful and useless top-level entries — only the
+        // ones with Tainted descendants are included.
+        let cell = obj(vec![
+            (
+                Offset::Field("dirty".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            ),
+            (Offset::Field("clean".into()), Cell::clean()),
+        ]);
+        let offsets = cell.top_tainted_offsets();
+        assert_eq!(offsets, vec![Offset::Field("dirty".into())]);
+    }
+
+    #[test]
+    fn top_tainted_offsets_walks_nested_obj_to_find_taint() {
+        // body.where.id is tainted — top-level offset is `where`,
+        // because its sub-tree contains a Tainted leaf.
+        let cell = obj(vec![(
+            Offset::Field("where".into()),
+            obj(vec![(
+                Offset::Field("id".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            )]),
+        )]);
+        assert_eq!(
+            cell.top_tainted_offsets(),
+            vec![Offset::Field("where".into())]
+        );
+    }
+
+    #[test]
+    fn top_tainted_offsets_empty_for_whole_value_taint() {
+        // Tainted+Bot — no top-level structural keys, so no offsets.
+        // Phase 1's slice-2 contract: bare-ident pass-through records
+        // an empty `tainted_offsets`, signalled via the boolean alone.
+        let cell = Cell::tainted(vec![TaintLabel::UserInput]);
+        assert!(cell.top_tainted_offsets().is_empty());
+    }
+
+    #[test]
+    fn top_tainted_offsets_empty_for_arg_placeholder() {
+        let cell = arg_cell(arg_id("helper", 0));
+        assert!(cell.top_tainted_offsets().is_empty());
     }
 
     #[test]

@@ -125,27 +125,19 @@ struct FlowVisitor<'idx> {
     /// `visit_function` to recover the function's effective name for
     /// arrow / anonymous-function expressions assigned to a const.
     pending_binding_name: Option<String>,
-    /// Slice 2 of ADR 0006 — first-field offsets of the tainted
-    /// parameter that were observed reading into a same-file DB sink.
-    /// Empty during the run pass (where `is_tainted` may include
-    /// arbitrary names from intra-function flow); populated only in
-    /// the per-param `build_summary` simulation, where exactly one
-    /// name (`pname`) carries source taint at function entry.
-    ///
-    /// Records the *outermost* field of each member-chain read on
-    /// the tainted ident — `body.where.id` records `Field("where")`,
-    /// not `Field("id")`. This matches the where-clause severity
-    /// signal and is the simplest useful slice. Sink-side recording
-    /// (where-vs-data placement in the call shape) is a follow-up
-    /// slice; full chains land with the Phase 2 shape lattice.
-    top_offsets_seen: HashSet<Offset>,
     /// Slice 2.1c of ADR 0006 — full-chain shape of observed tainted
     /// reads, accumulated as a `Cell` tree. `body.where.id` produces a
     /// nested `Obj { where -> Obj { id -> Tainted } }`; multiple chain
     /// observations merge into the same tree (shared prefixes share
     /// intermediate cells). Drained in `build_summary` via
     /// `Cell::canonicalize` before being attached to `ParamFlow`.
-    /// Same per-param-fresh discipline as `top_offsets_seen`.
+    ///
+    /// Slice 2.5 made this the single source of truth: the legacy
+    /// `tainted_offsets` and `reaches_db_sink_unsanitized` fields on
+    /// `ParamFlow` are now derived from the canonicalized shape via
+    /// `Cell::top_tainted_offsets()` and `Cell::has_tainted_leaf()`.
+    /// The previous `top_offsets_seen: HashSet<Offset>` parallel
+    /// state is gone.
     param_shape_seen: Cell,
 }
 
@@ -162,7 +154,6 @@ impl<'idx> FlowVisitor<'idx> {
             body_validated_handlers: HashSet::new(),
             body_source_suppressed: 0,
             pending_binding_name: None,
-            top_offsets_seen: HashSet::new(),
             param_shape_seen: Cell::bot(),
         }
     }
@@ -759,13 +750,13 @@ impl<'idx> FlowVisitor<'idx> {
         let Some(severity) = severity else {
             return;
         };
-        // Record param-side first-field offsets for slice 2 of ADR 0006.
-        // Observation only — no consumer reads from `top_offsets_seen`
-        // yet; the boolean `reaches_db_sink_unsanitized` remains the
-        // source of truth for findings and severity.
+        // Record taint observations into `param_shape_seen` (slice
+        // 2.1c onwards). The legacy `tainted_offsets` and the
+        // boolean `reaches_db_sink_unsanitized` are derived from
+        // the canonicalized shape at summary time (slice 2.5).
         for arg in &call.arguments {
             if let Some(e) = argument_expr(arg) {
-                self.record_top_offsets_in_arg(e);
+                self.record_taint_in_arg(e);
             }
         }
         let callee_label = callee_chain(&call.callee).unwrap_or_else(|| "db sink".into());
@@ -790,26 +781,23 @@ impl<'idx> FlowVisitor<'idx> {
         );
     }
 
-    /// Walk a sink-call argument expression and record the *outermost*
-    /// field of each tainted member-chain read into `top_offsets_seen`.
-    /// Recurses through structural shapes (object/array literals,
-    /// spreads, casts) but not through call expressions — propagation
-    /// through callees is a follow-up slice.
+    /// Walk a sink-call argument expression and record taint
+    /// observations into `param_shape_seen`. Recurses through
+    /// structural shapes (object/array literals, spreads, casts) but
+    /// not through call expressions — propagation through callees is
+    /// handled at the cross-file site via shape merge.
     ///
-    /// `body` records nothing (whole-value taint signalled via the
-    /// existing boolean). `body.id` records `Field("id")`.
-    /// `body.where.id` records `Field("where")` — the field closest to
-    /// the tainted base, not the leaf. Computed access with a literal
-    /// key matches as `Field`/`Index`; non-literal collapses to `Any`.
-    fn record_top_offsets_in_arg(&mut self, expr: &Expression<'_>) {
-        if let Some(off) = self.top_offset_of(expr) {
-            self.top_offsets_seen.insert(off);
-        }
-        // Slice 2.1c — if `expr` is a tainted-rooted member chain,
-        // record the *full* chain into the shape tree as well. The
-        // first-field record above stays as the slice-2 substrate;
-        // the shape tree is the new substrate consumers will read in
-        // slice 2.2+.
+    /// `body` records `Tainted+Bot` (whole-value taint at root).
+    /// `body.id` records `Obj{id: Tainted+Bot}` (single-field chain).
+    /// `body.where.id` records `Obj{where: Obj{id: Tainted+Bot}}`
+    /// (full chain). Computed access with a literal key matches as
+    /// `Field`/`Index`; non-literal collapses to `Any`.
+    ///
+    /// Slice 2.5: shape is the single source of truth; the legacy
+    /// `tainted_offsets` and `reaches_db_sink_unsanitized` fields on
+    /// `ParamFlow` are derived from the canonicalized shape at
+    /// summary time.
+    fn record_taint_in_arg(&mut self, expr: &Expression<'_>) {
         if let Some(chain) = self.full_chain(expr) {
             insert_tainted_at_path(
                 &mut self.param_shape_seen,
@@ -823,10 +811,10 @@ impl<'idx> FlowVisitor<'idx> {
                 for prop in &obj.properties {
                     match prop {
                         ObjectPropertyKind::ObjectProperty(p) => {
-                            self.record_top_offsets_in_arg(&p.value);
+                            self.record_taint_in_arg(&p.value);
                         }
                         ObjectPropertyKind::SpreadProperty(s) => {
-                            self.record_top_offsets_in_arg(&s.argument);
+                            self.record_taint_in_arg(&s.argument);
                         }
                     }
                 }
@@ -834,22 +822,22 @@ impl<'idx> FlowVisitor<'idx> {
             Expression::ArrayExpression(arr) => {
                 for el in &arr.elements {
                     if let Some(e) = el.as_expression() {
-                        self.record_top_offsets_in_arg(e);
+                        self.record_taint_in_arg(e);
                     }
                 }
             }
-            Expression::ParenthesizedExpression(p) => self.record_top_offsets_in_arg(&p.expression),
-            Expression::TSAsExpression(t) => self.record_top_offsets_in_arg(&t.expression),
-            Expression::TSNonNullExpression(t) => self.record_top_offsets_in_arg(&t.expression),
-            Expression::TSSatisfiesExpression(t) => self.record_top_offsets_in_arg(&t.expression),
-            Expression::TSTypeAssertion(t) => self.record_top_offsets_in_arg(&t.expression),
+            Expression::ParenthesizedExpression(p) => self.record_taint_in_arg(&p.expression),
+            Expression::TSAsExpression(t) => self.record_taint_in_arg(&t.expression),
+            Expression::TSNonNullExpression(t) => self.record_taint_in_arg(&t.expression),
+            Expression::TSSatisfiesExpression(t) => self.record_taint_in_arg(&t.expression),
+            Expression::TSTypeAssertion(t) => self.record_taint_in_arg(&t.expression),
             Expression::ConditionalExpression(c) => {
-                self.record_top_offsets_in_arg(&c.consequent);
-                self.record_top_offsets_in_arg(&c.alternate);
+                self.record_taint_in_arg(&c.consequent);
+                self.record_taint_in_arg(&c.alternate);
             }
             Expression::LogicalExpression(b) => {
-                self.record_top_offsets_in_arg(&b.left);
-                self.record_top_offsets_in_arg(&b.right);
+                self.record_taint_in_arg(&b.left);
+                self.record_taint_in_arg(&b.right);
             }
             _ => {}
         }
@@ -878,35 +866,6 @@ impl<'idx> FlowVisitor<'idx> {
                 chain.push(literal_offset_or_any(&m.expression));
                 Some(chain)
             }
-            _ => None,
-        }
-    }
-
-    /// If `expr` is a member-chain rooted in a tainted ident, return
-    /// the field/index applied directly to that ident — `body.where`
-    /// returns `Some(Field("where"))`, `body.where.id` also returns
-    /// `Some(Field("where"))` (the outermost step on the base).
-    /// Returns `None` for a bare tainted ident (whole-value taint),
-    /// for any non-tainted base, or for non-member expressions.
-    fn top_offset_of(&self, expr: &Expression<'_>) -> Option<Offset> {
-        match expr {
-            Expression::ParenthesizedExpression(p) => self.top_offset_of(&p.expression),
-            Expression::TSAsExpression(t) => self.top_offset_of(&t.expression),
-            Expression::TSNonNullExpression(t) => self.top_offset_of(&t.expression),
-            Expression::TSSatisfiesExpression(t) => self.top_offset_of(&t.expression),
-            Expression::TSTypeAssertion(t) => self.top_offset_of(&t.expression),
-            Expression::StaticMemberExpression(m) => match strip_casts(&m.object) {
-                Expression::Identifier(id) if self.is_tainted(id.name.as_str()) => {
-                    Some(Offset::Field(m.property.name.to_string()))
-                }
-                _ => self.top_offset_of(&m.object),
-            },
-            Expression::ComputedMemberExpression(m) => match strip_casts(&m.object) {
-                Expression::Identifier(id) if self.is_tainted(id.name.as_str()) => {
-                    Some(literal_offset_or_any(&m.expression))
-                }
-                _ => self.top_offset_of(&m.object),
-            },
             _ => None,
         }
     }
@@ -1237,34 +1196,20 @@ impl FlowVisitor<'_> {
             if !summary.taints_through_param(i) {
                 continue;
             }
-            // Slice 3c of ADR 0006 — record offsets at the cross-file
-            // site too, not just at local sinks. Captures cases like
-            // `helper(body.user)` where the caller's first-field on
-            // its tainted ident is `Field("user")` even though the
-            // sink itself lives in another file.
-            self.record_top_offsets_in_arg(arg_expr);
-            // For bare-ident args (no member chain on the caller's
-            // side) the local walker records nothing — the callee's
-            // own first-field offsets carry the precision. Absorb
-            // them so the caller's summary reflects what the callee
-            // actually consumed.
-            if matches!(strip_casts(arg_expr), Expression::Identifier(id)
-                if self.is_tainted(id.name.as_str()))
-                && let Some(callee_param) = summary.params.get(i)
-            {
-                for off in &callee_param.tainted_offsets {
-                    self.top_offsets_seen.insert(off.clone());
-                }
-            }
+            // Slice 2.1c+ — record taint at the cross-file site
+            // into `param_shape_seen`. Captures `helper(body.user)`
+            // where the caller's chain on its tainted ident is
+            // `Field("user")` even though the sink lives in another
+            // file. (Slice 3c's separate `tainted_offsets` absorb
+            // was retired in slice 2.5 — the shape merge below
+            // captures the same information end-to-end.)
+            self.record_taint_in_arg(arg_expr);
             // Slice 2.1d — compose callee's full param_shape into
             // the caller's shape tree at the caller's offset chain.
-            // Generalises slice 3c's bare-ident absorption to handle
-            // chain args too: `helper(body.user)` where the helper
-            // reads `.name` produces caller body.user.name as a
-            // tainted leaf. `full_chain` returns Some(vec![]) for
-            // bare ident (uniform handling), Some(chain) for chain
-            // args, None when the arg isn't a tainted-rooted member
-            // chain (in which case the local walker already covered it).
+            // `full_chain` returns Some(vec![]) for bare ident, and
+            // `insert_shape_at_path` reduces to a root-merge in
+            // that case — the bare-ident absorption is the same
+            // operation, generalised to handle chain args too.
             if let Some(chain) = self.full_chain(arg_expr)
                 && let Some(callee_param) = summary.params.get(i)
                 && let Some(callee_shape) = &callee_param.param_shape
@@ -2336,24 +2281,15 @@ fn build_summary(
         }
         visitor.exit_fn();
 
-        let reaches = !visitor.findings.is_empty();
         let sink_span = visitor.findings.first().map(|f| f.span.clone());
         let propagates_to_return = visitor.tainted_return;
-        // Slice 2 of ADR 0006 — drain the per-param simulation's
-        // observed first-field offsets into a sorted Vec for stable
-        // serialization. Empty when `reaches` is false, or when only
-        // whole-value taint was observed (no member-chain reads).
-        let mut tainted_offsets: Vec<Offset> = visitor.top_offsets_seen.into_iter().collect();
-        tainted_offsets.sort_by(offset_sort_key);
         // Slice 2.1c canonicalize → Some(concrete) for observed
         // params, None for un-observed.
         //
         // Slice 2.3a — when canonicalize returns None (no taint
         // observations were recorded), emit a polymorphic placeholder
         // `Arg(arg_id)` so the summary carries this parameter's
-        // identity. Consumers at call sites (slice 2.3b) will be able
-        // to instantiate the placeholder with the caller's actual
-        // shape. ArgId is built from the function's stable name and
+        // identity. ArgId is built from the function's stable name and
         // 0-based parameter index per ADR 0006.
         let param_shape = visitor.param_shape_seen.canonicalize().or_else(|| {
             Some(Cell::arg_placeholder(stryx_taint::ArgId {
@@ -2361,6 +2297,23 @@ fn build_summary(
                 idx: idx as u32,
             }))
         });
+        // Slice 2.5 — derive the legacy `tainted_offsets` and
+        // `reaches_db_sink_unsanitized` fields from `param_shape`
+        // (the single source of truth). Sanity-cross-checked with a
+        // debug assertion against the visitor's findings list, which
+        // was the previous source of truth for `reaches`.
+        let reaches = param_shape.as_ref().is_some_and(Cell::has_tainted_leaf);
+        debug_assert_eq!(
+            reaches,
+            !visitor.findings.is_empty(),
+            "shape-derived reaches must match findings.is_empty(); \
+             a finding-emission path is missing its record_taint_in_arg call",
+        );
+        let mut tainted_offsets: Vec<Offset> = param_shape
+            .as_ref()
+            .map(Cell::top_tainted_offsets)
+            .unwrap_or_default();
+        tainted_offsets.sort_by(offset_sort_key);
         params_out.push(ParamFlow {
             name: pname.clone(),
             reaches_db_sink_unsanitized: reaches,
