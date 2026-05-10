@@ -18,6 +18,94 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.3] — 2026-05-10
+
+Phase 2 substrate of ADR 0006 (field-sensitive shape lattice) is
+complete. The full Semgrep-style `Cell { Xtaint, Shape }` lattice
+ships with two of three planned variants — `Bot`, `Obj`, `Arg`
+(polymorphic placeholder). The HOF `Fun` variant is deferred until
+return-shape tracking lands. `param_shape` is now the single source
+of truth for taint-flow information; the legacy `tainted_offsets`
+and `reaches_db_sink_unsanitized` fields on `ParamFlow` derive from
+it via `Cell::has_tainted_leaf` and `Cell::top_tainted_offsets`.
+
+OSS validation against `dub` after the slice-2.5 refactor confirms
+byte-identical findings vs the Phase 1 baseline (5 findings,
+3 flow/unvalidated-body-to-db + 2 flow/secret-to-response, identical
+severity breakdown and message text).
+
+### Added (Phase 2 of ADR 0006)
+- `stryx_taint::Shape::{Bot, Obj, Arg}` — the full taint shape
+  lattice. `Obj` keys are `Offset`s sorted via the derived `Ord`;
+  on the wire, encoded as a sorted sequence of pairs via the
+  `offset_map_serde` adapter (JSON requires string keys but `Offset`
+  is an enum).
+- `stryx_taint::Cell { xtaint, shape }` — Semgrep's `cell = Cell of
+  Xtaint.t * shape`. Constructors `Cell::{bot, tainted, clean,
+  arg_placeholder}` produce shapes consistent with the two Phase 2
+  invariants where possible.
+- `stryx_taint::Xtaint::{None, Tainted(Vec<TaintLabel>), Clean}` —
+  explicit taint status, distinct from "absent from the parent map."
+  Tainted's label list is treated as a set; canonicalize sorts and
+  de-duplicates.
+- `stryx_taint::ArgId { fn_id, idx }` — content-stable parameter
+  identity. Stable across runs so cache keys per ADR 0005 stay valid.
+- `Cell::canonicalize` — recursive minimization enforcing both Phase
+  2 invariants: `None+Bot ⇒ drop`, `Clean ⇒ Bot`. `None+Arg`
+  preserved as the placeholder identity. Idempotent (property test
+  `canonicalize_is_idempotent`).
+- `Cell::merge_into` — the lattice-join. Xtaint: `Tainted` dominates,
+  label sets union with sort+dedupe; `Clean+None` downgrades to
+  `None` for conservative correctness. Shape: `Bot` is the identity,
+  `Obj` maps union by key with recursive cell-merge; `Arg`
+  same-id is idempotent, different-id falls back to `Bot`, concrete
+  `Obj` always beats opaque `Arg`.
+- `Cell::strip_arg_for(fn_id)` — instantiation primitive that
+  replaces matching `Arg` with `Bot`. Substrate for future
+  return-shape tracking; not yet wired into the visitor (the
+  cross-file site only fires on concrete-shaped callees today).
+- `Cell::count_tainted_leaves` — total Tainted leaves reachable
+  through this cell. Used by `ConvergenceSignal::tainted_leaf_total`
+  to detect shape growth across iterations.
+- `Cell::has_tainted_leaf` and `Cell::top_tainted_offsets` —
+  derivation methods used by slice 2.5 to compute the legacy
+  `reaches_db_sink_unsanitized` boolean and `tainted_offsets` Vec
+  from the canonical shape.
+- `ParamFlow.param_shape: Option<Cell>` — the new source of truth
+  for cross-file taint-flow information. Populated by the visitor
+  during summary extraction (slice 2.1c local sinks, slice 2.1d
+  cross-file composition). `#[serde(default)]` so pre-Phase-2
+  cache entries deserialize as `None`.
+- `ConvergenceSignal::tainted_leaf_total` — fifth fix-point axis,
+  sum of `param_shape.count_tainted_leaves` across all summarised
+  params. Per ADR 0004 contract; finer-grained than
+  `tainted_offset_total` because it notices chain-depth growth.
+- Per-axis convergence-signal contract test
+  `convergence_signal_reflects_param_shape` — guards against
+  silent-under-detection regressions.
+
+### Changed (Phase 2 consumer wiring)
+- Cross-file finding messages in `flow/unvalidated-body-to-db` now
+  list specific callee fields when the helper's shape reveals them.
+  `saveProfile(body)` where saveProfile reads `input.{name,email}`
+  produces "fields: `email`, `name`" in the message. Whole-value
+  pass-through callees (Tainted+Bot shape) emit the same message
+  as before — no fields suffix.
+- `param_shape` is the single source of truth (slice 2.5). The
+  visitor's `top_offsets_seen` parallel state is gone; the legacy
+  `tainted_offsets` and `reaches_db_sink_unsanitized` fields are
+  computed from the canonicalized shape. A `debug_assert!` in
+  `build_summary` cross-checks shape-derived `reaches` against the
+  previous `!findings.is_empty()` source — fires if a finding
+  emission path is ever added without a matching
+  `record_taint_in_arg` call.
+- The visitor's per-param simulation in `build_summary` emits
+  `Cell::arg_placeholder(arg_id)` for params with no taint
+  observations (slice 2.3a), instead of leaving `param_shape` as
+  `None`. ArgId is built from the function's name and 0-based
+  parameter index. Observation-only at consumers (existing
+  consumers handle `Arg` the same way they handled `None`).
+
 ## [0.1.0-alpha.2] — 2026-05-10
 
 Phase 1 substrate of ADR 0006 (field-sensitive shape lattice migration)

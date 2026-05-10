@@ -1352,7 +1352,7 @@ checksum = "7da8b5736845d9f2fcb837ea5d9e2628564b3b043a70948a3f0b778838c5fb4f"
 
 [[package]]
 name = "stryx_ast"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "oxc_allocator",
  "oxc_ast",
@@ -1366,7 +1366,7 @@ dependencies = [
 
 [[package]]
 name = "stryx_cache"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "blake3",
  "dashmap",
@@ -1376,7 +1376,7 @@ dependencies = [
 
 [[package]]
 name = "stryx_cli"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "anyhow",
  "clap",
@@ -1396,7 +1396,7 @@ dependencies = [
 
 [[package]]
 name = "stryx_core"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "serde",
  "thiserror",
@@ -1404,7 +1404,7 @@ dependencies = [
 
 [[package]]
 name = "stryx_index"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "serde",
  "stryx_core",
@@ -1413,7 +1413,7 @@ dependencies = [
 
 [[package]]
 name = "stryx_llm"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "async-trait",
  "serde",
@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "stryx_napi"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "napi",
  "napi-build",
@@ -1438,7 +1438,7 @@ dependencies = [
 
 [[package]]
 name = "stryx_reporter"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "serde",
  "serde_json",
@@ -1447,7 +1447,7 @@ dependencies = [
 
 [[package]]
 name = "stryx_rules"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "criterion",
  "regex",
@@ -1459,7 +1459,7 @@ dependencies = [
 
 [[package]]
 name = "stryx_taint"
-version = "0.1.0-alpha.2"
+version = "0.1.0-alpha.3"
 dependencies = [
  "serde",
  "serde_json",
