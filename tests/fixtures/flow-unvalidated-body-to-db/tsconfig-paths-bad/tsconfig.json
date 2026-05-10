@@ -1,0 +1,9 @@
+{
+  // Standard Next.js tsconfig — `@/*` maps to `./src/*`.
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}

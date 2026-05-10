@@ -1603,6 +1603,12 @@ fn extract_summary(
             }
             Statement::ExportNamedDeclaration(decl) => {
                 collect_named_exports(&file, decl, index, &mut summary);
+                collect_named_re_exports(decl, &mut summary);
+            }
+            Statement::ExportAllDeclaration(decl) => {
+                summary
+                    .wildcard_re_exports
+                    .push(decl.source.value.to_string());
             }
             Statement::ExportDefaultDeclaration(decl) => {
                 collect_default_export(&file, &decl.declaration, index, &mut summary);
@@ -1733,6 +1739,31 @@ fn collect_imports(decl: &ImportDeclaration<'_>, summary: &mut FileSummary) {
                 // namespace member access.
             }
         }
+    }
+}
+
+/// `export { foo } from "./bar"` and `export { foo as baz } from "./bar"`
+/// — barrel-file re-export form. Recorded so the project index can
+/// chase chains of re-exports during finalize. Plain
+/// `export { foo }` (no source) is not a re-export and is skipped.
+fn collect_named_re_exports(decl: &ExportNamedDeclaration<'_>, summary: &mut FileSummary) {
+    if matches!(decl.export_kind, ImportOrExportKind::Type) {
+        return;
+    }
+    let Some(source) = &decl.source else {
+        return;
+    };
+    let module = source.value.to_string();
+    for spec in &decl.specifiers {
+        let local_name = spec.local.name().to_string();
+        let exported_name = spec.exported.name().to_string();
+        summary.re_exports.insert(
+            exported_name,
+            ImportRef {
+                module_specifier: module.clone(),
+                imported_name: local_name,
+            },
+        );
     }
 }
 

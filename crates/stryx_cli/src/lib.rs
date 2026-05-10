@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use stryx_ast::{Allocator, parse};
 use stryx_core::Finding;
-use stryx_index::ProjectIndex;
+use stryx_index::{PathAlias, ProjectIndex};
 use stryx_rules::{RuleContext, RuleRegistry, builtin_rules};
 
 /// Output of a scan. `findings` is the merged set of all rule
@@ -48,15 +48,31 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
 
     let sources: Arc<DashMap<PathBuf, String>> = Arc::new(DashMap::new());
 
+    // Read tsconfig.json (or jsconfig.json) at the scan root once
+    // and feed the path aliases into every iteration's index. Most
+    // Next.js apps ship with a `@/*` alias by default; without
+    // this, every cross-file flow through `@/lib/...` is silently
+    // unresolved.
+    let path_aliases = read_tsconfig_path_aliases(path);
+
     // Pass 1 — iterative extract. On each round every rule sees the
     // previous round's ProjectIndex, so summaries that depend on
     // cross-file calls converge through multi-level chains
     // (controller → service → repository). Capped at MAX_ITER as a
     // safety net; in practice TS apps converge in 2–4 rounds because
     // reachability is monotonic.
+    //
+    // Convergence is detected against a *tuple* of independent
+    // counts — sink-param flips, propagates-to-return flips, and
+    // body-validated-handler insertions. Comparing against just the
+    // first count was the original implementation, but it could
+    // declare convergence early while a propagation flag was still
+    // mid-flight, leading to silent under-detection.
     const MAX_ITER: usize = 10;
     let mut project_index = ProjectIndex::new();
-    let mut prev_signal = 0usize;
+    let mut prev_signal: Option<ConvergenceSignal> = None;
+    let mut converged = false;
+    let mut last_signal = ConvergenceSignal::default();
     for round in 0..MAX_ITER {
         let prev = Arc::new(project_index);
         let summaries: Vec<stryx_index::FileSummary> = files
@@ -67,14 +83,33 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
         for summary in summaries {
             next.insert_file(summary);
         }
+        next.set_path_aliases(path_aliases.clone());
         next.finalize();
-        let signal = sink_param_count(&next);
-        tracing::debug!(round, signal, "extract round");
+        let signal = convergence_signal(&next);
+        tracing::debug!(round, ?signal, "extract round");
+        last_signal = signal;
         project_index = next;
-        if round > 0 && signal == prev_signal {
+        if let Some(prev) = &prev_signal
+            && *prev == signal
+        {
+            converged = true;
             break;
         }
-        prev_signal = signal;
+        prev_signal = Some(signal);
+    }
+    if !converged {
+        // Hit the iteration cap without reaching a fixed point. The
+        // analysis is unsound at this point — flows that needed >10
+        // hops are silently under-approximated. Surface this so the
+        // user knows; future versions will emit explicit
+        // UncertainZones for LLM escalation here.
+        tracing::warn!(
+            max_iter = MAX_ITER,
+            ?last_signal,
+            "extract pass exited via iteration cap without reaching a fixed point — \
+             call chains deeper than {MAX_ITER} hops may be under-approximated. \
+             Set RUST_LOG=stryx_cli=debug to see per-round signals."
+        );
     }
     let project_index = Arc::new(project_index);
 
@@ -93,6 +128,148 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
         findings,
         sources: sources_out,
     })
+}
+
+/// Read `tsconfig.json` or `jsconfig.json` at the scan root and
+/// extract `compilerOptions.paths` as a list of [`PathAlias`].
+/// Returns an empty list if no config exists, can't be parsed, or
+/// declares no paths. Errors are logged at `warn` and not
+/// propagated — a malformed tsconfig shouldn't fail the scan.
+///
+/// `baseUrl` is honoured (defaulting to `.`) so replacements are
+/// rooted at the right directory. Both `tsconfig.json` and
+/// `jsconfig.json` are checked; the first that exists wins.
+fn read_tsconfig_path_aliases(scan_root: &Path) -> Vec<PathAlias> {
+    let root = if scan_root.is_dir() {
+        scan_root
+    } else {
+        scan_root.parent().unwrap_or(Path::new("."))
+    };
+    for name in ["tsconfig.json", "jsconfig.json"] {
+        let path = root.join(name);
+        if path.exists() {
+            match parse_tsconfig_paths(&path) {
+                Ok(aliases) => return aliases,
+                Err(err) => {
+                    tracing::warn!(?path, %err, "failed to parse tsconfig; skipping path aliases");
+                    return Vec::new();
+                }
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn parse_tsconfig_paths(tsconfig_path: &Path) -> Result<Vec<PathAlias>> {
+    let raw = std::fs::read_to_string(tsconfig_path)
+        .with_context(|| format!("read {}", tsconfig_path.display()))?;
+    // tsconfig allows JSON-with-comments; serde_json doesn't. Strip
+    // line comments (`// …`) and block comments (`/* … */`) before
+    // parsing. Trailing commas are also allowed by tsc but rejected
+    // by serde_json; we make a best effort to strip those too.
+    let cleaned = strip_jsonc(&raw);
+    let value: serde_json::Value = serde_json::from_str(&cleaned)
+        .with_context(|| format!("parse {}", tsconfig_path.display()))?;
+    let opts = match value.get("compilerOptions") {
+        Some(o) => o,
+        None => return Ok(Vec::new()),
+    };
+    let base_url = opts.get("baseUrl").and_then(|v| v.as_str()).unwrap_or(".");
+    let base_root = tsconfig_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(base_url);
+    let paths_obj = match opts.get("paths").and_then(|v| v.as_object()) {
+        Some(p) => p,
+        None => return Ok(Vec::new()),
+    };
+    let mut out = Vec::new();
+    for (pattern, replacements) in paths_obj {
+        let Some(replacements_arr) = replacements.as_array() else {
+            continue;
+        };
+        let replacements: Vec<PathBuf> = replacements_arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|r| base_root.join(r))
+            .collect();
+        if replacements.is_empty() {
+            continue;
+        }
+        out.push(PathAlias {
+            pattern: pattern.clone(),
+            replacements,
+        });
+    }
+    Ok(out)
+}
+
+/// Strip `//` line comments, `/* … */` block comments, and trailing
+/// commas before `]` / `}`. Naive but adequate for tsconfig files —
+/// quoted strings are handled (so `"//"` inside a string isn't
+/// stripped). This is *not* a full JSON5 parser.
+fn strip_jsonc(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut chars = input.chars().peekable();
+    let mut in_string = false;
+    let mut escape = false;
+    while let Some(c) = chars.next() {
+        if in_string {
+            out.push(c);
+            if escape {
+                escape = false;
+            } else if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                out.push(c);
+                in_string = true;
+            }
+            '/' if chars.peek() == Some(&'/') => {
+                while let Some(&n) = chars.peek() {
+                    if n == '\n' {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                chars.next();
+                while let Some(n) = chars.next() {
+                    if n == '*' && chars.peek() == Some(&'/') {
+                        chars.next();
+                        break;
+                    }
+                }
+            }
+            _ => out.push(c),
+        }
+    }
+    // Strip trailing commas: `,]` → `]`, `,}` → `}`. Whitespace and
+    // newlines may sit between the comma and the closing bracket.
+    let bytes = out.into_bytes();
+    let mut cleaned = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b',' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if j < bytes.len() && (bytes[j] == b']' || bytes[j] == b'}') {
+                i += 1;
+                continue;
+            }
+        }
+        cleaned.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(cleaned).expect("ascii-safe transform")
 }
 
 fn collect_targets(root: &Path) -> Result<Vec<PathBuf>> {
@@ -167,18 +344,51 @@ fn extract_file(
     out
 }
 
-/// Convergence signal: total number of (file, exported-fn, param)
-/// triples whose summary marks them as sinking unsanitised body taint
-/// to the database. Monotonic across iterations — only flips
-/// false→true — so a fixed point is reached in at most call-graph-
-/// depth rounds.
-fn sink_param_count(index: &ProjectIndex) -> usize {
-    index
-        .files()
-        .flat_map(|f| f.exports.values())
-        .flat_map(|e| e.params.iter())
-        .filter(|p| p.reaches_db_sink_unsanitized)
-        .count()
+/// Per-round convergence signal — a tuple of independent counts so
+/// the loop doesn't declare convergence early while one flag is
+/// still propagating but the others happen to land on the same
+/// total. All three counts are monotone non-decreasing under the
+/// taint sub-lattice, so equality across two consecutive rounds is
+/// a sound fixed-point witness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct ConvergenceSignal {
+    sink_params: usize,
+    propagating_params: usize,
+    body_validated_handlers: usize,
+}
+
+fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
+    let mut sink_params = 0;
+    let mut propagating_params = 0;
+    let mut body_validated_handlers = 0;
+    for file in index.files() {
+        for export in file.exports.values() {
+            for param in &export.params {
+                if param.reaches_db_sink_unsanitized {
+                    sink_params += 1;
+                }
+                if param.propagates_to_return {
+                    propagating_params += 1;
+                }
+            }
+        }
+        for local in file.locals.values() {
+            for param in &local.params {
+                if param.reaches_db_sink_unsanitized {
+                    sink_params += 1;
+                }
+                if param.propagates_to_return {
+                    propagating_params += 1;
+                }
+            }
+        }
+        body_validated_handlers += file.body_validated_handlers.len();
+    }
+    ConvergenceSignal {
+        sink_params,
+        propagating_params,
+        body_validated_handlers,
+    }
 }
 
 fn run_file(

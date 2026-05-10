@@ -231,6 +231,56 @@ fn unvalidated_body_to_db_cross_file_good_silent() {
 }
 
 #[test]
+fn unvalidated_body_to_db_barrel_re_export() {
+    // route imports from "./lib" which is a barrel index that
+    // re-exports from "./lib/users". Stryx must chase the
+    // re-export chain to find the prisma write.
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/barrel-bad");
+    let result = stryx_cli::scan(&dir).expect("scan");
+    let route_path = dir.join("route.ts");
+    let cross_file_finding = result.findings.iter().find(|f| {
+        f.rule_id == "flow/unvalidated-body-to-db"
+            && f.span.file == route_path
+            && f.message.contains("createUser")
+    });
+    assert!(
+        cross_file_finding.is_some(),
+        "expected cross-file finding through barrel re-export; got: {:?}",
+        result
+            .findings
+            .iter()
+            .map(|f| (&f.rule_id, &f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unvalidated_body_to_db_tsconfig_paths_resolved() {
+    // Real-world Next.js shape: route imports through `@/*` path
+    // alias to `./src/*`. Without tsconfig.json reading, the
+    // resolver rejects non-relative specifiers and the cross-file
+    // flow is missed entirely. We use stryx_cli::scan so the full
+    // CLI path runs (including tsconfig parsing).
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/tsconfig-paths-bad");
+    let result = stryx_cli::scan(&dir).expect("scan");
+    let route_path = dir.join("app/api/route.ts");
+    let cross_file_finding = result.findings.iter().find(|f| {
+        f.rule_id == "flow/unvalidated-body-to-db"
+            && f.span.file == route_path
+            && f.message.contains("createUser")
+    });
+    assert!(
+        cross_file_finding.is_some(),
+        "expected cross-file finding through `@/lib/users` alias; got: {:?}",
+        result
+            .findings
+            .iter()
+            .map(|f| (&f.rule_id, &f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn unvalidated_body_to_db_validate_wrapper_silent() {
     // `export default validate(handler)` where `validate`'s body
     // calls `Schema.parse(req.body)` before delegating. The inner
