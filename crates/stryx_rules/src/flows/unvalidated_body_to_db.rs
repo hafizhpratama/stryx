@@ -565,11 +565,90 @@ impl<'idx> FlowVisitor<'idx> {
             if !tainted {
                 continue;
             }
-            // For destructuring patterns like `const { name } = body`, taint
-            // every introduced binding. For a plain identifier, taint just it.
-            for name in collect_binding_names(&declarator.id) {
+            // Slice 3.5 of ADR 0007 — try to compute a precise return
+            // shape for `const x = helper(arg)` patterns. Falls
+            // through to plain `taint(name)` if the call doesn't
+            // resolve, isn't a single-binding pattern, or yields
+            // nothing more precise than whole-value taint.
+            let names: Vec<String> = collect_binding_names(&declarator.id);
+            if names.len() == 1
+                && let Some(shape) = self.compute_call_return_shape(init)
+            {
+                let name = names.into_iter().next().unwrap();
+                self.taint_with_shape(name, shape);
+                continue;
+            }
+            // Default: whole-value taint for each binding (preserves
+            // pre-3.5 behavior on destructuring and non-call inits).
+            for name in names {
                 self.taint(name);
             }
+        }
+    }
+
+    /// Slice 3.5 of ADR 0007 — given a variable-declarator's `init`
+    /// expression, try to compute the precise shape of the call
+    /// result by substituting each callee `return_shape` with the
+    /// caller's shape for the matching argument.
+    ///
+    /// Returns `None` if the init isn't a recognised call shape, the
+    /// callee summary isn't resolvable, or no caller arg has a
+    /// known local shape. Returns `Some(canonical_cell)` otherwise.
+    /// The returned shape is what the caller should record under
+    /// the local binding.
+    fn compute_call_return_shape(&self, init: &Expression<'_>) -> Option<Cell> {
+        let inner = match init {
+            Expression::AwaitExpression(aw) => &aw.argument,
+            Expression::ParenthesizedExpression(p) => &p.expression,
+            _ => init,
+        };
+        let call = match inner {
+            Expression::CallExpression(c) => c.as_ref(),
+            _ => return None,
+        };
+        let summary = self.lookup_callee_summary(&call.callee)?;
+        let mut result = Cell::bot();
+        let mut any_contribution = false;
+        for (i, arg) in call.arguments.iter().enumerate() {
+            let Some(arg_expr) = argument_expr(arg) else {
+                continue;
+            };
+            let Some(callee_param) = summary.params.get(i) else {
+                continue;
+            };
+            let Some(callee_return) = &callee_param.return_shape else {
+                continue;
+            };
+            let Some(caller_arg_shape) = self.expr_to_cell(arg_expr) else {
+                continue;
+            };
+            let mut instantiated = callee_return.clone();
+            instantiated.instantiate_tainted(&caller_arg_shape);
+            result.merge_into(&instantiated);
+            any_contribution = true;
+        }
+        if !any_contribution {
+            return None;
+        }
+        result.canonicalize()
+    }
+
+    /// Best-effort projection of an expression to a [`Cell`] that
+    /// represents what the caller knows about it. Slice 3.5
+    /// substrate for cross-file return-shape propagation. Bare
+    /// tainted idents return their `local_shape`; trivial wrappers
+    /// pass through; everything else (chains, calls, complex
+    /// exprs) returns `None` for now — extending coverage is a
+    /// future slice.
+    fn expr_to_cell(&self, expr: &Expression<'_>) -> Option<Cell> {
+        match expr {
+            Expression::ParenthesizedExpression(p) => self.expr_to_cell(&p.expression),
+            Expression::TSAsExpression(t) => self.expr_to_cell(&t.expression),
+            Expression::TSNonNullExpression(t) => self.expr_to_cell(&t.expression),
+            Expression::TSSatisfiesExpression(t) => self.expr_to_cell(&t.expression),
+            Expression::TSTypeAssertion(t) => self.expr_to_cell(&t.expression),
+            Expression::Identifier(id) => self.local_shape(id.name.as_str()).cloned(),
+            _ => None,
         }
     }
 

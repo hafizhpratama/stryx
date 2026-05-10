@@ -406,6 +406,45 @@ fn unvalidated_body_to_db_propagates_offsets_cross_file() {
     );
 }
 
+/// Slice 3.5 of ADR 0007 — smoke-test the cross-file return-shape
+/// wiring at variable bindings. The fixture has a real chain
+/// (`const result = passthrough(body); const final = passthrough
+/// (result); ...`); slice 3.5's `compute_call_return_shape` runs
+/// at each `const`, looking up the helper's `return_shape` and
+/// instantiating it with the caller's local shape. Behaviour-
+/// level: the existing prisma sink still fires once per export.
+/// Substrate-level: each `const` stores a precise shape that
+/// future consumer slices will read.
+#[test]
+fn unvalidated_body_to_db_return_shape_chain_substrate_smoke() {
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/return-shape-cross-file");
+    let result = stryx_cli::scan(&dir).expect("scan");
+    let lib_path = dir.join("lib.ts");
+    let findings: Vec<_> = result
+        .findings
+        .iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db" && f.span.file == lib_path)
+        .collect();
+    // POST and PUT each fire one prisma.user.create finding through
+    // the chain; the boolean propagation path catches both regardless
+    // of slice 3.5. The substrate-level shape precision isn't
+    // asserted here (no exposed visitor inspection); future slices
+    // that read `local_shape` at sink sites will get tests for that.
+    assert_eq!(
+        findings.len(),
+        2,
+        "expected POST and PUT chain findings to both fire; got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+    for f in &findings {
+        assert!(
+            f.message.contains("prisma.user.create"),
+            "expected prisma.user.create in message, got: {}",
+            f.message,
+        );
+    }
+}
+
 /// Slice 3.1 of ADR 0007 — the visitor populates `param.return_shape`
 /// from return-statement observations. Mirrors the slice-2.1c
 /// `param_shape` test but for the return side. Observation-only —
