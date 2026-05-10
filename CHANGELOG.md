@@ -18,9 +18,60 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0-alpha.2] — 2026-05-10
+
+Phase 1 substrate of ADR 0006 (field-sensitive shape lattice migration)
+is complete. All four landed slices are observation-only — no consumer
+reads `tainted_offsets` for finding decisions, severity, or
+suppression. OSS validation against `dub` and `documenso` confirms
+byte-identical findings to the pre-Phase-1 baseline.
+
+### Added (Phase 1 of ADR 0006)
+- ADR 0004 (driver loop) — formalises the bounded extract→run fixpoint
+  with `MAX_ITER = 10` and tuple-shaped `ConvergenceSignal` already
+  shipping in `stryx_cli`. Documents the bounded-iteration soundness
+  contract: cap-out produces FNs, never FPs; warning surfaces silent
+  under-approximation. Convergence-signal contract enforces per-axis
+  test additions for any new summary boolean.
+- ADR 0006 (shape lattice migration) — commits to the Semgrep-style
+  field-sensitive shape lattice (`Bot | Obj | Arg | Fun`,
+  `Cell { xtaint, shape }`) as the v0.3 precision target, with a
+  v0.2.x phase landing offset-list `ParamFlow` first. Explicit
+  algorithmic-design provenance to Iago Abal's Semgrep work
+  (LGPL-2.1, design-only — Stryx reproduces from public comments,
+  not code).
+- `stryx_taint::Offset` — new public type (`Field(String)`,
+  `Index(u32)`, `Any`). JS/TS-aware: `obj.a` and `obj["a"]` unify
+  per Semgrep's `Ofld == Ostr` rule.
+- `ParamFlow.tainted_offsets: Vec<Offset>` — populated by the per-param
+  simulation in `flow/unvalidated-body-to-db`. Records the *outermost*
+  field of each tainted member-chain read at a DB sink.
+  `body.where.id` records `Field("where")` (closest to base).
+  Bare-ident pass-through stays empty (signalled via the existing
+  boolean). `#[serde(default)]` keeps pre-Phase-1 cache entries valid
+  (deserialise to empty offsets — safe FN-direction default per
+  ADR 0005).
+- Cross-file site in `flow/unvalidated-body-to-db` records caller-side
+  offsets via the same first-field walker, plus absorbs the callee's
+  `tainted_offsets` when the caller passes a bare tainted ident.
+- `ConvergenceSignal::tainted_offset_total` — fourth axis on the
+  fixed-point convergence tuple, tracking total `tainted_offsets`
+  length across summaries. Guards against the silent-under-detection
+  regression where iteration N+1 resolves a new cross-file callee,
+  the offset list grows, but the existing counts don't notice. Three
+  per-axis contract tests in `stryx_cli::tests` enforce the ADR 0004
+  contract.
+
+### Carried forward from earlier pre-alpha work
+
+The entries below were drafted during pre-alpha development (before
+the CHANGELOG started cutting numbered releases). They land
+collectively in 0.1.0-alpha.2 because no earlier pre-alpha release
+was ever cut.
+
 ### Added
 - Initial project scaffolding
-- Core architecture documentation, including ADRs 0001–0004
+- Core architecture documentation, including ADRs 0001–0006
 - AI agent context files (CLAUDE.md, AGENTS.md, .github/copilot-instructions.md)
 - Contributor guidelines
 - `flow/unvalidated-body-to-db` now follows class-method calls. Class
