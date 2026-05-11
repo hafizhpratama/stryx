@@ -1672,3 +1672,38 @@ fn prompt_injection_good_fixture_silent() {
         findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
     );
 }
+
+#[test]
+fn xss_via_dangerously_set_inner_html_bad_fixture_fires() {
+    let path = fixtures_root().join("flow-xss-via-dangerously-set-inner-html/bad.tsx");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/xss-via-dangerously-set-inner-html")
+        .collect();
+    let messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(
+        findings.len(),
+        5,
+        "bad.tsx has 5 XSS cases (searchParams.html, req.json body, template wrap, destructured binding, member-chain searchParams); got {}: {:?}",
+        findings.len(),
+        messages,
+    );
+    for f in &findings {
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(f.span.file, path);
+    }
+}
+
+#[test]
+fn xss_via_dangerously_set_inner_html_good_fixture_silent() {
+    let path = fixtures_root().join("flow-xss-via-dangerously-set-inner-html/good.tsx");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/xss-via-dangerously-set-inner-html")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "good.tsx covers hardcoded / env / DOMPurify / sanitize-html / body-but-not-html — expected zero XSS findings, got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}

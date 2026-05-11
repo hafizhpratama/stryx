@@ -64,6 +64,17 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `LlmPromptSink` step variant in `steps::sinks::llm`; wired
   through `StepKind` (15 variants × 6 trait methods = 90 dispatch
   sites). Path-shape recogniser only — no import-map consultation.
+- `flow/xss-via-dangerously-set-inner-html` slice 1 — new flow
+  rule catching body-tainted values reaching React's
+  `dangerouslySetInnerHTML={{ __html: <expr> }}` JSX attribute.
+  The sink is JSX-attribute-shaped (not a call), so no new
+  `StepKind` variant — the JSX walk is inline in the visitor.
+  Inline sanitisers `DOMPurify.sanitize(...)` /
+  `dompurify.sanitize(...)` / `sanitizeHtml(...)` /
+  `sanitize_html(...)` recognised both at the `__html` site and
+  at intermediate `const clean = DOMPurify.sanitize(html)`
+  bindings. Severity High. ADR 0011 Track B candidate #2 —
+  highest hit-rate Next.js audience match after prompt-injection.
 
 ## [0.1.0] — 2026-05-11
 

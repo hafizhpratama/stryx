@@ -46,6 +46,7 @@ What actually shipped (counting commits through `fc908ec`):
 | `flow/redirect-open` | experimental | Cross-file (slice 2 in v0.2) | 1 borderline single-file on dub (Jackson SAML) |
 | `flow/path-traversal` | experimental | Single-file | 0 across OSS sample (cloud-blob storage dominates) |
 | `flow/prompt-injection` | experimental (v0.2) | Single-file | (no public-repo data yet; AI-coding-tool audience match per ADR 0011 Track B) |
+| `flow/xss-via-dangerously-set-inner-html` | experimental (v0.2) | Single-file | (no public-repo data yet; React/Next.js audience match per ADR 0011 Track B) |
 | `generic/hardcoded-secret` | stable | Single-file | (live in registry) |
 
 **Real-world validation arc:**
@@ -129,7 +130,11 @@ frequency:
 
 2. `flow/xss-via-dangerously-set-inner-html` — body → React
    `dangerouslySetInnerHTML` attribute. Next.js-specific. Sink
-   recognition is a JSX-attribute match.
+   recognition is a JSX-attribute match. ✅ **shipped** in v0.2 —
+   single-file, JSX walk inline in the visitor (no `StepKind`
+   sink variant since the sink isn't a call), DOMPurify +
+   sanitize-html sanitiser recognition both at the `__html` site
+   and at intermediate var-decl bindings.
 
 3. `flow/command-injection-via-exec` — body → `child_process.exec`
    / `execSync` / `spawn`. Less common in serverless Next.js but
