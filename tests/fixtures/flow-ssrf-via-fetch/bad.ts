@@ -46,3 +46,27 @@ export async function pathInjectionCase(req: NextRequest) {
   );
   return new Response(await response.text());
 }
+
+// CASE 6: env-host path-injection — leading quasi is empty, host
+// is `process.env.X`, second quasi starts with `/`. Host is
+// operator-controlled, only the path/query is body-controlled.
+// Severity downgrades to Medium (papermark `revalidateLinkById`
+// shape — surfaced by v0.1.0 OSS sweep).
+export async function envHostPathInjectionCase(req: NextRequest) {
+  const body = await req.json();
+  const response = await fetch(
+    `${process.env.NEXTAUTH_URL}/api/revalidate?secret=s&linkId=${body.id}`,
+  );
+  return new Response(await response.text());
+}
+
+// CASE 7: env-host path-injection via a binding — same shape but
+// the safe host is pulled into a local first, then interpolated.
+// The visitor's `safe_host_bindings` map carries the recognition
+// through. Severity Medium.
+export async function envHostBindingPathInjectionCase(req: NextRequest) {
+  const base = process.env.API_BASE ?? "https://fallback.example.com";
+  const { path } = await req.json();
+  const response = await fetch(`${base}/v1/items/${path}`);
+  return new Response(await response.text());
+}

@@ -540,6 +540,18 @@ pub struct ParamFlow {
     /// this flag leave it `false` (serde default).
     #[serde(default)]
     pub reaches_fetch_sink_unsanitized: bool,
+    /// True iff *every* fetch sink the parameter reaches inside the
+    /// callee uses a host-pinned URL template — either a literal
+    /// scheme+host leading quasi (`https://example.com/...`) or an
+    /// operator-controlled host interpolation (`${process.env.X}/...`).
+    /// In that shape the parameter can only inject into the path/query
+    /// of a fixed host, so the call-site finding downgrades from High
+    /// (full SSRF) to Medium (path-injection). Only meaningful when
+    /// [`reaches_fetch_sink_unsanitized`](Self::reaches_fetch_sink_unsanitized)
+    /// is true. Pre-precision-fix cache entries leave it `false`
+    /// (serde default), which conservatively keeps the High tier.
+    #[serde(default)]
+    pub fetch_sink_path_pinned_only: bool,
     /// True iff there is a control-flow path from this parameter to a
     /// redirect call (`NextResponse.redirect`, bare `redirect`,
     /// `res.redirect`, `Response.redirect`) used as the target URL,
@@ -677,6 +689,18 @@ impl ExportedFunctionSummary {
         for (i, other_p) in other.params.iter().enumerate() {
             if let Some(p) = self.params.get_mut(i) {
                 p.reaches_db_sink_unsanitized |= other_p.reaches_db_sink_unsanitized;
+                // `fetch_sink_path_pinned_only` is "every sink is
+                // pinned"; merging two summaries that each reach
+                // fetch keeps the pinned-only tier iff BOTH did.
+                // Crucially, if `other` doesn't add a fetch reach,
+                // it carries no opinion — preserve `self`'s flag.
+                if other_p.reaches_fetch_sink_unsanitized {
+                    if p.reaches_fetch_sink_unsanitized {
+                        p.fetch_sink_path_pinned_only &= other_p.fetch_sink_path_pinned_only;
+                    } else {
+                        p.fetch_sink_path_pinned_only = other_p.fetch_sink_path_pinned_only;
+                    }
+                }
                 p.reaches_fetch_sink_unsanitized |= other_p.reaches_fetch_sink_unsanitized;
                 p.reaches_redirect_sink_unsanitized |= other_p.reaches_redirect_sink_unsanitized;
             }

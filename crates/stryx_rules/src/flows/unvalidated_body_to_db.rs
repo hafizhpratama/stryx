@@ -2723,6 +2723,7 @@ fn build_summary(
             // cross-file merging on collision unions them with the
             // peer rule's contribution.
             reaches_fetch_sink_unsanitized: false,
+            fetch_sink_path_pinned_only: false,
             reaches_redirect_sink_unsanitized: false,
             propagates_to_return,
             sink_span,

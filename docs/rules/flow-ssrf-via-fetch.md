@@ -102,12 +102,23 @@ export async function POST(req: NextRequest) {
 4. **Cross-file (slice 2).** The extract pass simulates each
    exported function with one parameter pre-tainted and records
    `ParamFlow::reaches_fetch_sink_unsanitized` when the simulation
-   observes a fetch sink. The run pass walks call sites; when a
-   tainted argument flows into a reach-flagged parameter slot of a
-   callee resolved via the project index, a finding is emitted at
-   the call site (severity High — the simulator can't distinguish
-   path-injection from full-URL SSRF inside the callee, so the
-   conservative tier wins).
+   observes a fetch sink. It also records
+   `ParamFlow::fetch_sink_path_pinned_only` when *every* sink the
+   parameter reaches uses a host-pinned URL template. The run pass
+   walks call sites; when a tainted argument flows into a
+   reach-flagged parameter slot of a callee resolved via the project
+   index, a finding is emitted at the call site — High when any
+   reachable sink is full-SSRF, Medium when every reachable sink is
+   path-pinned.
+5. **Host-pinned template recognition.** A template literal is
+   considered host-pinned when:
+   - the leading quasi pins a literal `https://example.com/...` or
+     `http://example.com/...` prefix, OR
+   - the leading quasi is empty, the first interpolation is
+     operator-controlled (`process.env.X`, a `??` / `||` fallback
+     chain whose left side is safe, or a binding previously
+     initialised from one of those), and the second quasi starts
+     with `/` to delimit the host portion.
 
 ## Known false positive zones
 
@@ -181,3 +192,4 @@ disabled = ["flow/ssrf-via-fetch"]
 |---|---|
 | v0.1.0 | Initial single-file slice — body source → `fetch`/`axios`/`got` sink. |
 | v0.2 | Slice 2 — cross-file taint via `ExportedFunctionSummary::reaches_fetch_sink_unsanitized`. Route handler → imported helper → `fetch(...)` chains now fire at the call site. URL allow-list guard inside the helper suppresses the call-site finding. Three-level chain convergence (route → service → client). |
+| v0.2.1 | Host-pinned-template precision: env-var-prefix templates (`fetch(\`${process.env.X}/...?id=${body.id}\`)`) downgrade from High (full SSRF) to Medium (path-injection), matching the literal-prefix shape. Recognition propagates through single-file and cross-file paths via the new `ParamFlow::fetch_sink_path_pinned_only` flag. Surfaced by the v0.1.0 papermark OSS sweep (`revalidateLinkById`). |

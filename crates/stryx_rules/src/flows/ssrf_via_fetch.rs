@@ -25,7 +25,7 @@ use stryx_ast::{
     ast::{
         Argument, ArrowFunctionExpression, BindingPattern, CallExpression, ChainElement,
         Declaration, ExportDefaultDeclarationKind, Expression, Function, FunctionBody, IfStatement,
-        ObjectPropertyKind, Program, PropertyKey, Statement, VariableDeclarator,
+        LogicalOperator, ObjectPropertyKind, Program, PropertyKey, Statement, VariableDeclarator,
     },
     to_span,
 };
@@ -108,6 +108,23 @@ struct SsrfVisitor<'idx> {
     /// underlying input has been validated against an allow-list.
     /// Per-function — cleared in `enter_fn`.
     url_inits: HashMap<String, String>,
+    /// Bindings whose initial value is operator-controlled — `process.env.X`,
+    /// `process.env.X ?? "fallback"`, hardcoded string literals, or
+    /// transitively another `safe_host_binding`. When such a binding
+    /// is interpolated at the head of a template-literal URL
+    /// (`fetch(\`${revalidateUrl}/api/...?id=${body.id}\`)`), the host
+    /// portion of the URL is operator-pinned — body taint in the
+    /// path/query becomes path-injection (Medium) rather than full
+    /// SSRF (High). Without this map the recogniser only caught the
+    /// `https://example.com/...` literal-prefix form, mis-classifying
+    /// the env-var-prefix shape that's endemic in real Next.js codebases
+    /// (papermark `revalidateLinkById` was the motivating OSS FP).
+    ///
+    /// Per-function — cleared in `enter_fn`. Reassignment is not
+    /// tracked; `let`-mutable bindings holding env data and later
+    /// overwritten with body data would fool the recogniser, but
+    /// that shape is vanishingly rare in practice.
+    safe_host_bindings: HashMap<String, ()>,
     /// Read-only project index. `Some` during the run pass (cross-file
     /// callee lookups go through it); `None` during the extract pass
     /// simulation (no findings are recorded then anyway, since extract
@@ -132,6 +149,7 @@ impl<'idx> SsrfVisitor<'idx> {
             file,
             scopes: vec![HashMap::new()],
             url_inits: HashMap::new(),
+            safe_host_bindings: HashMap::new(),
             index,
             body_source_active,
             findings: Vec::new(),
@@ -152,6 +170,8 @@ impl<'idx> SsrfVisitor<'idx> {
         // inside one function should not leak its (parsed, input)
         // mapping into the next function the visitor walks.
         self.url_inits.clear();
+        // Same scoping discipline for safe-host bindings.
+        self.safe_host_bindings.clear();
     }
 
     fn exit_fn(&mut self) {
@@ -286,6 +306,16 @@ impl<'idx> SsrfVisitor<'idx> {
         {
             self.url_inits.insert(binding, input_name);
         }
+        // Track operator-controlled bindings so host-pinned-template
+        // recognition can see through one level of indirection
+        // (`const revalidateUrl = process.env.NEXTAUTH_URL` →
+        // `fetch(\`${revalidateUrl}/...\`)` is path-injection, not
+        // full SSRF).
+        if let Some(binding) = single_binding_name(&declarator.id)
+            && self.is_safe_host_expr(init)
+        {
+            self.safe_host_bindings.insert(binding, ());
+        }
         if self.expr_taint(init) {
             self.taint_pattern(&declarator.id);
         }
@@ -308,7 +338,7 @@ impl<'idx> SsrfVisitor<'idx> {
         // only a path/query slot — bounded blast radius, downgrade
         // to Medium. Bare-ident shapes (`fetch(body.url)`) are
         // full SSRF, host-arbitrary → High.
-        let (severity, message) = if is_host_pinned_template(first_arg) {
+        let (severity, message) = if self.is_host_pinned_template(first_arg) {
             (
                 Severity::Medium,
                 "Untrusted request input reaches an outbound HTTP call as a path/query segment within a fixed-host URL — path-injection surface against the pinned API.".to_string(),
@@ -325,6 +355,116 @@ impl<'idx> SsrfVisitor<'idx> {
                     "Parse the URL with `new URL(input)` and check the host against an allow-list before calling fetch/axios/got. For path-segment substitution, validate against an allow-list of expected path values and reject anything else with a 4xx response.",
                 ),
         );
+    }
+
+    /// True iff `expr` is a template literal whose host portion is
+    /// operator-pinned. Recognised shapes:
+    ///
+    /// 1. **Literal scheme prefix** — `https://example.com/...` or
+    ///    `http://example.com/...`. The leading quasi carries the
+    ///    scheme and a literal host before the first `/`.
+    /// 2. **Env-prefix indirection** — `${revalidateUrl}/api/...` or
+    ///    `${process.env.NEXTAUTH_URL}/api/...`. The leading quasi
+    ///    is empty, the first interpolation is operator-controlled
+    ///    (`process.env.X`, a fallback chain like `process.env.X ??
+    ///    "..."`, or a binding previously initialised from one of
+    ///    those), and the next quasi starts with `/` to delimit the
+    ///    host portion.
+    ///
+    /// In a host-pinned template, body-tainted interpolations can
+    /// only inject into the path/query — bounded blast radius
+    /// against the pinned host. `check_http_sink` downgrades the
+    /// severity from High (full SSRF) to Medium (path-injection).
+    fn is_host_pinned_template(&self, expr: &Expression<'_>) -> bool {
+        let mut cursor = expr;
+        loop {
+            match cursor {
+                Expression::ParenthesizedExpression(p) => cursor = &p.expression,
+                Expression::TSAsExpression(t) => cursor = &t.expression,
+                Expression::TSNonNullExpression(t) => cursor = &t.expression,
+                Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
+                Expression::TSTypeAssertion(t) => cursor = &t.expression,
+                _ => break,
+            }
+        }
+        let Expression::TemplateLiteral(t) = cursor else {
+            return false;
+        };
+        let Some(leading) = t.quasis.first() else {
+            return false;
+        };
+        let leading_raw = leading.value.cooked.as_deref().unwrap_or("");
+
+        // Case 1 — literal scheme + host in the leading quasi.
+        if leading_raw.starts_with("https://") || leading_raw.starts_with("http://") {
+            let after_scheme = leading_raw
+                .strip_prefix("https://")
+                .or_else(|| leading_raw.strip_prefix("http://"))
+                .unwrap_or("");
+            return after_scheme
+                .chars()
+                .take_while(|c| *c != '/')
+                .any(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-');
+        }
+
+        // Case 2 — empty leading quasi + safe-host first interpolation
+        // + second quasi starting with `/` (path delimiter). The
+        // host is determined entirely by an operator-controlled
+        // expression; everything after `/` is path/query.
+        if leading_raw.is_empty()
+            && let Some(first_expr) = t.expressions.first()
+            && self.is_safe_host_expr(first_expr)
+            && let Some(second_quasi) = t.quasis.get(1)
+        {
+            let next_raw = second_quasi.value.cooked.as_deref().unwrap_or("");
+            return next_raw.starts_with('/');
+        }
+
+        false
+    }
+
+    /// True iff `expr` is operator-controlled — `process.env.X`, a
+    /// nullish/or fallback chain whose left side is safe
+    /// (`process.env.X ?? "..."`), a parenthesised / TS-cast wrap of
+    /// either, or a binding recorded in `safe_host_bindings`. Used
+    /// both at var-decl sites (to populate the binding map) and at
+    /// host-pinned-template recognition.
+    fn is_safe_host_expr(&self, expr: &Expression<'_>) -> bool {
+        let mut cursor = expr;
+        loop {
+            match cursor {
+                Expression::ParenthesizedExpression(p) => cursor = &p.expression,
+                Expression::TSAsExpression(t) => cursor = &t.expression,
+                Expression::TSNonNullExpression(t) => cursor = &t.expression,
+                Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
+                Expression::TSTypeAssertion(t) => cursor = &t.expression,
+                // `process.env.X ?? "fallback"` / `process.env.X || "fallback"` —
+                // both sides should be safe; the left determines the host.
+                Expression::LogicalExpression(b)
+                    if matches!(b.operator, LogicalOperator::Coalesce | LogicalOperator::Or) =>
+                {
+                    cursor = &b.left;
+                }
+                _ => break,
+            }
+        }
+        match cursor {
+            Expression::Identifier(id) => self.safe_host_bindings.contains_key(id.name.as_str()),
+            // Bare `process.env.X` member chain.
+            Expression::StaticMemberExpression(m) => {
+                let Expression::StaticMemberExpression(inner) = &m.object else {
+                    return false;
+                };
+                if inner.property.name != "env" {
+                    return false;
+                }
+                matches!(
+                    &inner.object,
+                    Expression::Identifier(id) if id.name == "process"
+                )
+            }
+            _ => false,
+        }
     }
 
     /// Look up the callee through the project index — bare-ident
@@ -351,10 +491,10 @@ impl<'idx> SsrfVisitor<'idx> {
     /// Cross-file consumer — when a tainted argument is passed at a
     /// call site whose callee summary records
     /// `reaches_fetch_sink_unsanitized` at that argument position,
-    /// emit a finding. Slice 2 mirrors the unvalidated_body_to_db
-    /// shape; severity defaults to High (the simulator can't tell
-    /// path-injection from full-SSRF inside the callee, so the
-    /// conservative tier wins).
+    /// emit a finding. Severity follows the precision the extract
+    /// pass recorded: High when any sink inside the callee was full
+    /// SSRF, Medium when every sink the parameter reaches is a
+    /// host-pinned template (path-injection only).
     fn check_cross_file_call(&mut self, call: &CallExpression<'_>) {
         let Some(summary) = self.lookup_callee_summary(&call.callee) else {
             return;
@@ -370,24 +510,29 @@ impl<'idx> SsrfVisitor<'idx> {
             if !summary.taints_through_fetch_param(i) {
                 continue;
             }
-            let param_name = summary
-                .params
-                .get(i)
-                .map(|p| p.name.as_str())
-                .unwrap_or("?");
-            self.findings.push(
-                Finding::ast(
-                    RULE_ID,
+            let param = summary.params.get(i);
+            let param_name = param.map(|p| p.name.as_str()).unwrap_or("?");
+            let path_pinned = param.is_some_and(|p| p.fetch_sink_path_pinned_only);
+            let (severity, message) = if path_pinned {
+                (
+                    Severity::Medium,
+                    format!(
+                        "Untrusted request input flows into `{callee_label}` (param `{param_name}`), which makes an outbound HTTP call as a path/query segment within a fixed-host URL — path-injection surface against the pinned API."
+                    ),
+                )
+            } else {
+                (
                     Severity::High,
                     format!(
-                        "Untrusted request input flows into `{callee_label}` (param `{param_name}`), \
-                         which makes an outbound HTTP call without a recognised allow-list check."
+                        "Untrusted request input flows into `{callee_label}` (param `{param_name}`), which makes an outbound HTTP call without a recognised allow-list check."
                     ),
-                    to_span(&self.file, call.span),
                 )
-                .with_help(
-                    "Validate the URL against an allow-list at this call site, or inside the called helper before the fetch/axios/got call.",
-                ),
+            };
+            self.findings.push(
+                Finding::ast(RULE_ID, severity, message, to_span(&self.file, call.span))
+                    .with_help(
+                        "Validate the URL against an allow-list at this call site, or inside the called helper before the fetch/axios/got call.",
+                    ),
             );
         }
     }
@@ -681,10 +826,19 @@ fn build_summary(
             visitor.visit_statement(stmt);
         }
         let reaches = !visitor.findings.is_empty();
+        // Path-pinned-only iff at least one sink fired AND every fire
+        // was the Medium (host-pinned) tier. Caller downgrades the
+        // call-site finding from High to Medium when this is set.
+        let path_pinned_only = reaches
+            && visitor
+                .findings
+                .iter()
+                .all(|f| f.severity == Severity::Medium);
         let sink_span = visitor.findings.first().map(|f| f.span.clone());
         params_out.push(ParamFlow {
             name: pname.clone(),
             reaches_fetch_sink_unsanitized: reaches,
+            fetch_sink_path_pinned_only: path_pinned_only,
             sink_span,
             ..Default::default()
         });
@@ -697,54 +851,4 @@ fn build_summary(
         contains_auth_check: false,
         validates_request_body: false,
     }
-}
-
-/// True iff `expr` is a template literal whose leading static quasi
-/// pins a URL scheme + host — `https://example.com/...` or
-/// `http://example.com/...`. In that shape, body-tainted
-/// interpolations can only inject into the path/query, not control
-/// the destination host. Used by `check_http_sink` to downgrade
-/// the severity from High (full SSRF) to Medium (path-injection).
-///
-/// Recognition is intentionally conservative: requires a literal
-/// scheme prefix AND at least one host-like character following the
-/// scheme inside the same quasi (so the host name is not itself an
-/// interpolation slot like `https://${body.host}/...`).
-fn is_host_pinned_template(expr: &Expression<'_>) -> bool {
-    let mut cursor = expr;
-    loop {
-        match cursor {
-            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
-            Expression::TSAsExpression(t) => cursor = &t.expression,
-            Expression::TSNonNullExpression(t) => cursor = &t.expression,
-            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
-            Expression::TSTypeAssertion(t) => cursor = &t.expression,
-            _ => break,
-        }
-    }
-    let Expression::TemplateLiteral(t) = cursor else {
-        return false;
-    };
-    // The leading quasi is the literal text before the first
-    // `${...}` interpolation. For a host-pinned template that's
-    // where the scheme+host live.
-    let Some(leading) = t.quasis.first() else {
-        return false;
-    };
-    let raw = leading.value.cooked.as_deref().unwrap_or("");
-    if !(raw.starts_with("https://") || raw.starts_with("http://")) {
-        return false;
-    }
-    // After the scheme there must be at least one host character
-    // before the first path separator — guarding against shapes
-    // like `https://${body.host}/...` where the host is itself
-    // interpolated.
-    let after_scheme = raw
-        .strip_prefix("https://")
-        .or_else(|| raw.strip_prefix("http://"))
-        .unwrap_or("");
-    after_scheme
-        .chars()
-        .take_while(|c| *c != '/')
-        .any(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
