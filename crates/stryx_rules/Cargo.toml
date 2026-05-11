@@ -33,3 +33,15 @@ harness = false
 [[bench]]
 name    = "auth_bypass_via_wrapper"
 harness = false
+
+[[bench]]
+name    = "ssrf_via_fetch"
+harness = false
+
+[[bench]]
+name    = "redirect_open"
+harness = false
+
+[[bench]]
+name    = "path_traversal"
+harness = false
