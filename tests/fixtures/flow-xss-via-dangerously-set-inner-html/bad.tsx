@@ -1,12 +1,9 @@
 // Single-file XSS fixture for `flow/xss-via-dangerously-set-inner-html`
 // slice 1. Each component is an independent case the rule must flag.
 //
-// All cases use body sources that `BodySource` recognises today
-// (`req.body`, `req.json()`, and Hono-style `c.req.*`). Next.js
-// App Router's `searchParams` prop is *also* an untrusted source
-// in real apps, but adding that to `BodySource` affects every rule
-// and is a separate improvement — slice 1 sticks to what's
-// recognised.
+// Body sources used: `req.body`, `req.json()`, Hono `c.req.*`, and
+// Next.js App Router's `searchParams` page prop (any member access
+// on `searchParams` is URL-derived → untrusted).
 
 import type { NextRequest } from "next/server";
 
@@ -51,4 +48,25 @@ export async function Destructured(req: NextRequest) {
 export async function HonoStyle(c: { req: { json: () => Promise<{ html: string }> } }) {
   const { html } = await c.req.json();
   return <div dangerouslySetInnerHTML={{ __html: html }} />;
+}
+
+// CASE 6: Next.js App Router `searchParams.X` — canonical
+// query-param-rendering pattern. URL-controlled, untrusted.
+export function PageWithSearchParams({
+  searchParams,
+}: {
+  searchParams: { html: string };
+}) {
+  return <div dangerouslySetInnerHTML={{ __html: searchParams.html }} />;
+}
+
+// CASE 7: searchParams chained through a binding — taint
+// propagates through the assignment.
+export function PageWithSearchParamsBinding({
+  searchParams,
+}: {
+  searchParams: { content: string };
+}) {
+  const content = searchParams.content;
+  return <main dangerouslySetInnerHTML={{ __html: content }} />;
 }

@@ -75,6 +75,18 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   at intermediate `const clean = DOMPurify.sanitize(html)`
   bindings. Severity High. ADR 0011 Track B candidate #2 —
   highest hit-rate Next.js audience match after prompt-injection.
+- **`searchParams.X` recognised as a body source** in `BodySource`
+  — Next.js App Router pages declare `searchParams` as a prop
+  that carries URL-derived query parameters, every member of
+  which is untrusted. Any member access on a bare `searchParams`
+  identifier now contributes `UserInput` taint, lifting coverage
+  across every body-flow rule (unvalidated-body-to-db,
+  ssrf-via-fetch, redirect-open, path-traversal, prompt-injection,
+  xss-via-dangerously-set-inner-html, secret-to-response) for
+  App Router code. Recognition is bare-name only —
+  `someObj.searchParams.X` is not treated as a source. OSS sweep
+  on papermark + dub: zero regressions, zero new findings (those
+  codebases use pages-style API routes, not App Router pages).
 
 ## [0.1.0] — 2026-05-11
 

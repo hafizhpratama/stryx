@@ -1683,8 +1683,8 @@ fn xss_via_dangerously_set_inner_html_bad_fixture_fires() {
     let messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
     assert_eq!(
         findings.len(),
-        5,
-        "bad.tsx has 5 XSS cases (searchParams.html, req.json body, template wrap, destructured binding, member-chain searchParams); got {}: {:?}",
+        7,
+        "bad.tsx has 7 XSS cases (req.body, req.json body, template wrap, destructured binding, Hono c.req.json, searchParams direct, searchParams via binding); got {}: {:?}",
         findings.len(),
         messages,
     );

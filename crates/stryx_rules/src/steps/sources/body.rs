@@ -33,6 +33,7 @@ impl TaintStep for BodySource {
         let matched = match expr {
             Expression::StaticMemberExpression(m) => {
                 is_request_body_member(&m.object, m.property.name.as_str())
+                    || is_search_params_member(&m.object)
             }
             Expression::CallExpression(c) => is_body_source_call(c),
             _ => false,
@@ -62,7 +63,9 @@ impl TaintStep for BodySource {
         object: &Expression<'_>,
         prop: &str,
     ) -> Option<TaintLabel> {
-        if ctx.body_source_active && is_request_body_member(object, prop) {
+        if ctx.body_source_active
+            && (is_request_body_member(object, prop) || is_search_params_member(object))
+        {
             Some(TaintLabel::UserInput)
         } else {
             None
@@ -95,6 +98,34 @@ pub fn is_body_source_call(call: &CallExpression<'_>) -> bool {
         return false;
     }
     is_request_like_expr(&method_member.object)
+}
+
+/// Next.js App Router `searchParams.X` recogniser — the
+/// page-component prop that carries the URL's query parameters.
+/// Any member access on `searchParams` is treated as untrusted:
+/// every property is URL-derived, so there is no "safe" subset.
+///
+/// React Server Component pages declare it as a prop:
+///
+/// ```ignore
+/// export default async function Page({
+///   searchParams,
+/// }: {
+///   searchParams: { html: string };
+/// }) {
+///   return <div dangerouslySetInnerHTML={{ __html: searchParams.html }} />;
+/// }
+/// ```
+///
+/// Recognition is bare-name only — `searchParams.X` triggers but
+/// `someObj.searchParams.X` does not. The name is distinctive
+/// enough in Next.js App Router code that the FP risk on
+/// non-App-Router code (where `searchParams` might be a local
+/// variable) stays low, especially since most non-Next.js
+/// `searchParams` bindings still hold URL-derived data from
+/// `new URLSearchParams(...)`.
+pub fn is_search_params_member(object: &Expression<'_>) -> bool {
+    matches!(object, Expression::Identifier(id) if id.name == "searchParams")
 }
 
 /// Matches an expression that we treat as a request object: either
