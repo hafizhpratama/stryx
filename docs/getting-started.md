@@ -4,48 +4,50 @@ This guide gets you from zero to your first scan in 5 minutes.
 
 ## Install
 
-Pick the install method that matches how you ship:
+At v0.1.0 there are two install paths that work today, and three
+distribution channels that follow as soon as the npm namespace and
+Homebrew tap repo are set up.
 
-### npm (recommended for Node.js / TypeScript projects)
-
-```bash
-npm install -g stryx
-```
-
-Or as a dev dependency in your project:
+### From source — works today
 
 ```bash
-npm install --save-dev stryx
+git clone https://github.com/hafizhpratama/stryx
+cd stryx
+cargo install --path crates/stryx_cli
 ```
 
-Use it via:
+Needs the Rust toolchain (1.93+). The `stryx` binary lands in
+`~/.cargo/bin/`.
+
+### Pre-built binaries — works today
+
+The [v0.1.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.1.0)
+ships archives across five targets (Linux x64/arm64, macOS x64/arm64,
+Windows x64):
 
 ```bash
-npx stryx scan
+# Linux x86_64 example — substitute target for your platform.
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+  | tar xz
+./stryx-0.1.0-x86_64-unknown-linux-gnu/stryx scan
 ```
 
-### Homebrew (macOS / Linux)
+Targets available:
+- `x86_64-unknown-linux-gnu`
+- `aarch64-unknown-linux-gnu`
+- `x86_64-apple-darwin`
+- `aarch64-apple-darwin`
+- `x86_64-pc-windows-msvc` (zip archive)
 
-```bash
-brew install stryx/tap/stryx
-```
+### Coming soon
 
-### Cargo (if you have Rust toolchain)
-
-```bash
-cargo install stryx-cli
-```
-
-### Direct binary (CI / containers)
-
-Download the appropriate binary from the [latest release](https://github.com/hafizhpratama/stryx/releases/latest):
-
-```bash
-# Linux x86_64
-curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-x86_64-linux > stryx
-chmod +x stryx
-./stryx scan
-```
+- **npm** (`npm install -g stryx` / `npx stryx scan`) — once the
+  npm namespace is settled. Pre-built `.node` binaries already
+  ship with each GitHub Release.
+- **Homebrew** (`brew install stryx/tap/stryx`) — once the Homebrew
+  tap repo is set up.
+- **Cargo** (`cargo install stryx-cli`) — once published to
+  crates.io.
 
 ## Your first scan
 
@@ -79,8 +81,9 @@ Scanned 47 files in 0.3s. Found 2 issues (1 critical, 1 high).
 ```
 
 The CLI exits with a non-zero status when findings are at or above the
-configured severity threshold (default: `medium`). This makes Stryx
-naturally suitable for CI gating.
+configured severity threshold (default: `high`, configurable via
+`--fail-on <severity>`). This makes Stryx naturally suitable for CI
+gating.
 
 ## Configuration
 
