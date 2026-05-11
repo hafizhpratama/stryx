@@ -57,3 +57,36 @@ export async function correlationSafe(c: any, raw: string) {
   const { token } = JSON.parse(raw);
   return c.json({ token });
 }
+
+// 7. Intentional-public name prefixes (`public*`, `embed*`). Issued
+// tokens that are *meant* to be returned to the client — observed
+// FP source: dub's `referrals-token/route.ts` returning a Dub
+// `embedTokens.referrals(...)` `publicToken` to the frontend. The
+// destructure-key heuristic recognises the public-by-convention
+// prefix and skips tainting.
+declare function embedTokens(): Promise<{
+  publicToken: string;
+  embedToken: string;
+  embedSecret: string;
+  publicKey: string;
+}>;
+export async function embedIssued() {
+  const { publicToken, embedToken, embedSecret, publicKey } = await embedTokens();
+  return Response.json({ publicToken, embedToken, embedSecret, publicKey });
+}
+
+// 8. Body-derived destructure (validator output). When the init
+// chain proves the value is parsed user input (zod `.parse(...)` /
+// `.safeParse(...)`, or `JSON.parse(<body-source>)`), the
+// destructure-key heuristic suppresses. Observed FP source: dub's
+// `shopify/order-paid/route.ts` echoing the webhook payload's
+// `checkoutToken` in a debug response message — that's user input,
+// not a stored secret.
+declare const schema: { parse(x: unknown): { workspaceId: string; checkoutToken: string } };
+export async function webhookEcho(req: Request) {
+  const rawBody = await req.text();
+  const { workspaceId, checkoutToken } = schema.parse(JSON.parse(rawBody));
+  return new Response(
+    `[Test] workspace=${workspaceId} checkoutToken=${checkoutToken}`,
+  );
+}

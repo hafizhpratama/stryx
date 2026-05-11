@@ -1110,6 +1110,90 @@ fn secret_to_response_good_silent() {
     );
 }
 
+/// Post-OSS-validation precision refinement (2026-05-11). The
+/// `publicEmbed` and `validatorOutput` cases must not fire (the FPs
+/// from dub's `referrals-token` and `shopify/order-paid`); the
+/// `compoundLeak` and `apiKeyFromEnv` cases must still fire (true
+/// positives the refinement must not over-suppress). Together they
+/// pin both boundaries of the heuristic.
+#[test]
+fn secret_to_response_precision_boundaries() {
+    let path = fixtures_root().join("flow-secret-to-response/precision-boundaries/lib.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/secret-to-response")
+        .collect();
+
+    // Suppressed cases: no finding may reference these function spans.
+    // The fixture's source-line layout makes a span-based filter brittle,
+    // so we filter by message content instead — the rule's message embeds
+    // the bound identifier name (e.g. "secret-shaped value `publicToken`").
+    let mentions = |needle: &str| -> bool {
+        findings
+            .iter()
+            .any(|f| f.message.contains(&format!("`{needle}`")))
+    };
+
+    // CASE 1: public-prefix suppression.
+    assert!(
+        !mentions("publicToken"),
+        "publicToken should be suppressed by public-prefix heuristic; got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+    assert!(
+        !mentions("embedToken"),
+        "embedToken should be suppressed by public-prefix heuristic; got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+
+    // CASE 2: validator-output suppression. sessionToken/apiToken from
+    // a parser-output destructure must not fire — the values are
+    // parsed user input, not stored secrets.
+    let from_validator_case = findings
+        .iter()
+        .filter(|f| f.message.contains("sessionToken") || f.message.contains("apiToken"))
+        .count();
+    // CASE 3 also uses `sessionToken`, so we need to distinguish: the
+    // validator case's two bindings shouldn't BOTH appear. The cleanest
+    // discriminator is "if validator suppression worked, the only
+    // tainted `sessionToken` finding came from CASE 3 (one occurrence).
+    // If validator suppression failed, CASE 2 would also fire, giving
+    // two `sessionToken` findings.
+    let session_token_count = findings
+        .iter()
+        .filter(|f| f.message.contains("`sessionToken`"))
+        .count();
+    assert_eq!(
+        session_token_count,
+        1,
+        "expected exactly one sessionToken finding (CASE 3 only); CASE 2's \
+         validator-output sessionToken must be suppressed. got {from_validator_case} matching, \
+         all findings: {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+    // apiToken appears only in CASE 2; with validator suppression it
+    // should fire zero times.
+    assert!(
+        !mentions("apiToken"),
+        "apiToken from validator output must be suppressed; got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+
+    // CASE 3 + CASE 4: true positives still fire.
+    assert!(
+        mentions("sessionToken") || mentions("refreshToken"),
+        "compoundLeak() should fire on sessionToken/refreshToken (no public \
+         prefix, no validator output); got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+    assert!(
+        mentions("apiKey"),
+        "apiKeyFromEnv() should fire on `apiKey` (assigned from \
+         process.env.STRIPE_SECRET_KEY); got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
 #[test]
 fn unvalidated_body_to_db_nest_bad_fires() {
     // NestJS shape: controller method receives @Body() and delegates to

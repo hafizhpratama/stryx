@@ -66,6 +66,17 @@ const TOO_GENERIC_BARE_NAMES: &[&str] = &[
     "dsn",
 ];
 
+/// CamelCase leading-word prefixes that signal a value is intentionally
+/// public — issued to be returned to a client by design, not a secret
+/// to be guarded. `publicToken`, `embedToken`, `publicKey` (in the
+/// asymmetric-crypto sense), etc. Match is leading-word: the prefix
+/// must be followed by an uppercase boundary or end-of-name, to avoid
+/// catching e.g. `publishToken` (substring "publi" — not a leading
+/// word). Observed FP source: dub's `publicToken` from
+/// `dub.embedTokens.referrals(...)`, intentionally surfaced to the
+/// client for the embed flow.
+const INTENTIONAL_PUBLIC_PREFIXES: &[&str] = &["public", "embed"];
+
 pub struct SecretToResponse {
     secret_name_re: Regex,
     credential_patterns: Vec<Regex>,
@@ -236,7 +247,21 @@ impl<'r> SecretFlowVisitor<'r> {
             // carries them. (Strict mode would require an enumerated
             // destructure of every secret key on the receiver; for
             // v0.0.1 we accept the looser model.)
+            //
+            // Precision refinements (post-OSS-validation 2026-05-11):
+            // - `name_has_intentional_public_prefix(binding)`: skip
+            //   names like `publicToken` / `embedToken` / `publicKey`
+            //   that signal "issued for client" by convention.
+            //   Observed FP: dub `referrals-token/route.ts`.
+            // - `init_looks_like_user_input(init)`: when the init
+            //   chain proves the destructured value is parsed user
+            //   input (zod/valibot/yup `.parse(...)`, or
+            //   `JSON.parse(<body-source>)`), suppress the secret-name
+            //   heuristic — `checkoutToken` from a webhook payload is
+            //   user data being echoed, not a stored secret. Observed
+            //   FP: dub `shopify/order-paid/route.ts`.
             if let BindingPattern::ObjectPattern(o) = &declarator.id {
+                let init_is_user_input = init_looks_like_user_input(init);
                 for prop in &o.properties {
                     let stryx_ast::ast::PropertyKey::StaticIdentifier(id) = &prop.key else {
                         continue;
@@ -247,6 +272,8 @@ impl<'r> SecretFlowVisitor<'r> {
                     let key_name = id.name.as_str();
                     if self.rule.secret_name_re.is_match(key_name)
                         && !is_too_generic_bare_name(key_name)
+                        && !name_has_intentional_public_prefix(b.name.as_str())
+                        && !init_is_user_input
                     {
                         self.taint(b.name.to_string());
                     }
@@ -570,6 +597,93 @@ fn is_too_generic_bare_name(name: &str) -> bool {
     TOO_GENERIC_BARE_NAMES
         .iter()
         .any(|g| name.eq_ignore_ascii_case(g))
+}
+
+/// True iff `name` starts with one of [`INTENTIONAL_PUBLIC_PREFIXES`]
+/// as a *leading camelCase word* — i.e. the prefix is followed by an
+/// uppercase letter or the end of the name. `publicToken` matches
+/// (suffix "T" is uppercase). `publishedToken` doesn't (next char is
+/// "i", lowercase — "public" was a substring, not a leading word).
+/// Match is ASCII-case-insensitive on the prefix.
+fn name_has_intentional_public_prefix(name: &str) -> bool {
+    INTENTIONAL_PUBLIC_PREFIXES.iter().any(|prefix| {
+        if name.len() < prefix.len() {
+            return false;
+        }
+        let (head, tail) = name.split_at(prefix.len());
+        if !head.eq_ignore_ascii_case(prefix) {
+            return false;
+        }
+        // Leading-word boundary: end-of-name, or next char is ASCII uppercase.
+        tail.is_empty() || tail.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+    })
+}
+
+/// Heuristic: does the initialiser expression trace through a shape
+/// that proves the value came from validated user input — not a
+/// stored server secret? Used by the destructure-key taint heuristic
+/// to suppress flagging on patterns like
+///
+///   const { checkoutToken } = schema.parse(JSON.parse(rawBody));
+///
+/// where `checkoutToken` is an arbitrary field of a webhook payload,
+/// echoed (not leaked) in a downstream response message. Observed FP
+/// source: dub's `apps/web/app/(ee)/api/cron/shopify/order-paid/route.ts`.
+///
+/// Recognised shapes (recursive):
+/// - `<schema>.parse(<X>)` / `<schema>.safeParse(<X>)` — zod/valibot/
+///   yup parser output.
+/// - `JSON.parse(<X>)` — recurse into the parsed argument.
+/// - `await <X>` / `(<X>)` / `<X> as T` / `<X>!` — trivial wrappers.
+///
+/// The recogniser is intentionally syntactic — no scope-flow
+/// tracking. If the init binding chain runs through a local variable
+/// (`const raw = await req.text(); const { x } = JSON.parse(raw);`),
+/// we currently miss it. Future refinement: thread a "body-derived"
+/// label into the per-binding scope tracker, mirroring how
+/// `flow/unvalidated-body-to-db` taints body-source-derived values.
+fn init_looks_like_user_input(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::AwaitExpression(a) => init_looks_like_user_input(&a.argument),
+        Expression::ParenthesizedExpression(p) => init_looks_like_user_input(&p.expression),
+        Expression::TSAsExpression(t) => init_looks_like_user_input(&t.expression),
+        Expression::TSNonNullExpression(t) => init_looks_like_user_input(&t.expression),
+        Expression::TSSatisfiesExpression(t) => init_looks_like_user_input(&t.expression),
+        Expression::TSTypeAssertion(t) => init_looks_like_user_input(&t.expression),
+        Expression::CallExpression(call) => {
+            let Some(method) = call.callee.as_member_expression() else {
+                return false;
+            };
+            let MemberExpression::StaticMemberExpression(method) = method else {
+                return false;
+            };
+            let method_name = method.property.name.as_str();
+            // JSON.parse(<X>) — recurse into the parsed argument. The
+            // typical pattern is JSON.parse(await req.text()), and we
+            // accept any nested user-input shape. Checked before the
+            // generic `.parse` / `.safeParse` branch so JSON.parse
+            // doesn't trigger an unconditional-true on its own.
+            if method_name == "parse"
+                && matches!(
+                    &method.object,
+                    Expression::Identifier(id) if id.name == "JSON"
+                )
+            {
+                return call
+                    .arguments
+                    .first()
+                    .and_then(|a| a.as_expression())
+                    .map(init_looks_like_user_input)
+                    .unwrap_or(false);
+            }
+            // zod / valibot / yup / arktype parser outputs are
+            // validated user input. The schema receiver is opaque
+            // (could be any local), so we match on the method name
+            // alone.
+            matches!(method_name, "parse" | "safeParse")
+        }
+        _ => false,
+    }
 }
 
 /// `JSON.stringify(x)` — preserves taint into a string. Recognised so
