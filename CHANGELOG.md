@@ -18,6 +18,22 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-11
+
+Second release. Track A (cross-file slice 2 for SSRF +
+redirect-open) closed, Track B over-delivered (4 of 4 new flow
+rules — prompt-injection, XSS, SQL-injection, command-injection
+— vs. ADR 0011's planned "pick 1-2"), plus the App Router
+`searchParams.X` body-source recogniser lifting coverage across
+every body-flow rule. **10 rules in the registry** (was 7 at
+v0.1.0).
+
+`StepKind` substrate grew from 14 → 17 variants × 6 trait
+methods = 102 dispatch sites. Two new sink variants
+(`SqlSink`, `ExecSink`, plus `LlmPromptSink` from earlier in
+the cycle). No breaking changes to the public CLI / JSON output
+contract.
+
 ### Added
 
 - `flow/ssrf-via-fetch` slice 2 — cross-file taint detection. The

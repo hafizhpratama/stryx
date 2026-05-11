@@ -160,4 +160,4 @@ severity = "high"
 | Version | Change |
 |---|---|
 | v0.1.0 | Initial single-file slice — body source → `NextResponse.redirect` / `redirect` / `res.redirect` / `Response.redirect` sink. |
-| (unreleased) | Slice 2 — cross-file taint via `ExportedFunctionSummary::reaches_redirect_sink_unsanitized`. Route handler → imported helper → redirect call chains now fire at the call site. URL allow-list guard inside the helper suppresses the call-site finding. |
+| v0.2 | Slice 2 — cross-file taint via `ExportedFunctionSummary::reaches_redirect_sink_unsanitized`. Route handler → imported helper → redirect call chains now fire at the call site. URL allow-list guard inside the helper suppresses the call-site finding. |

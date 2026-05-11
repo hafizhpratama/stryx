@@ -180,4 +180,4 @@ disabled = ["flow/ssrf-via-fetch"]
 | Version | Change |
 |---|---|
 | v0.1.0 | Initial single-file slice — body source → `fetch`/`axios`/`got` sink. |
-| (unreleased) | Slice 2 — cross-file taint via `ExportedFunctionSummary::reaches_fetch_sink_unsanitized`. Route handler → imported helper → `fetch(...)` chains now fire at the call site. URL allow-list guard inside the helper suppresses the call-site finding. |
+| v0.2 | Slice 2 — cross-file taint via `ExportedFunctionSummary::reaches_fetch_sink_unsanitized`. Route handler → imported helper → `fetch(...)` chains now fire at the call site. URL allow-list guard inside the helper suppresses the call-site finding. Three-level chain convergence (route → service → client). |

@@ -41,7 +41,7 @@ cd stryx
 cargo install --path crates/stryx_cli
 ```
 
-Pre-built binaries — attached to the [v0.1.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.1.0)
+Pre-built binaries — attached to the [v0.2.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.0)
 across five targets (Linux x64/arm64, macOS x64/arm64, Windows x64).
 
 Cargo (`cargo install stryx-cli`), npm (`npx stryx scan`), and Homebrew
@@ -91,7 +91,7 @@ See [`docs/rules/`](docs/rules/) for the full contracts.
 - **`generic/hardcoded-secret`** — credential-shaped strings inline
   in source.
 
-**Experimental (cross-file, slice 2 unreleased):**
+**Experimental (cross-file, v0.2):**
 
 - **`flow/ssrf-via-fetch`** — body taint reaches `fetch` /
   `axios.<method>` / `got` as the URL, route → helper → sink
@@ -100,7 +100,7 @@ See [`docs/rules/`](docs/rules/) for the full contracts.
   (`NextResponse.redirect`, `next/navigation` `redirect`,
   `res.redirect`, `Response.redirect`).
 
-**Experimental (single-file, unreleased):**
+**Experimental (single-file, v0.2):**
 
 - **`flow/path-traversal`** — body taint reaches `fs.<method>` /
   `fsPromises.<method>` as the path argument.
@@ -144,35 +144,35 @@ with `--no-llm` for fully local deterministic scans (the default).
 
 ## Status
 
-**v0.1.0 — first stable release.** Phase 1 closed: substrate stable,
-6 flow rules + 1 generic rule in the registry, 8-repo OSS
-validation arc (~28,800 TS files, 0 engine-level false positives).
-APIs follow SemVer from this point. See
-[ADR 0011](docs/decisions/0011-v01-to-v02-transition.md) for the
-Phase 2 plan.
+**v0.2.0 — second release.** Phase 2 Track A closed (cross-file
+slice 2 for the v0.1 experimental rules) and Track B
+over-delivered (4-of-4 new flow rules vs. ADR 0011's planned
+"pick 1-2"). 10 rules in the registry, plus the App Router
+`searchParams.X` body-source recogniser lifting coverage across
+every body-flow rule. APIs follow SemVer. See
+[ADR 0011](docs/decisions/0011-v01-to-v02-transition.md) for
+the Phase 2 plan and the v0.1 retrospective.
 
 - ✅ Architecture, ADRs, rule specs
 - ✅ Foundational crates `stryx_index` and `stryx_taint`
-- ✅ v0.1 flow rules (stable):
-  - `flow/unvalidated-body-to-db` (cross-file)
-  - `flow/auth-bypass-via-wrapper` (cross-file)
-  - `flow/secret-to-response` (single-file)
-- ✅ Cross-file slice 2 for the v0.1 experimental rules (unreleased):
-  - `flow/ssrf-via-fetch` (cross-file, with three-level chain
-    convergence and URL-allow-list sanitisers)
-  - `flow/redirect-open` (cross-file)
-- ✅ Experimental v0.2 flow rules (unreleased):
-  - `flow/path-traversal` (single-file)
-  - `flow/prompt-injection` (single-file, OpenAI + Anthropic)
-  - `flow/xss-via-dangerously-set-inner-html` (single-file,
-    DOMPurify + sanitize-html sanitisers)
-  - `flow/sql-injection` (single-file, Critical — Prisma
-    `$queryRawUnsafe` / Drizzle `sql.raw` / node-postgres
-    raw query)
-  - `flow/command-injection-via-exec` (single-file, Critical —
-    Node.js `child_process` exec / spawn / execFile)
+- ✅ Stable cross-file rules (v0.1):
+  - `flow/unvalidated-body-to-db`
+  - `flow/auth-bypass-via-wrapper`
+  - `flow/secret-to-response`
+- ✅ Experimental cross-file rules (v0.2):
+  - `flow/ssrf-via-fetch` (slice 2 cross-file, three-level
+    chain convergence, URL-allow-list sanitisers)
+  - `flow/redirect-open` (slice 2 cross-file)
+- ✅ Experimental single-file rules (v0.2):
+  - `flow/path-traversal`
+  - `flow/prompt-injection` (OpenAI + Anthropic)
+  - `flow/xss-via-dangerously-set-inner-html` (DOMPurify +
+    sanitize-html sanitisers)
+  - `flow/sql-injection` (Critical — Prisma `$queryRawUnsafe`
+    / Drizzle `sql.raw` / node-postgres raw query)
+  - `flow/command-injection-via-exec` (Critical — Node.js
+    `child_process` exec / spawn / execFile)
 - ✅ App Router `searchParams.X` recognised as a body source
-  (lifts every body-flow rule's coverage)
 - ✅ CLI binary (`cargo install --path crates/stryx_cli`)
 - ✅ Pre-built binaries on [GitHub Releases](https://github.com/hafizhpratama/stryx/releases)
 - 🚧 GitHub Action
@@ -180,8 +180,9 @@ Phase 2 plan.
 - 🚧 Homebrew formula
 - 📋 `flow/path-traversal` slice 2 (deferred — 0 OSS TPs in
   Phase 1 sample)
-- 📋 v0.2 release tag (10 rules + new sources, all on main but
-  not yet bundled)
+- 📋 ADR 0009 / ADR 0010 substrate pull-through (Phase 2
+  Track C — guard-based barriers formalisation, external
+  library summaries)
 - 📋 Hono / Express support via source/sink adapters (Phase 3)
 - 📋 Type-aware analysis, custom taint configs (Phase 4)
 
