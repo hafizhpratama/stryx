@@ -8,6 +8,8 @@
 //! ADR 0009's `GuardKind` variants slot in here too: a guard is
 //! a sanitiser whose effect is branch-scoped.
 
+pub mod auth;
 pub mod parser;
 
+pub use auth::{AUTH_HELPER_NAMES, AuthCheckSanitizer, call_invokes_auth_helper};
 pub use parser::{ParserSanitizer, is_sanitizer_call, second_arg_has_schema_key};

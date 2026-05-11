@@ -117,6 +117,7 @@ pub trait TaintStep {
 pub enum StepKind {
     BodySource(sources::BodySource),
     ParserSanitizer(sanitizers::ParserSanitizer),
+    AuthCheckSanitizer(sanitizers::AuthCheckSanitizer),
 }
 
 impl StepKind {
@@ -124,6 +125,7 @@ impl StepKind {
         match self {
             StepKind::BodySource(s) => s.as_source(ctx, expr),
             StepKind::ParserSanitizer(s) => s.as_source(ctx, expr),
+            StepKind::AuthCheckSanitizer(s) => s.as_source(ctx, expr),
         }
     }
 
@@ -131,6 +133,7 @@ impl StepKind {
         match self {
             StepKind::BodySource(s) => s.as_sink(ctx, call),
             StepKind::ParserSanitizer(s) => s.as_sink(ctx, call),
+            StepKind::AuthCheckSanitizer(s) => s.as_sink(ctx, call),
         }
     }
 
@@ -138,6 +141,7 @@ impl StepKind {
         match self {
             StepKind::BodySource(s) => s.as_sanitizer(ctx, call),
             StepKind::ParserSanitizer(s) => s.as_sanitizer(ctx, call),
+            StepKind::AuthCheckSanitizer(s) => s.as_sanitizer(ctx, call),
         }
     }
 
@@ -145,6 +149,7 @@ impl StepKind {
         match self {
             StepKind::BodySource(s) => s.as_propagator(ctx, expr),
             StepKind::ParserSanitizer(s) => s.as_propagator(ctx, expr),
+            StepKind::AuthCheckSanitizer(s) => s.as_propagator(ctx, expr),
         }
     }
 }

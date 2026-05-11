@@ -24,31 +24,23 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
+use crate::steps::sanitizers::{AuthCheckSanitizer, call_invokes_auth_helper};
+use crate::steps::{StepCtx, StepKind};
 use crate::{Rule, RuleContext, RuleMeta};
+
+// `AUTH_HELPER_NAMES` and `call_invokes_auth_helper` moved to
+// `crate::steps::sanitizers::auth` (ADR 0008 slice 8.3b). Re-export
+// `AUTH_HELPER_NAMES` from this module so external consumers that
+// import it via this rule's path keep working.
+pub use crate::steps::sanitizers::AUTH_HELPER_NAMES;
 
 const RULE_ID: &str = "flow/auth-bypass-via-wrapper";
 
-/// Recognised auth-helper function names. A wrapper whose body invokes
-/// any of these (anywhere — including nested arrow returns) is treated
-/// as "actually verifies authentication".
-///
-/// Bare names match `getServerSession(opts)`; member-access matches
-/// `auth.protect()`, `clerk.currentUser()`, `lucia.validateRequest()`.
-pub const AUTH_HELPER_NAMES: &[&str] = &[
-    "getServerSession",
-    "getSession",
-    "auth",
-    "validateRequest",
-    "getAuth",
-    "currentUser",
-    "getUser",
-    "requireSession",
-    "requireUser",
-    "protect",
-    "isAuthenticated",
-    "verifyToken",
-    "verifySession",
-];
+/// Per-rule step registry. `AuthCheckSanitizer` recognises auth-helper
+/// call sites; the body-walker in
+/// [`contains_auth_helper_call`] dispatches through this registry
+/// (slice 8.3b consumer).
+const RULE_STEPS: &[StepKind] = &[StepKind::AuthCheckSanitizer(AuthCheckSanitizer)];
 
 pub struct AuthBypassViaWrapper {
     wrapper_name_re: Regex,
@@ -258,31 +250,35 @@ impl<'a> Visit<'a> for AuthCheckVisitor {
         if self.found {
             return;
         }
-        if call_invokes_auth_helper(call) {
+        // Slice 8.3b of ADR 0008 — registry-dispatched auth-check
+        // recognition. The body-walker stays where it lives; what
+        // moves is the per-call predicate (now `AuthCheckSanitizer`).
+        // The visitor doesn't have a real file path or project index
+        // (it operates on raw AST bodies during summary extraction),
+        // so it constructs a sentinel `StepCtx` — auth recognition
+        // is purely syntactic and the step ignores the ctx fields.
+        let ctx = StepCtx {
+            file: std::path::Path::new(""),
+            index: None,
+            body_source_active: false,
+        };
+        let registry_match = RULE_STEPS.iter().any(|s| s.as_sanitizer(&ctx, call));
+        #[cfg(debug_assertions)]
+        {
+            let legacy = call_invokes_auth_helper(call);
+            debug_assert_eq!(
+                registry_match, legacy,
+                "AuthCheckSanitizer registry diverged from legacy at call {:?}",
+                call.span,
+            );
+        }
+        if registry_match {
             self.found = true;
             return;
         }
         // Walk into nested calls / arrow returns / argument expressions.
         stryx_ast::walk::walk_call_expression(self, call);
     }
-}
-
-fn call_invokes_auth_helper(call: &CallExpression<'_>) -> bool {
-    let name = match &call.callee {
-        Expression::Identifier(id) => id.name.as_str(),
-        Expression::StaticMemberExpression(m) => m.property.name.as_str(),
-        Expression::ChainExpression(c) => {
-            // `auth?.()` / `auth?.protect()`
-            return match &c.expression {
-                stryx_ast::ast::ChainElement::CallExpression(inner) => {
-                    call_invokes_auth_helper(inner)
-                }
-                _ => false,
-            };
-        }
-        _ => return false,
-    };
-    AUTH_HELPER_NAMES.contains(&name)
 }
 
 // ── Tiny utilities ────────────────────────────────────────────────────────
