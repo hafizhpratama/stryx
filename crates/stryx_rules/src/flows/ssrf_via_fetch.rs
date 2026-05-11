@@ -76,7 +76,11 @@ impl Rule for SsrfViaFetch {
     }
 
     fn extract<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> ExtractOutput {
-        Some(extract_summary(ctx.file.path.clone(), &ctx.file.program))
+        Some(extract_summary(
+            ctx.file.path.clone(),
+            &ctx.file.program,
+            ctx.index,
+        ))
     }
 
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
@@ -512,7 +516,11 @@ fn callee_chain(expr: &Expression<'_>) -> Option<String> {
 // the db rule's territory (and the merge_per_rule_flags contract keeps
 // db's richer fields on collision). Slice 2's contribution is reach-only.
 
-fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
+fn extract_summary(
+    file: PathBuf,
+    program: &Program<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
+) -> FileSummary {
     let mut summary = FileSummary {
         path: file.clone(),
         ..Default::default()
@@ -523,7 +531,8 @@ fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
                 let Some(name) = func.id.as_ref().map(|id| id.name.to_string()) else {
                     continue;
                 };
-                if let Some(s) = simulate_function(&file, &name, &func.params, func.body.as_deref())
+                if let Some(s) =
+                    simulate_function(&file, &name, &func.params, func.body.as_deref(), index)
                 {
                     summary.locals.insert(name, s);
                 }
@@ -536,7 +545,7 @@ fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
                     let Some(init) = &declarator.init else {
                         continue;
                     };
-                    if let Some(s) = simulate_initialiser(&file, &name, init) {
+                    if let Some(s) = simulate_initialiser(&file, &name, init, index) {
                         summary.locals.insert(name, s);
                     }
                 }
@@ -550,9 +559,13 @@ fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
                         let Some(name) = func.id.as_ref().map(|id| id.name.to_string()) else {
                             continue;
                         };
-                        if let Some(s) =
-                            simulate_function(&file, &name, &func.params, func.body.as_deref())
-                        {
+                        if let Some(s) = simulate_function(
+                            &file,
+                            &name,
+                            &func.params,
+                            func.body.as_deref(),
+                            index,
+                        ) {
                             summary.exports.insert(name, s);
                         }
                     }
@@ -564,7 +577,7 @@ fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
                             let Some(init) = &declarator.init else {
                                 continue;
                             };
-                            if let Some(s) = simulate_initialiser(&file, &name, init) {
+                            if let Some(s) = simulate_initialiser(&file, &name, init, index) {
                                 summary.exports.insert(name, s);
                             }
                         }
@@ -580,13 +593,13 @@ fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
                         .map(|id| id.name.to_string())
                         .unwrap_or_else(|| "default".to_string());
                     if let Some(s) =
-                        simulate_function(&file, &name, &func.params, func.body.as_deref())
+                        simulate_function(&file, &name, &func.params, func.body.as_deref(), index)
                     {
                         summary.exports.insert("default".to_string(), s);
                     }
                 }
                 ExportDefaultDeclarationKind::ArrowFunctionExpression(arrow) => {
-                    let s = simulate_arrow(&file, "default", &arrow.params, &arrow.body);
+                    let s = simulate_arrow(&file, "default", &arrow.params, &arrow.body, index);
                     summary.exports.insert("default".to_string(), s);
                 }
                 _ => {}
@@ -601,42 +614,50 @@ fn simulate_initialiser(
     file: &Path,
     name: &str,
     init: &Expression<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
 ) -> Option<ExportedFunctionSummary> {
     match init {
         Expression::FunctionExpression(func) => {
-            simulate_function(file, name, &func.params, func.body.as_deref())
+            simulate_function(file, name, &func.params, func.body.as_deref(), index)
         }
-        Expression::ArrowFunctionExpression(arrow) => {
-            Some(simulate_arrow(file, name, &arrow.params, &arrow.body))
-        }
+        Expression::ArrowFunctionExpression(arrow) => Some(simulate_arrow(
+            file,
+            name,
+            &arrow.params,
+            &arrow.body,
+            index,
+        )),
         _ => None,
     }
 }
 
-fn simulate_function(
+fn simulate_function<'idx>(
     file: &Path,
     name: &str,
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: Option<&FunctionBody<'_>>,
+    index: Option<&'idx stryx_index::ProjectIndex>,
 ) -> Option<ExportedFunctionSummary> {
     let body_stmts = body.map(|b| b.statements.as_slice()).unwrap_or(&[]);
-    Some(build_summary(file, name, params, body_stmts))
+    Some(build_summary(file, name, params, body_stmts, index))
 }
 
-fn simulate_arrow(
+fn simulate_arrow<'idx>(
     file: &Path,
     name: &str,
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: &FunctionBody<'_>,
+    index: Option<&'idx stryx_index::ProjectIndex>,
 ) -> ExportedFunctionSummary {
-    build_summary(file, name, params, &body.statements)
+    build_summary(file, name, params, &body.statements, index)
 }
 
-fn build_summary(
+fn build_summary<'idx>(
     file: &Path,
     name: &str,
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: &[Statement<'_>],
+    index: Option<&'idx stryx_index::ProjectIndex>,
 ) -> ExportedFunctionSummary {
     let param_names: Vec<String> = params
         .items
@@ -650,7 +671,11 @@ fn build_summary(
         // (the simulation is interested only in whether *this* param
         // reaches a sink — not whether the helper happens to read
         // `req.body` directly, which is the route handler's job).
-        let mut visitor = SsrfVisitor::new(file.to_path_buf(), None, false);
+        // The visitor sees the *previous* round's index so cross-file
+        // calls already known to sink contribute to the sink hit —
+        // that's what makes summaries converge through multi-level
+        // chains (route → service → client).
+        let mut visitor = SsrfVisitor::new(file.to_path_buf(), index, false);
         visitor.taint(pname.clone());
         for stmt in body {
             visitor.visit_statement(stmt);

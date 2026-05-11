@@ -1450,6 +1450,52 @@ fn ssrf_via_fetch_cross_file_bad_fires() {
 }
 
 #[test]
+fn ssrf_via_fetch_three_level_chain_bad_fires() {
+    // route → service → client → fetch. Slice 2's iterative summary
+    // computation must propagate `reaches_fetch_sink_unsanitized`
+    // up through both summary layers in lock-step. The route's call
+    // site is the finding location.
+    let dir = fixtures_root().join("flow-ssrf-via-fetch/chain-bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/ssrf-via-fetch")
+        .collect();
+    let route_path = dir.join("route.ts");
+    assert!(
+        findings
+            .iter()
+            .any(|f| f.span.file == route_path && f.message.contains("fetchExternal")),
+        "expected a finding on route.ts referencing fetchExternal; got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn ssrf_via_fetch_three_level_chain_good_silent() {
+    // Same chain shape as chain-bad, but the leaf `client.doFetch`
+    // validates the URL host against an allow-list. The simulation
+    // sees the early-throw guard, drops the reach flag at the leaf,
+    // and the absence must propagate up through service.ts and
+    // route.ts.
+    let dir = fixtures_root().join("flow-ssrf-via-fetch/chain-good");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/ssrf-via-fetch")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "expected zero ssrf findings on chain-good/, got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn ssrf_via_fetch_cross_file_good_silent() {
     // Same call shape as cross-file-bad, but the helper validates
     // the host against an allow-list before calling fetch. The
