@@ -555,10 +555,7 @@ mod tests {
             reaches_fetch_sink_unsanitized: true,
             ..Default::default()
         }));
-        assert_ne!(
-            zero, one,
-            "fetch_sink_params axis must affect the signal"
-        );
+        assert_ne!(zero, one, "fetch_sink_params axis must affect the signal");
     }
 
     /// Slice 2 of ADR 0006 added `tainted_offsets`. Per ADR 0004, it

@@ -9,7 +9,7 @@
 | Rule ID | `flow/ssrf-via-fetch` |
 | Status | experimental |
 | Severity | high |
-| Frameworks | nextjs >= 13, hono >= 4 (single-file slice 1) |
+| Frameworks | nextjs >= 13, hono >= 4 (single-file + cross-file slice 2) |
 | Default | enabled |
 | Added in | v0.1.0 |
 
@@ -87,8 +87,8 @@ export async function POST(req: NextRequest) {
 |---|---|
 | Source labels | `UserInput` (body / query / headers) |
 | Sink ids | `http.fetch`, `http.axios`, `http.got` |
-| Sanitizers recognized | URL-allowlist check (slice 2); `new URL(x)` alone is *not* a sanitizer |
-| Scope | `SingleFile` (slice 1); `CrossFile` (slice 2) |
+| Sanitizers recognized | URL-allowlist check (`new URL(input)` + `if (!ALLOWED.has(parsed.host)) return`); `new URL(x)` alone is *not* a sanitizer |
+| Scope | `SingleFile` + `CrossFile` |
 
 ## Detection logic
 
@@ -99,10 +99,15 @@ export async function POST(req: NextRequest) {
    the structural-propagator-walked taint set.
 3. If the URL argument is tainted and no recognised allow-list
    sanitizer fired along the path, emit a Finding at the sink span.
-
-Slice 1 covers same-file flows. Slice 2 extends to cross-file via
-the existing summary index (consume `ExportedFunctionSummary` like
-`flow/unvalidated-body-to-db` does).
+4. **Cross-file (slice 2).** The extract pass simulates each
+   exported function with one parameter pre-tainted and records
+   `ParamFlow::reaches_fetch_sink_unsanitized` when the simulation
+   observes a fetch sink. The run pass walks call sites; when a
+   tainted argument flows into a reach-flagged parameter slot of a
+   callee resolved via the project index, a finding is emitted at
+   the call site (severity High — the simulator can't distinguish
+   path-injection from full-URL SSRF inside the callee, so the
+   conservative tier wins).
 
 ## Known false positive zones
 
@@ -175,3 +180,4 @@ disabled = ["flow/ssrf-via-fetch"]
 | Version | Change |
 |---|---|
 | v0.1.0 | Initial single-file slice — body source → `fetch`/`axios`/`got` sink. |
+| (unreleased) | Slice 2 — cross-file taint via `ExportedFunctionSummary::reaches_fetch_sink_unsanitized`. Route handler → imported helper → `fetch(...)` chains now fire at the call site. URL allow-list guard inside the helper suppresses the call-site finding. |

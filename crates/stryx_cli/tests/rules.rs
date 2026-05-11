@@ -73,12 +73,21 @@ fn scan_dir(dir: &Path) -> Vec<Finding> {
             }
         }
         next.finalize();
+        // Convergence signal: sum of both per-rule sink flags
+        // across exports and locals. A mid-flight fetch-sink flip
+        // would otherwise get masked by a stable db-sink count.
+        // Production uses `ConvergenceSignal` (a full tuple); the
+        // test harness uses a single sum because the fixtures we
+        // exercise here converge within 2 rounds.
         let signal: usize = next
             .files()
-            .flat_map(|f| f.exports.values())
+            .flat_map(|f| f.exports.values().chain(f.locals.values()))
             .flat_map(|e| e.params.iter())
-            .filter(|p| p.reaches_db_sink_unsanitized)
-            .count();
+            .map(|p| {
+                usize::from(p.reaches_db_sink_unsanitized)
+                    + usize::from(p.reaches_fetch_sink_unsanitized)
+            })
+            .sum();
         index = next;
         if round > 0 && signal == prev_signal {
             break;
@@ -141,12 +150,21 @@ fn extract_index(dir: &Path) -> ProjectIndex {
             }
         }
         next.finalize();
+        // Convergence signal: sum of both per-rule sink flags
+        // across exports and locals. A mid-flight fetch-sink flip
+        // would otherwise get masked by a stable db-sink count.
+        // Production uses `ConvergenceSignal` (a full tuple); the
+        // test harness uses a single sum because the fixtures we
+        // exercise here converge within 2 rounds.
         let signal: usize = next
             .files()
-            .flat_map(|f| f.exports.values())
+            .flat_map(|f| f.exports.values().chain(f.locals.values()))
             .flat_map(|e| e.params.iter())
-            .filter(|p| p.reaches_db_sink_unsanitized)
-            .count();
+            .map(|p| {
+                usize::from(p.reaches_db_sink_unsanitized)
+                    + usize::from(p.reaches_fetch_sink_unsanitized)
+            })
+            .sum();
         index = next;
         if round > 0 && signal == prev_signal {
             break;
@@ -1402,6 +1420,54 @@ fn ssrf_via_fetch_good_fixture_silent() {
         findings.is_empty(),
         "good.ts has only hardcoded/env URLs — expected zero ssrf findings, got {:?}",
         findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn ssrf_via_fetch_cross_file_bad_fires() {
+    // Slice 2 — the fetch sink lives in `./lib.ts`, not in the route.
+    // The extract pass must summarise `forwardProxy(target)` with
+    // `reaches_fetch_sink_unsanitized = true` on param 0, and the
+    // run pass must emit a finding on `route.ts` at the call site.
+    let dir = fixtures_root().join("flow-ssrf-via-fetch/cross-file-bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/ssrf-via-fetch")
+        .collect();
+    let route_path = dir.join("route.ts");
+    let cross_file_finding = findings
+        .iter()
+        .find(|f| f.span.file == route_path && f.message.contains("forwardProxy"));
+    assert!(
+        cross_file_finding.is_some(),
+        "expected a cross-file SSRF finding on route.ts referencing forwardProxy; got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(cross_file_finding.unwrap().severity, Severity::High);
+}
+
+#[test]
+fn ssrf_via_fetch_cross_file_good_silent() {
+    // Same call shape as cross-file-bad, but the helper validates
+    // the host against an allow-list before calling fetch. The
+    // simulator must observe the early-return guard and drop the
+    // `reaches_fetch_sink_unsanitized` flag, leaving the route's
+    // call site silent.
+    let dir = fixtures_root().join("flow-ssrf-via-fetch/cross-file-good");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/ssrf-via-fetch")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "expected zero ssrf findings on cross-file-good/, got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
     );
 }
 

@@ -1,25 +1,37 @@
-//! `flow/ssrf-via-fetch` — slice 1 (single-file).
+//! `flow/ssrf-via-fetch` — slice 1 (single-file) + slice 2
+//! (cross-file via ExportedFunctionSummary).
 //!
 //! Detects request-body-tainted values reaching an outbound HTTP
 //! call (`fetch`, `axios.<method>`, `got`) as the URL argument
-//! without a recognised allow-list sanitiser along the path. Slice
-//! 1 is single-file only — cross-file taint via summaries lands in
-//! slice 2 once a real-world consumer motivates the engineering.
+//! without a recognised allow-list sanitiser along the path.
+//!
+//! Slice 2 — cross-file. The route handler hands body data to an
+//! imported helper that does the outbound HTTP call. The extract
+//! pass simulates each exported function with one parameter
+//! pre-tainted and records the result on
+//! `ParamFlow::reaches_fetch_sink_unsanitized`; the run pass walks
+//! call sites in the handler, looks up the callee via the project
+//! index, and emits a finding when a tainted argument flows into a
+//! reach-flagged parameter slot.
 //!
 //! See `docs/rules/flow-ssrf-via-fetch.md` for the rule's contract
 //! and the bad/good fixtures it pins.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use stryx_ast::{
     Visit,
     ast::{
         Argument, ArrowFunctionExpression, BindingPattern, CallExpression, ChainElement,
-        Expression, Function, IfStatement, ObjectPropertyKind, PropertyKey, VariableDeclarator,
+        Declaration, ExportDefaultDeclarationKind, Expression, Function, FunctionBody, IfStatement,
+        ObjectPropertyKind, Program, PropertyKey, Statement, VariableDeclarator,
     },
     to_span,
 };
-use stryx_core::{Finding, Severity};
+use stryx_core::{Finding, Severity, Span};
+use stryx_index::FileSummary;
+use stryx_taint::{ExportedFunctionSummary, ParamFlow};
 
 use crate::steps::sanitizers::{
     branch_returns, extract_url_constructor_input, match_url_allow_list_guard,
@@ -27,7 +39,7 @@ use crate::steps::sanitizers::{
 use crate::steps::sinks::{FetchSink, is_http_sink_call};
 use crate::steps::sources::BodySource;
 use crate::steps::{StepCtx, StepKind};
-use crate::{Rule, RuleContext, RuleMeta};
+use crate::{ExtractOutput, Rule, RuleContext, RuleMeta};
 
 const RULE_ID: &str = "flow/ssrf-via-fetch";
 
@@ -63,13 +75,12 @@ impl Rule for SsrfViaFetch {
         }
     }
 
+    fn extract<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> ExtractOutput {
+        Some(extract_summary(ctx.file.path.clone(), &ctx.file.program))
+    }
+
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
-        let mut visitor = SsrfVisitor {
-            file: ctx.file.path.clone(),
-            scopes: vec![HashMap::new()],
-            url_inits: HashMap::new(),
-            findings: Vec::new(),
-        };
+        let mut visitor = SsrfVisitor::new(ctx.file.path.clone(), ctx.index, true);
         for stmt in &ctx.file.program.body {
             visitor.visit_statement(stmt);
         }
@@ -77,8 +88,8 @@ impl Rule for SsrfViaFetch {
     }
 }
 
-struct SsrfVisitor {
-    file: std::path::PathBuf,
+struct SsrfVisitor<'idx> {
+    file: PathBuf,
     /// Stack of per-function scopes; each scope maps binding name to
     /// `()` if that binding holds body-tainted data. Body-tainted
     /// shapes are over-approximated as whole-value taint for slice
@@ -93,15 +104,41 @@ struct SsrfVisitor {
     /// underlying input has been validated against an allow-list.
     /// Per-function — cleared in `enter_fn`.
     url_inits: HashMap<String, String>,
+    /// Read-only project index. `Some` during the run pass (cross-file
+    /// callee lookups go through it); `None` during the extract pass
+    /// simulation (no findings are recorded then anyway, since extract
+    /// only counts whether sinks fire, not where).
+    index: Option<&'idx stryx_index::ProjectIndex>,
+    /// Honour `body_source_active` at the step level — set to `true`
+    /// for the run pass (body taint sources fire naturally) and
+    /// `false` during per-param simulation (only the pre-tainted
+    /// parameter contributes; ambient `req.body` reads must not turn
+    /// into spurious sinks inside helpers that don't take a request).
+    body_source_active: bool,
     findings: Vec<Finding>,
 }
 
-impl SsrfVisitor {
-    fn step_ctx(&self) -> StepCtx<'_, 'static> {
+impl<'idx> SsrfVisitor<'idx> {
+    fn new(
+        file: PathBuf,
+        index: Option<&'idx stryx_index::ProjectIndex>,
+        body_source_active: bool,
+    ) -> Self {
+        Self {
+            file,
+            scopes: vec![HashMap::new()],
+            url_inits: HashMap::new(),
+            index,
+            body_source_active,
+            findings: Vec::new(),
+        }
+    }
+
+    fn step_ctx(&self) -> StepCtx<'_, 'idx> {
         StepCtx {
             file: &self.file,
-            index: None,
-            body_source_active: true,
+            index: self.index,
+            body_source_active: self.body_source_active,
         }
     }
 
@@ -285,9 +322,74 @@ impl SsrfVisitor {
                 ),
         );
     }
+
+    /// Look up the callee through the project index — bare-ident
+    /// imports and same-file top-level functions. Returns the
+    /// ExportedFunctionSummary whose `params[i].reaches_fetch_sink_unsanitized`
+    /// flag tells us whether passing tainted data at position `i`
+    /// would reach an HTTP sink inside the callee.
+    fn lookup_callee_summary(
+        &self,
+        callee: &Expression<'_>,
+    ) -> Option<&'idx ExportedFunctionSummary> {
+        let index = self.index?;
+        let Expression::Identifier(id) = callee else {
+            return None;
+        };
+        let name = id.name.as_str();
+        if let Some(s) = index.resolve_summary(&self.file, name) {
+            return Some(s);
+        }
+        let file = index.file(&self.file)?;
+        file.exports.get(name).or_else(|| file.locals.get(name))
+    }
+
+    /// Cross-file consumer — when a tainted argument is passed at a
+    /// call site whose callee summary records
+    /// `reaches_fetch_sink_unsanitized` at that argument position,
+    /// emit a finding. Slice 2 mirrors the unvalidated_body_to_db
+    /// shape; severity defaults to High (the simulator can't tell
+    /// path-injection from full-SSRF inside the callee, so the
+    /// conservative tier wins).
+    fn check_cross_file_call(&mut self, call: &CallExpression<'_>) {
+        let Some(summary) = self.lookup_callee_summary(&call.callee) else {
+            return;
+        };
+        let callee_label = callee_chain(&call.callee).unwrap_or_else(|| "<call>".to_string());
+        for (i, arg) in call.arguments.iter().enumerate() {
+            let Some(arg_expr) = argument_expr(arg) else {
+                continue;
+            };
+            if !self.expr_taint(arg_expr) {
+                continue;
+            }
+            if !summary.taints_through_fetch_param(i) {
+                continue;
+            }
+            let param_name = summary
+                .params
+                .get(i)
+                .map(|p| p.name.as_str())
+                .unwrap_or("?");
+            self.findings.push(
+                Finding::ast(
+                    RULE_ID,
+                    Severity::High,
+                    format!(
+                        "Untrusted request input flows into `{callee_label}` (param `{param_name}`), \
+                         which makes an outbound HTTP call without a recognised allow-list check."
+                    ),
+                    to_span(&self.file, call.span),
+                )
+                .with_help(
+                    "Validate the URL against an allow-list at this call site, or inside the called helper before the fetch/axios/got call.",
+                ),
+            );
+        }
+    }
 }
 
-impl<'a> Visit<'a> for SsrfVisitor {
+impl<'a, 'idx> Visit<'a> for SsrfVisitor<'idx> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: stryx_ast::ScopeFlags) {
         self.enter_fn();
         if let Some(body) = &func.body {
@@ -315,6 +417,13 @@ impl<'a> Visit<'a> for SsrfVisitor {
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         self.check_http_sink(call);
+        // Slice 2 — cross-file: when the run pass has an index, check
+        // whether the callee's summary marks any tainted argument
+        // position as reaching a fetch sink. During the extract pass
+        // simulation `index` is None, so this is a no-op then.
+        if self.index.is_some() {
+            self.check_cross_file_call(call);
+        }
         // Continue walking to find nested sinks (e.g. `fetch(maybe(body))`).
         stryx_ast::walk::walk_call_expression(self, call);
     }
@@ -376,6 +485,192 @@ fn single_binding_name(pat: &BindingPattern<'_>) -> Option<String> {
         Some(id.name.to_string())
     } else {
         None
+    }
+}
+
+/// Pretty-print a callee expression for finding messages — bare
+/// idents only for slice 2 (member-expression callees aren't
+/// resolved cross-file yet). Returns `None` for shapes we don't
+/// format.
+fn callee_chain(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.to_string()),
+        _ => None,
+    }
+}
+
+// ── Extract pass ───────────────────────────────────────────────────────────
+//
+// Walk top-level decls. For each function-like export (FunctionDeclaration,
+// `const x = (...)=>{}`, default-exported function/arrow), run a
+// per-parameter simulation that pre-taints one param and observes whether
+// the [`SsrfVisitor`] records a sink finding. Whatever the simulation
+// observes lands on `ParamFlow::reaches_fetch_sink_unsanitized`.
+//
+// Slice 2 deliberately does *not* populate `param_shape`, `return_shape`,
+// `tainted_offsets`, `propagates_to_return`, or class methods — those are
+// the db rule's territory (and the merge_per_rule_flags contract keeps
+// db's richer fields on collision). Slice 2's contribution is reach-only.
+
+fn extract_summary(file: PathBuf, program: &Program<'_>) -> FileSummary {
+    let mut summary = FileSummary {
+        path: file.clone(),
+        ..Default::default()
+    };
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(func) => {
+                let Some(name) = func.id.as_ref().map(|id| id.name.to_string()) else {
+                    continue;
+                };
+                if let Some(s) = simulate_function(&file, &name, &func.params, func.body.as_deref())
+                {
+                    summary.locals.insert(name, s);
+                }
+            }
+            Statement::VariableDeclaration(var) => {
+                for declarator in &var.declarations {
+                    let Some(name) = single_binding_name(&declarator.id) else {
+                        continue;
+                    };
+                    let Some(init) = &declarator.init else {
+                        continue;
+                    };
+                    if let Some(s) = simulate_initialiser(&file, &name, init) {
+                        summary.locals.insert(name, s);
+                    }
+                }
+            }
+            Statement::ExportNamedDeclaration(decl) => {
+                let Some(declaration) = &decl.declaration else {
+                    continue;
+                };
+                match declaration {
+                    Declaration::FunctionDeclaration(func) => {
+                        let Some(name) = func.id.as_ref().map(|id| id.name.to_string()) else {
+                            continue;
+                        };
+                        if let Some(s) =
+                            simulate_function(&file, &name, &func.params, func.body.as_deref())
+                        {
+                            summary.exports.insert(name, s);
+                        }
+                    }
+                    Declaration::VariableDeclaration(var) => {
+                        for declarator in &var.declarations {
+                            let Some(name) = single_binding_name(&declarator.id) else {
+                                continue;
+                            };
+                            let Some(init) = &declarator.init else {
+                                continue;
+                            };
+                            if let Some(s) = simulate_initialiser(&file, &name, init) {
+                                summary.exports.insert(name, s);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Statement::ExportDefaultDeclaration(decl) => match &decl.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                    let name = func
+                        .id
+                        .as_ref()
+                        .map(|id| id.name.to_string())
+                        .unwrap_or_else(|| "default".to_string());
+                    if let Some(s) =
+                        simulate_function(&file, &name, &func.params, func.body.as_deref())
+                    {
+                        summary.exports.insert("default".to_string(), s);
+                    }
+                }
+                ExportDefaultDeclarationKind::ArrowFunctionExpression(arrow) => {
+                    let s = simulate_arrow(&file, "default", &arrow.params, &arrow.body);
+                    summary.exports.insert("default".to_string(), s);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    summary
+}
+
+fn simulate_initialiser(
+    file: &Path,
+    name: &str,
+    init: &Expression<'_>,
+) -> Option<ExportedFunctionSummary> {
+    match init {
+        Expression::FunctionExpression(func) => {
+            simulate_function(file, name, &func.params, func.body.as_deref())
+        }
+        Expression::ArrowFunctionExpression(arrow) => {
+            Some(simulate_arrow(file, name, &arrow.params, &arrow.body))
+        }
+        _ => None,
+    }
+}
+
+fn simulate_function(
+    file: &Path,
+    name: &str,
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    body: Option<&FunctionBody<'_>>,
+) -> Option<ExportedFunctionSummary> {
+    let body_stmts = body.map(|b| b.statements.as_slice()).unwrap_or(&[]);
+    Some(build_summary(file, name, params, body_stmts))
+}
+
+fn simulate_arrow(
+    file: &Path,
+    name: &str,
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    body: &FunctionBody<'_>,
+) -> ExportedFunctionSummary {
+    build_summary(file, name, params, &body.statements)
+}
+
+fn build_summary(
+    file: &Path,
+    name: &str,
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    body: &[Statement<'_>],
+) -> ExportedFunctionSummary {
+    let param_names: Vec<String> = params
+        .items
+        .iter()
+        .map(|p| single_binding_name(&p.pattern).unwrap_or_else(|| format!("_arg{}", p.span.start)))
+        .collect();
+
+    let mut params_out = Vec::with_capacity(param_names.len());
+    for pname in &param_names {
+        // One param pre-tainted, body-source recognition disabled
+        // (the simulation is interested only in whether *this* param
+        // reaches a sink — not whether the helper happens to read
+        // `req.body` directly, which is the route handler's job).
+        let mut visitor = SsrfVisitor::new(file.to_path_buf(), None, false);
+        visitor.taint(pname.clone());
+        for stmt in body {
+            visitor.visit_statement(stmt);
+        }
+        let reaches = !visitor.findings.is_empty();
+        let sink_span = visitor.findings.first().map(|f| f.span.clone());
+        params_out.push(ParamFlow {
+            name: pname.clone(),
+            reaches_fetch_sink_unsanitized: reaches,
+            sink_span,
+            ..Default::default()
+        });
+    }
+
+    ExportedFunctionSummary {
+        name: name.to_string(),
+        params: params_out,
+        span: Span::new(file.to_path_buf(), params.span.start, params.span.end),
+        contains_auth_check: false,
+        validates_request_body: false,
     }
 }
 

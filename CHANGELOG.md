@@ -18,6 +18,30 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `flow/ssrf-via-fetch` slice 2 — cross-file taint detection. The
+  extract pass simulates each exported function with one parameter
+  pre-tainted and records `ParamFlow::reaches_fetch_sink_unsanitized`
+  when the simulation observes a fetch sink. The run pass emits a
+  finding at the call site when a tainted argument flows into a
+  reach-flagged parameter of a callee resolved via the project
+  index. URL allow-list guards inside the callee suppress the
+  finding (the simulation walks the same `match_url_allow_list_guard`
+  helper as slice 1).
+- `ParamFlow::reaches_fetch_sink_unsanitized` (with `#[serde(default)]`
+  so pre-slice-2 cache entries deserialize).
+- `ExportedFunctionSummary::taints_through_fetch_param(idx)` mirror
+  of `taints_through_param`.
+- `ExportedFunctionSummary::merge_per_rule_flags` —
+  `FileSummary::merge_with` now unions per-rule sink flags on
+  export/local collisions so the DB rule and SSRF rule can
+  co-extract per-file without dropping each other's reachability
+  flags.
+- `ConvergenceSignal::fetch_sink_params` per ADR 0004's contract
+  (every monotone axis that can change across iterations must be
+  in the convergence tuple).
+
 ## [0.1.0] — 2026-05-11
 
 First stable release. Closes Phase 1 of [ADR 0003](docs/decisions/0003-cross-file-and-taint-as-core.md)
