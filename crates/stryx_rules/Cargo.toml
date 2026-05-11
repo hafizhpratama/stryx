@@ -53,3 +53,7 @@ harness = false
 [[bench]]
 name    = "xss_via_dangerously_set_inner_html"
 harness = false
+
+[[bench]]
+name    = "sql_injection"
+harness = false

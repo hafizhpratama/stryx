@@ -47,6 +47,7 @@ What actually shipped (counting commits through `fc908ec`):
 | `flow/path-traversal` | experimental | Single-file | 0 across OSS sample (cloud-blob storage dominates) |
 | `flow/prompt-injection` | experimental (v0.2) | Single-file | (no public-repo data yet; AI-coding-tool audience match per ADR 0011 Track B) |
 | `flow/xss-via-dangerously-set-inner-html` | experimental (v0.2) | Single-file | (no public-repo data yet; React/Next.js audience match per ADR 0011 Track B) |
+| `flow/sql-injection` | experimental (v0.2) | Single-file | (no public-repo data yet; raw-SQL escape-hatch coverage that the typed-prisma rule doesn't reach) |
 | `generic/hardcoded-secret` | stable | Single-file | (live in registry) |
 
 **Real-world validation arc:**
@@ -144,6 +145,12 @@ frequency:
    `prisma.$queryRaw` / direct `pg.query` / Drizzle's `sql\`\``
    tagged template. The prisma-write rule already covers Prisma's
    ORM-typed sinks; this covers the raw-SQL escape hatch.
+   ✅ **shipped** in v0.2 — `SqlSink` step variant + rule
+   recognises Prisma `$queryRawUnsafe` / `$executeRawUnsafe`,
+   Drizzle `sql.raw`, and node-postgres / mysql2
+   `<conn>.query(<sql>, ...)`. Parameterised tagged-template
+   forms (`prisma.$queryRaw\`\``, `sql\`\``) are *not* sinks —
+   safe by construction. Severity Critical.
 
 Pick 1-2 of these for v0.2 based on motivating real-world data.
 

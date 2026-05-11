@@ -87,6 +87,17 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `someObj.searchParams.X` is not treated as a source. OSS sweep
   on papermark + dub: zero regressions, zero new findings (those
   codebases use pages-style API routes, not App Router pages).
+- `flow/sql-injection` slice 1 — new flow rule catching
+  body-tainted values reaching a raw-SQL sink. Sinks: Prisma's
+  `$queryRawUnsafe` / `$executeRawUnsafe`, Drizzle's `sql.raw`,
+  and node-postgres / mysql2 `<conn>.query(<sql>, ...)` where
+  `<conn>` is one of `pool` / `client` / `db` / `connection`. The
+  parameterised tagged-template forms (`prisma.$queryRaw\`\``,
+  `sql\`\``) are deliberately *not* sinks — they generate
+  parameterised SQL and are safe by construction. Severity
+  Critical (OWASP A03, CWE-89). ADR 0011 Track B candidate #4.
+- `SqlSink` step variant in `steps::sinks::sql`; wired through
+  `StepKind` (16 variants × 6 trait methods = 96 dispatch sites).
 
 ## [0.1.0] — 2026-05-11
 

@@ -12,6 +12,7 @@ pub mod http;
 pub mod llm;
 pub mod redirect;
 pub mod response;
+pub mod sql;
 
 pub use db::{
     DrizzleWriteSink, OrmWriteSink, PrismaWriteSink, is_db_write_sink, is_drizzle_write_sink,
@@ -22,3 +23,4 @@ pub use http::{FetchSink, is_http_sink_call};
 pub use llm::{LlmPromptSink, is_llm_prompt_sink_call};
 pub use redirect::{RedirectSink, is_redirect_sink_call};
 pub use response::{ResponseSink, is_response_constructor, response_sink_label};
+pub use sql::{SqlSink, is_sql_sink_call};
