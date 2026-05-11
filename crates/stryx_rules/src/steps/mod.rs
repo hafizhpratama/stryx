@@ -93,6 +93,34 @@ pub trait TaintStep {
         None
     }
 
+    /// Kind-specialised source recogniser for call expressions. Used
+    /// from contexts that already have a `&CallExpression` in hand
+    /// (chain elements, sink-scan recursion) and can't ergonomically
+    /// wrap it back into an [`Expression`] — `Expression::CallExpression`
+    /// owns a `Box<CallExpression>` that can't be constructed from a
+    /// borrowed call without cloning. Steps that participate in
+    /// source recognition should ideally override either this *or*
+    /// `as_source`; the default impl returns `None`.
+    fn as_call_source(
+        &self,
+        _ctx: &StepCtx<'_, '_>,
+        _call: &CallExpression<'_>,
+    ) -> Option<TaintLabel> {
+        None
+    }
+
+    /// Kind-specialised source recogniser for member-access
+    /// expressions. Used from chain-element contexts that have only
+    /// the destructured `(object, property)` pair.
+    fn as_member_source(
+        &self,
+        _ctx: &StepCtx<'_, '_>,
+        _object: &Expression<'_>,
+        _prop: &str,
+    ) -> Option<TaintLabel> {
+        None
+    }
+
     fn as_sink(&self, _ctx: &StepCtx<'_, '_>, _call: &CallExpression<'_>) -> Option<SinkSpec> {
         None
     }
@@ -149,6 +177,47 @@ impl StepKind {
             StepKind::StructuralPropagator(s) => s.as_source(ctx, expr),
             StepKind::FunCallable(s) => s.as_source(ctx, expr),
             StepKind::FunPropagation(s) => s.as_source(ctx, expr),
+        }
+    }
+
+    pub fn as_call_source(
+        &self,
+        ctx: &StepCtx<'_, '_>,
+        call: &CallExpression<'_>,
+    ) -> Option<TaintLabel> {
+        match self {
+            StepKind::BodySource(s) => s.as_call_source(ctx, call),
+            StepKind::ParserSanitizer(s) => s.as_call_source(ctx, call),
+            StepKind::AuthCheckSanitizer(s) => s.as_call_source(ctx, call),
+            StepKind::RedactorSanitizer(s) => s.as_call_source(ctx, call),
+            StepKind::PrismaWriteSink(s) => s.as_call_source(ctx, call),
+            StepKind::DrizzleWriteSink(s) => s.as_call_source(ctx, call),
+            StepKind::OrmWriteSink(s) => s.as_call_source(ctx, call),
+            StepKind::ResponseSink(s) => s.as_call_source(ctx, call),
+            StepKind::StructuralPropagator(s) => s.as_call_source(ctx, call),
+            StepKind::FunCallable(s) => s.as_call_source(ctx, call),
+            StepKind::FunPropagation(s) => s.as_call_source(ctx, call),
+        }
+    }
+
+    pub fn as_member_source(
+        &self,
+        ctx: &StepCtx<'_, '_>,
+        object: &Expression<'_>,
+        prop: &str,
+    ) -> Option<TaintLabel> {
+        match self {
+            StepKind::BodySource(s) => s.as_member_source(ctx, object, prop),
+            StepKind::ParserSanitizer(s) => s.as_member_source(ctx, object, prop),
+            StepKind::AuthCheckSanitizer(s) => s.as_member_source(ctx, object, prop),
+            StepKind::RedactorSanitizer(s) => s.as_member_source(ctx, object, prop),
+            StepKind::PrismaWriteSink(s) => s.as_member_source(ctx, object, prop),
+            StepKind::DrizzleWriteSink(s) => s.as_member_source(ctx, object, prop),
+            StepKind::OrmWriteSink(s) => s.as_member_source(ctx, object, prop),
+            StepKind::ResponseSink(s) => s.as_member_source(ctx, object, prop),
+            StepKind::StructuralPropagator(s) => s.as_member_source(ctx, object, prop),
+            StepKind::FunCallable(s) => s.as_member_source(ctx, object, prop),
+            StepKind::FunPropagation(s) => s.as_member_source(ctx, object, prop),
         }
     }
 

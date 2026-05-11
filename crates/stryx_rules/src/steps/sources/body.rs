@@ -43,6 +43,31 @@ impl TaintStep for BodySource {
             None
         }
     }
+
+    fn as_call_source(
+        &self,
+        ctx: &StepCtx<'_, '_>,
+        call: &CallExpression<'_>,
+    ) -> Option<TaintLabel> {
+        if ctx.body_source_active && is_body_source_call(call) {
+            Some(TaintLabel::UserInput)
+        } else {
+            None
+        }
+    }
+
+    fn as_member_source(
+        &self,
+        ctx: &StepCtx<'_, '_>,
+        object: &Expression<'_>,
+        prop: &str,
+    ) -> Option<TaintLabel> {
+        if ctx.body_source_active && is_request_body_member(object, prop) {
+            Some(TaintLabel::UserInput)
+        } else {
+            None
+        }
+    }
 }
 
 /// `req.body` / `request.body` / `c.req.body` / `ctx.request.body`.

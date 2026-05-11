@@ -277,14 +277,6 @@ impl<'idx> FlowVisitor<'idx> {
         self.body_source_suppressed == 0
     }
 
-    fn matches_body_member(&self, object: &Expression<'_>, prop: &str) -> bool {
-        self.body_source_active() && is_request_body_member(object, prop)
-    }
-
-    fn matches_body_call(&self, call: &CallExpression<'_>) -> bool {
-        self.body_source_active() && is_body_source_call(call)
-    }
-
     /// Slice 8.2 of ADR 0008 — construct the read-only [`StepCtx`]
     /// every step recogniser consumes. Pulled from visitor state at
     /// call time; cheap, no allocation.
@@ -305,6 +297,34 @@ impl<'idx> FlowVisitor<'idx> {
         let ctx = self.step_ctx();
         for step in RULE_STEPS {
             if let Some(label) = step.as_source(&ctx, expr) {
+                return Some(label);
+            }
+        }
+        None
+    }
+
+    /// Kind-specialised source check for `CallExpression` sites
+    /// (chain elements, sink-scan recursion) — see [`TaintStep::as_call_source`].
+    fn registry_as_call_source(&self, call: &CallExpression<'_>) -> Option<TaintLabel> {
+        let ctx = self.step_ctx();
+        for step in RULE_STEPS {
+            if let Some(label) = step.as_call_source(&ctx, call) {
+                return Some(label);
+            }
+        }
+        None
+    }
+
+    /// Kind-specialised source check for member-access sites with a
+    /// destructured `(object, prop)` pair — see [`TaintStep::as_member_source`].
+    fn registry_as_member_source(
+        &self,
+        object: &Expression<'_>,
+        prop: &str,
+    ) -> Option<TaintLabel> {
+        let ctx = self.step_ctx();
+        for step in RULE_STEPS {
+            if let Some(label) = step.as_member_source(&ctx, object, prop) {
                 return Some(label);
             }
         }
@@ -839,10 +859,9 @@ impl<'idx> FlowVisitor<'idx> {
                     return false;
                 }
                 // A request-body source call returns tainted data.
-                // Registry-dispatched (ADR 0008). Other call sites of
-                // `matches_body_call` in this file still call the
-                // underlying predicate directly — a follow-up cleanup
-                // migrates those.
+                // Registry-dispatched (ADR 0008); kind-specialised
+                // `as_call_source` / `as_member_source` cover the
+                // chain-element call sites.
                 if self.registry_as_source(expr).is_some() {
                     return true;
                 }
@@ -990,7 +1009,7 @@ impl<'idx> FlowVisitor<'idx> {
                 if self.registry_as_sanitizer(call) || is_db_read_call(call) {
                     return false;
                 }
-                if self.matches_body_call(call) {
+                if self.registry_as_call_source(call).is_some() {
                     return true;
                 }
                 let summary = self.lookup_callee_summary(&call.callee);
@@ -1007,7 +1026,10 @@ impl<'idx> FlowVisitor<'idx> {
             }
             ChainElement::TSNonNullExpression(t) => self.expr_taint(&t.expression),
             ChainElement::StaticMemberExpression(m) => {
-                if self.matches_body_member(&m.object, m.property.name.as_str()) {
+                if self
+                    .registry_as_member_source(&m.object, m.property.name.as_str())
+                    .is_some()
+                {
                     return true;
                 }
                 self.expr_taint(&m.object)
@@ -1417,7 +1439,10 @@ impl<'idx> FlowVisitor<'idx> {
             Expression::AwaitExpression(a) => self.expr_is_tainted_readonly(&a.argument),
             Expression::ParenthesizedExpression(p) => self.expr_is_tainted_readonly(&p.expression),
             Expression::StaticMemberExpression(m) => {
-                if self.matches_body_member(&m.object, m.property.name.as_str()) {
+                if self
+                    .registry_as_member_source(&m.object, m.property.name.as_str())
+                    .is_some()
+                {
                     return true;
                 }
                 self.expr_is_tainted_readonly(&m.object)
@@ -1427,7 +1452,7 @@ impl<'idx> FlowVisitor<'idx> {
                 if self.registry_as_sanitizer(call) || is_db_read_call(call) {
                     return false;
                 }
-                if self.matches_body_call(call) {
+                if self.registry_as_call_source(call).is_some() {
                     return true;
                 }
                 let summary = self.lookup_callee_summary(&call.callee);
@@ -1469,7 +1494,7 @@ impl<'idx> FlowVisitor<'idx> {
                     if self.registry_as_sanitizer(call) || is_db_read_call(call) {
                         return false;
                     }
-                    if self.matches_body_call(call) {
+                    if self.registry_as_call_source(call).is_some() {
                         return true;
                     }
                     let summary = self.lookup_callee_summary(&call.callee);
@@ -1486,7 +1511,10 @@ impl<'idx> FlowVisitor<'idx> {
                     self.expr_is_tainted_readonly(&t.expression)
                 }
                 ChainElement::StaticMemberExpression(m) => {
-                    if self.matches_body_member(&m.object, m.property.name.as_str()) {
+                    if self
+                        .registry_as_member_source(&m.object, m.property.name.as_str())
+                        .is_some()
+                    {
                         return true;
                     }
                     self.expr_is_tainted_readonly(&m.object)
