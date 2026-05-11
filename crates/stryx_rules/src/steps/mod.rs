@@ -21,6 +21,7 @@ use stryx_core::Severity;
 use stryx_index::ProjectIndex;
 use stryx_taint::TaintLabel;
 
+pub mod hof;
 pub mod propagators;
 pub mod sanitizers;
 pub mod sinks;
@@ -124,6 +125,14 @@ pub enum StepKind {
     OrmWriteSink(sinks::OrmWriteSink),
     ResponseSink(sinks::ResponseSink),
     StructuralPropagator(propagators::StructuralPropagator),
+    /// Reserved for ADR 0007 slice 3.6 — callable-shaped recogniser
+    /// (producer side of HOF taint flow). Substrate-only at slice
+    /// 8.7; default no-op impl.
+    FunCallable(hof::FunCallable),
+    /// Reserved for ADR 0007 slice 3.6 — callback-arg taint
+    /// propagator (consumer side of HOF taint flow). Substrate-only
+    /// at slice 8.7; default no-op impl.
+    FunPropagation(hof::FunPropagation),
 }
 
 impl StepKind {
@@ -138,6 +147,8 @@ impl StepKind {
             StepKind::OrmWriteSink(s) => s.as_source(ctx, expr),
             StepKind::ResponseSink(s) => s.as_source(ctx, expr),
             StepKind::StructuralPropagator(s) => s.as_source(ctx, expr),
+            StepKind::FunCallable(s) => s.as_source(ctx, expr),
+            StepKind::FunPropagation(s) => s.as_source(ctx, expr),
         }
     }
 
@@ -152,6 +163,8 @@ impl StepKind {
             StepKind::OrmWriteSink(s) => s.as_sink(ctx, call),
             StepKind::ResponseSink(s) => s.as_sink(ctx, call),
             StepKind::StructuralPropagator(s) => s.as_sink(ctx, call),
+            StepKind::FunCallable(s) => s.as_sink(ctx, call),
+            StepKind::FunPropagation(s) => s.as_sink(ctx, call),
         }
     }
 
@@ -166,6 +179,8 @@ impl StepKind {
             StepKind::OrmWriteSink(s) => s.as_sanitizer(ctx, call),
             StepKind::ResponseSink(s) => s.as_sanitizer(ctx, call),
             StepKind::StructuralPropagator(s) => s.as_sanitizer(ctx, call),
+            StepKind::FunCallable(s) => s.as_sanitizer(ctx, call),
+            StepKind::FunPropagation(s) => s.as_sanitizer(ctx, call),
         }
     }
 
@@ -180,6 +195,8 @@ impl StepKind {
             StepKind::OrmWriteSink(s) => s.as_propagator(ctx, expr),
             StepKind::ResponseSink(s) => s.as_propagator(ctx, expr),
             StepKind::StructuralPropagator(s) => s.as_propagator(ctx, expr),
+            StepKind::FunCallable(s) => s.as_propagator(ctx, expr),
+            StepKind::FunPropagation(s) => s.as_propagator(ctx, expr),
         }
     }
 }
