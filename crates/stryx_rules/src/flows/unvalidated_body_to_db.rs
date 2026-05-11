@@ -34,10 +34,8 @@ use stryx_index::{ClassInfo, FileSummary, ImportRef};
 use stryx_taint::{Cell, ExportedFunctionSummary, Offset, ParamFlow, Shape, TaintLabel, Xtaint};
 
 use crate::steps::propagators::StructuralPropagator;
-use crate::steps::sanitizers::{ParserSanitizer, is_sanitizer_call};
-use crate::steps::sinks::{
-    DrizzleWriteSink, OrmWriteSink, PrismaWriteSink, is_db_write_sink, is_prisma_write_sink,
-};
+use crate::steps::sanitizers::ParserSanitizer;
+use crate::steps::sinks::{DrizzleWriteSink, OrmWriteSink, PrismaWriteSink, is_prisma_write_sink};
 use crate::steps::sources::{BodySource, is_body_source_call, is_request_body_member};
 use crate::steps::{StepCtx, StepKind};
 
@@ -814,11 +812,8 @@ impl<'idx> FlowVisitor<'idx> {
 
             Expression::CallExpression(call) => {
                 // A sanitizer call clears taint regardless of its argument.
-                // Registry-dispatched (ADR 0008). Other call sites of
-                // `is_sanitizer_call` in this file (chain_element_taint,
-                // expr_is_tainted_readonly) still use the underlying
-                // predicate directly — a follow-up cleanup migrates
-                // those to `self.registry_as_sanitizer` as well.
+                // Registry-dispatched (ADR 0008); all sanitiser checks in
+                // this file route through `registry_as_sanitizer`.
                 if self.registry_as_sanitizer(call) {
                     // Still walk arguments to record any nested sinks/taint.
                     for arg in &call.arguments {
@@ -992,7 +987,7 @@ impl<'idx> FlowVisitor<'idx> {
             ChainElement::CallExpression(call) => {
                 // Mirror the standard CallExpression branch — sanitisers,
                 // db-reads, body sources, then conservative propagation.
-                if is_sanitizer_call(call) || is_db_read_call(call) {
+                if self.registry_as_sanitizer(call) || is_db_read_call(call) {
                     return false;
                 }
                 if self.matches_body_call(call) {
@@ -1386,7 +1381,7 @@ impl<'idx> FlowVisitor<'idx> {
             Expression::ChainExpression(c) => match &c.expression {
                 ChainElement::CallExpression(call) => {
                     self.check_cross_file_call(call);
-                    if is_db_write_sink(call) {
+                    if self.registry_as_sink(call).is_some() {
                         self.emit_db_sink_finding(call);
                     }
                     self.scan_for_sinks(&call.callee);
@@ -1429,7 +1424,7 @@ impl<'idx> FlowVisitor<'idx> {
             }
             Expression::ComputedMemberExpression(m) => self.expr_is_tainted_readonly(&m.object),
             Expression::CallExpression(call) => {
-                if is_sanitizer_call(call) || is_db_read_call(call) {
+                if self.registry_as_sanitizer(call) || is_db_read_call(call) {
                     return false;
                 }
                 if self.matches_body_call(call) {
@@ -1471,7 +1466,7 @@ impl<'idx> FlowVisitor<'idx> {
             Expression::TSTypeAssertion(t) => self.expr_is_tainted_readonly(&t.expression),
             Expression::ChainExpression(c) => match &c.expression {
                 ChainElement::CallExpression(call) => {
-                    if is_sanitizer_call(call) || is_db_read_call(call) {
+                    if self.registry_as_sanitizer(call) || is_db_read_call(call) {
                         return false;
                     }
                     if self.matches_body_call(call) {
