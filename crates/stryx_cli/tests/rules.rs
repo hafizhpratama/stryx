@@ -487,6 +487,62 @@ fn unvalidated_body_to_db_local_shape_propagates_at_sink() {
     }
 }
 
+/// Task #92 regression — observed on documenso's `getSession`
+/// helper during real-world OSS validation. When a body-tainted
+/// parameter flows into a DB-writing helper through a wrapping
+/// call expression (e.g. `dbWritingHelper(passthrough(c))`), the
+/// cross-file finding emits but `record_taint_in_arg` doesn't
+/// recurse into the call wrapper. Pre-fix, the slice 2.5 invariant
+/// `reaches == !findings.is_empty()` fired a debug-assert panic
+/// because the shape stayed empty.
+///
+/// The fix is a conservative fallback in `record_taint_in_arg`:
+/// when the expression is `expr_is_tainted_readonly` but doesn't
+/// match any structural shape we recognise, record whole-value
+/// root taint. The shape becomes `Tainted+Bot` — agrees with the
+/// finding-emission path.
+#[test]
+fn unvalidated_body_to_db_call_wrapped_sink_records_root_taint() {
+    use stryx_taint::{Shape, Xtaint};
+
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/call-wrapped-sink");
+    let index = extract_index(&dir);
+    let lib = index
+        .files()
+        .find(|f| f.exports.contains_key("getSession"))
+        .expect("call-wrapped-sink lib summary present");
+    let helper = lib.exports.get("getSession").expect("getSession export");
+    let c_param = helper.params.first().expect("getSession has one param");
+    let shape = c_param.param_shape.as_ref().expect(
+        "getSession.c records a shape — finding fires for the cross-file \
+             writing helper, and the slice 2.5 invariant requires the shape \
+             to be non-empty when findings are non-empty",
+    );
+    // Root-level whole-value taint: Xtaint::Tainted + Shape::Bot.
+    // The conservative fallback records exactly this when the
+    // tainted expression doesn't fit a structural shape.
+    assert!(
+        matches!(shape.xtaint, Xtaint::Tainted(_)),
+        "expected Xtaint::Tainted at root after call-wrapped sink fallback, got {:?}",
+        shape.xtaint,
+    );
+    assert_eq!(
+        shape.shape,
+        Shape::Bot,
+        "expected Shape::Bot — the fallback is a conservative root-level recording, \
+         not an attempt to model the wrapper callee's return shape (which would \
+         require ADR 0007 slice 3.5's compute_call_return_shape, available only \
+         at variable bindings)",
+    );
+    // And `reaches_db_sink_unsanitized` (derived from the shape per
+    // slice 2.5) should agree with the emitted finding.
+    assert!(
+        c_param.reaches_db_sink_unsanitized,
+        "reaches_db_sink_unsanitized derived from param_shape must be true when \
+         the cross-file finding fires",
+    );
+}
+
 /// Symmetric counterpart to the param-side local-shape consumer:
 /// when a helper delegates through a chain helper and returns the
 /// local, `record_taint_in_return` reads the local's slice-3.5

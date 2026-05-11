@@ -1055,7 +1055,38 @@ impl<'idx> FlowVisitor<'idx> {
                 self.record_taint_in_arg(&b.left);
                 self.record_taint_in_arg(&b.right);
             }
-            _ => {}
+            // Conservative fallback: the expression doesn't fit any
+            // structural pattern we can map onto the offset lattice
+            // (most commonly a `CallExpression` whose result carries
+            // taint via callee-summary propagation, e.g.
+            // `getOptionalSession(mapRequestToContextForCookie(c))`).
+            // If `expr_is_tainted_readonly` still says it's tainted,
+            // record whole-value root taint so `param_shape_seen`
+            // stays consistent with the finding-emission path.
+            //
+            // This preserves the slice 2.5 invariant
+            // `reaches == !findings.is_empty()` — without it, a
+            // cross-file sink call that wraps the tainted argument
+            // through another call fires a finding but leaves the
+            // shape empty (witnessed on documenso's `getSession`
+            // helper during real-world OSS validation).
+            //
+            // The recording is intentionally root-taint (`&[]`), not
+            // an attempt to model the wrapped callee's return shape:
+            // precise return-shape composition happens at variable
+            // bindings via `compute_call_return_shape` (ADR 0007
+            // slice 3.5); at a sink site we don't have a binding to
+            // attach the substituted shape to, so the safe lower
+            // bound is "the parameter, at root, reaches the sink".
+            other => {
+                if self.expr_is_tainted_readonly(other) {
+                    insert_tainted_at_path(
+                        &mut self.param_shape_seen,
+                        &[],
+                        vec![TaintLabel::UserInput],
+                    );
+                }
+            }
         }
     }
 
