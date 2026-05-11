@@ -23,9 +23,17 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
+use crate::steps::sanitizers::{RedactorSanitizer, is_boolean_coercion, is_redactor_call};
+use crate::steps::{StepCtx, StepKind};
 use crate::{Rule, RuleContext, RuleMeta};
 
 const RULE_ID: &str = "flow/secret-to-response";
+
+/// Per-rule step registry (ADR 0008 slice 8.3c). The redactor
+/// sanitiser recogniser is the first variant; future slices add
+/// secret sources (env-var reads, hardcoded credentials) and
+/// response-body sinks here.
+const RULE_STEPS: &[StepKind] = &[StepKind::RedactorSanitizer(RedactorSanitizer)];
 
 /// Names treated as public-by-convention regardless of suffix. Backed by
 /// concrete prefix and exact-name lists so a `stryx.toml` override can
@@ -44,10 +52,9 @@ const PUBLIC_ENV_EXACT: &[&str] = &[
     "HOST",
 ];
 
-/// Names recognised as redaction sanitisers. Calling `redact(secret)`
-/// strips the Secret label even though the call result is still derived
-/// from the secret.
-const REDACT_FN_NAMES: &[&str] = &["redact", "mask", "fingerprint", "hash"];
+// `REDACT_FN_NAMES`, `is_redactor_call`, and `is_boolean_coercion`
+// moved to `crate::steps::sanitizers::redactor` (ADR 0008 slice 8.3c).
+// Imported above; per-call dispatch goes through `RULE_STEPS`.
 
 /// Bare keyword names that are too generic to taint a binding on their
 /// own — `const { key } = getPresignPostUrl(...)` is overwhelmingly an
@@ -438,7 +445,25 @@ impl<'r> SecretFlowVisitor<'r> {
 
             Expression::CallExpression(call) => {
                 // Sanitisers strip the Secret label.
-                if is_redactor_call(call) || is_boolean_coercion(call) {
+                // Slice 8.3c of ADR 0008 — registry-dispatched
+                // redactor check (covers `redact`/`mask`/`fingerprint`
+                // /`hash` calls plus `Boolean(secret)` coercion).
+                let ctx = StepCtx {
+                    file: &self.file,
+                    index: None,
+                    body_source_active: false,
+                };
+                let registry_redacts = RULE_STEPS.iter().any(|s| s.as_sanitizer(&ctx, call));
+                #[cfg(debug_assertions)]
+                {
+                    let legacy = is_redactor_call(call) || is_boolean_coercion(call);
+                    debug_assert_eq!(
+                        registry_redacts, legacy,
+                        "RedactorSanitizer registry diverged from legacy at call {:?}",
+                        call.span,
+                    );
+                }
+                if registry_redacts {
                     return None;
                 }
                 // Serialisers (`JSON.stringify(...)`) preserve the
@@ -564,28 +589,8 @@ fn is_response_constructor(callee: &Expression<'_>) -> bool {
     )
 }
 
-/// Recognises `redact(x)`, `mask(x)`, `fingerprint(x)`, `hash(x)`, or
-/// the same names on a member receiver (`utils.redact(x)`,
-/// `crypto.hash(x)`).
-fn is_redactor_call(call: &CallExpression<'_>) -> bool {
-    let name = match &call.callee {
-        Expression::Identifier(id) => id.name.as_str(),
-        Expression::StaticMemberExpression(m) => m.property.name.as_str(),
-        _ => return false,
-    };
-    REDACT_FN_NAMES.contains(&name)
-}
-
-/// `Boolean(secret)` and `!!secret` produce a derived non-secret bool.
-/// The double-bang case is handled in the future via UnaryExpression
-/// recognition; for v0.0.1 only the explicit constructor call is
-/// recognised.
-fn is_boolean_coercion(call: &CallExpression<'_>) -> bool {
-    matches!(
-        &call.callee,
-        Expression::Identifier(id) if id.name == "Boolean"
-    )
-}
+// `is_redactor_call` and `is_boolean_coercion` moved to
+// `crate::steps::sanitizers::redactor` (ADR 0008 slice 8.3c).
 
 /// True if `name` is a bare secret-keyword (e.g. `key`, `token`)
 /// rather than a compound identifier (`apiKey`, `accessToken`,

@@ -10,6 +10,8 @@
 
 pub mod auth;
 pub mod parser;
+pub mod redactor;
 
 pub use auth::{AUTH_HELPER_NAMES, AuthCheckSanitizer, call_invokes_auth_helper};
 pub use parser::{ParserSanitizer, is_sanitizer_call, second_arg_has_schema_key};
+pub use redactor::{REDACT_FN_NAMES, RedactorSanitizer, is_boolean_coercion, is_redactor_call};

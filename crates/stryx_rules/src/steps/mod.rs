@@ -118,6 +118,7 @@ pub enum StepKind {
     BodySource(sources::BodySource),
     ParserSanitizer(sanitizers::ParserSanitizer),
     AuthCheckSanitizer(sanitizers::AuthCheckSanitizer),
+    RedactorSanitizer(sanitizers::RedactorSanitizer),
 }
 
 impl StepKind {
@@ -126,6 +127,7 @@ impl StepKind {
             StepKind::BodySource(s) => s.as_source(ctx, expr),
             StepKind::ParserSanitizer(s) => s.as_source(ctx, expr),
             StepKind::AuthCheckSanitizer(s) => s.as_source(ctx, expr),
+            StepKind::RedactorSanitizer(s) => s.as_source(ctx, expr),
         }
     }
 
@@ -134,6 +136,7 @@ impl StepKind {
             StepKind::BodySource(s) => s.as_sink(ctx, call),
             StepKind::ParserSanitizer(s) => s.as_sink(ctx, call),
             StepKind::AuthCheckSanitizer(s) => s.as_sink(ctx, call),
+            StepKind::RedactorSanitizer(s) => s.as_sink(ctx, call),
         }
     }
 
@@ -142,6 +145,7 @@ impl StepKind {
             StepKind::BodySource(s) => s.as_sanitizer(ctx, call),
             StepKind::ParserSanitizer(s) => s.as_sanitizer(ctx, call),
             StepKind::AuthCheckSanitizer(s) => s.as_sanitizer(ctx, call),
+            StepKind::RedactorSanitizer(s) => s.as_sanitizer(ctx, call),
         }
     }
 
@@ -150,6 +154,7 @@ impl StepKind {
             StepKind::BodySource(s) => s.as_propagator(ctx, expr),
             StepKind::ParserSanitizer(s) => s.as_propagator(ctx, expr),
             StepKind::AuthCheckSanitizer(s) => s.as_propagator(ctx, expr),
+            StepKind::RedactorSanitizer(s) => s.as_propagator(ctx, expr),
         }
     }
 }
