@@ -123,6 +123,7 @@ pub enum StepKind {
     DrizzleWriteSink(sinks::DrizzleWriteSink),
     OrmWriteSink(sinks::OrmWriteSink),
     ResponseSink(sinks::ResponseSink),
+    StructuralPropagator(propagators::StructuralPropagator),
 }
 
 impl StepKind {
@@ -136,6 +137,7 @@ impl StepKind {
             StepKind::DrizzleWriteSink(s) => s.as_source(ctx, expr),
             StepKind::OrmWriteSink(s) => s.as_source(ctx, expr),
             StepKind::ResponseSink(s) => s.as_source(ctx, expr),
+            StepKind::StructuralPropagator(s) => s.as_source(ctx, expr),
         }
     }
 
@@ -149,6 +151,7 @@ impl StepKind {
             StepKind::DrizzleWriteSink(s) => s.as_sink(ctx, call),
             StepKind::OrmWriteSink(s) => s.as_sink(ctx, call),
             StepKind::ResponseSink(s) => s.as_sink(ctx, call),
+            StepKind::StructuralPropagator(s) => s.as_sink(ctx, call),
         }
     }
 
@@ -162,6 +165,7 @@ impl StepKind {
             StepKind::DrizzleWriteSink(s) => s.as_sanitizer(ctx, call),
             StepKind::OrmWriteSink(s) => s.as_sanitizer(ctx, call),
             StepKind::ResponseSink(s) => s.as_sanitizer(ctx, call),
+            StepKind::StructuralPropagator(s) => s.as_sanitizer(ctx, call),
         }
     }
 
@@ -175,6 +179,7 @@ impl StepKind {
             StepKind::DrizzleWriteSink(s) => s.as_propagator(ctx, expr),
             StepKind::OrmWriteSink(s) => s.as_propagator(ctx, expr),
             StepKind::ResponseSink(s) => s.as_propagator(ctx, expr),
+            StepKind::StructuralPropagator(s) => s.as_propagator(ctx, expr),
         }
     }
 }

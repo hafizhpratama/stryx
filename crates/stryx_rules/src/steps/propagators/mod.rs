@@ -1,7 +1,12 @@
-//! Propagator-step variants (ADR 0008).
+//! Propagator-step variants (ADR 0008 slice 8.5).
 //!
-//! Substrate-only at slice 8.1. Variants land at slice 8.5 — the
-//! bulk of [`crate::flows::unvalidated_body_to_db::FlowVisitor::expr_taint`]
-//! match arms (binary `+`, template literals, ternary, logical,
-//! object/array literals, spreads, casts) become propagator step
-//! variants here.
+//! Propagators classify the expression kinds whose taint flows
+//! structurally from their sub-expressions. Slice 8.5 lands one
+//! variant — [`StructuralPropagator`] — that publishes the closed
+//! set in a single place. Later slices may decompose into
+//! framework-specific propagators (e.g. for custom AST nodes) by
+//! adding new variants alongside this one.
+
+mod structural;
+
+pub use structural::{StructuralPropagator, is_structural_propagator};

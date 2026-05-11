@@ -33,6 +33,9 @@ use stryx_core::{Finding, Severity, Span};
 use stryx_index::{ClassInfo, FileSummary, ImportRef};
 use stryx_taint::{Cell, ExportedFunctionSummary, Offset, ParamFlow, Shape, TaintLabel, Xtaint};
 
+use crate::steps::propagators::StructuralPropagator;
+#[cfg(debug_assertions)]
+use crate::steps::propagators::is_structural_propagator;
 use crate::steps::sanitizers::{ParserSanitizer, is_sanitizer_call};
 use crate::steps::sinks::{
     DrizzleWriteSink, OrmWriteSink, PrismaWriteSink, is_db_write_sink, is_prisma_write_sink,
@@ -56,6 +59,12 @@ const RULE_STEPS: &[StepKind] = &[
     StepKind::PrismaWriteSink(PrismaWriteSink),
     StepKind::DrizzleWriteSink(DrizzleWriteSink),
     StepKind::OrmWriteSink(OrmWriteSink),
+    // Slice 8.5 — structural propagator (binary, template, ternary,
+    // object/array literal, member access, paren, cast, …). The
+    // visitor still owns recursion; this entry publishes the closed
+    // set of propagator shapes for the parallel-assertion in
+    // `expr_taint`.
+    StepKind::StructuralPropagator(StructuralPropagator),
 ];
 
 use super::auth_bypass_via_wrapper::contains_auth_helper_call;
@@ -324,6 +333,27 @@ impl<'idx> FlowVisitor<'idx> {
         let ctx = self.step_ctx();
         for step in RULE_STEPS {
             if let Some(spec) = step.as_sink(&ctx, call) {
+                return Some(spec);
+            }
+        }
+        None
+    }
+
+    /// Slice 8.5 of ADR 0008 — registry-dispatched propagator check.
+    /// Returns `Some(PropSpec)` iff any [`RULE_STEPS`] entry classifies
+    /// `expr` as a structural propagator (a shape whose taint flows
+    /// from its sub-expressions). The visitor's match arms still own
+    /// the actual recursion; this query is the parallel-assertion
+    /// counterpart that verifies the closed set of propagator shapes
+    /// hasn't drifted between the registry and the visitor.
+    #[cfg(debug_assertions)]
+    fn registry_as_propagator(
+        &self,
+        expr: &Expression<'_>,
+    ) -> Option<crate::steps::PropSpec> {
+        let ctx = self.step_ctx();
+        for step in RULE_STEPS {
+            if let Some(spec) = step.as_propagator(&ctx, expr) {
                 return Some(spec);
             }
         }
@@ -796,6 +826,25 @@ impl<'idx> FlowVisitor<'idx> {
     /// Returns true if this expression's *value* should be considered
     /// body-tainted.
     fn expr_taint(&mut self, expr: &Expression<'_>) -> bool {
+        // Slice 8.5 of ADR 0008 — parallel-assert the registry-side
+        // [`StructuralPropagator`] classifier agrees with the
+        // standalone `is_structural_propagator` predicate. The
+        // closed-enum dispatch over `StepKind` must produce the
+        // same boolean as the source-of-truth predicate; if a future
+        // edit wraps the step impl with extra context-dependent
+        // logic, this debug-asserts the divergence cheaply.
+        //
+        // Recursion behaviour itself lives in the match arms below
+        // — propagators are structural; the registry's role at this
+        // slice is to *publish* the closed set of propagating shapes
+        // for slice 8.6 (legacy deletion) and 8.7 (HOF) to consume.
+        #[cfg(debug_assertions)]
+        debug_assert_eq!(
+            self.registry_as_propagator(expr).is_some(),
+            is_structural_propagator(expr),
+            "StructuralPropagator registry diverged from is_structural_propagator at expr kind {:?}",
+            std::mem::discriminant(expr),
+        );
         match expr {
             Expression::Identifier(id) => self.is_tainted(id.name.as_str()),
 
