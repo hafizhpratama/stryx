@@ -15,7 +15,8 @@ use stryx_ast::{
     Visit,
     ast::{
         Argument, ArrowFunctionExpression, BindingPattern, CallExpression, ChainElement,
-        Expression, Function, ObjectPropertyKind, PropertyKey, VariableDeclarator,
+        Expression, Function, IfStatement, NewExpression, ObjectPropertyKind, PropertyKey,
+        Statement, UnaryOperator, VariableDeclarator,
     },
     to_span,
 };
@@ -64,6 +65,7 @@ impl Rule for SsrfViaFetch {
         let mut visitor = SsrfVisitor {
             file: ctx.file.path.clone(),
             scopes: vec![HashMap::new()],
+            url_inits: HashMap::new(),
             findings: Vec::new(),
         };
         for stmt in &ctx.file.program.body {
@@ -81,6 +83,14 @@ struct SsrfVisitor {
     /// 1 — `const { url } = body` propagates taint to `url` even
     /// though only the `.url` member is structurally tainted.
     scopes: Vec<HashMap<String, ()>>,
+    /// Slice 2 — URL-constructor lineage. Maps a binding name to
+    /// the original ident passed into `new URL(...)`. Populated at
+    /// var-decl sites of the shape `const parsed = new URL(input)`.
+    /// Consumed by `visit_if_statement` when an allow-list guard
+    /// (`if (!ALLOWED.has(parsed.host)) return ...`) proves the
+    /// underlying input has been validated against an allow-list.
+    /// Per-function — cleared in `enter_fn`.
+    url_inits: HashMap<String, String>,
     findings: Vec<Finding>,
 }
 
@@ -95,6 +105,10 @@ impl SsrfVisitor {
 
     fn enter_fn(&mut self) {
         self.scopes.push(HashMap::new());
+        // URL-constructor lineage is per-function. A binding declared
+        // inside one function should not leak its (parsed, input)
+        // mapping into the next function the visitor walks.
+        self.url_inits.clear();
     }
 
     fn exit_fn(&mut self) {
@@ -104,6 +118,14 @@ impl SsrfVisitor {
     fn taint(&mut self, name: String) {
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name, ());
+        }
+    }
+
+    fn untaint(&mut self, name: &str) {
+        for scope in self.scopes.iter_mut().rev() {
+            if scope.remove(name).is_some() {
+                return;
+            }
         }
     }
 
@@ -206,6 +228,17 @@ impl SsrfVisitor {
         let Some(init) = &declarator.init else {
             return;
         };
+        // Slice 2 — track `const parsed = new URL(INPUT)` lineage.
+        // Recorded unconditionally; the consumer at the IfStatement
+        // narrowing site only fires when the structural guard
+        // matches. INPUT can be either a bare ident or a member
+        // chain — we want to remember the bare-ident root so the
+        // guard can untaint the right binding.
+        if let Some(binding) = single_binding_name(&declarator.id)
+            && let Some(input_name) = extract_url_constructor_input(init)
+        {
+            self.url_inits.insert(binding, input_name);
+        }
         if self.expr_taint(init) {
             self.taint_pattern(&declarator.id);
         }
@@ -266,6 +299,28 @@ impl<'a> Visit<'a> for SsrfVisitor {
         // Continue walking to find nested sinks (e.g. `fetch(maybe(body))`).
         stryx_ast::walk::walk_call_expression(self, call);
     }
+
+    fn visit_if_statement(&mut self, is: &IfStatement<'a>) {
+        // Slice 2 — URL allow-list guard narrowing. Pattern:
+        //
+        //   const parsed = new URL(input);
+        //   if (!ALLOWED.has(parsed.host)) {
+        //     return ...;
+        //   }
+        //   // past here, `input` is allow-listed
+        //
+        // Mirrors the discriminated-union validator pattern
+        // (task #96) — track lineage at the var-decl site, consume
+        // it at the narrowing site, untaint past the early return.
+        if let Some(url_binding) = match_url_allow_list_guard(&is.test)
+            && let Some(input_name) = self.url_inits.get(&url_binding).cloned()
+            && branch_returns(&is.consequent)
+        {
+            self.untaint(&input_name);
+            self.untaint(&url_binding);
+        }
+        stryx_ast::walk::walk_if_statement(self, is);
+    }
 }
 
 fn argument_expr<'a, 'b>(arg: &'a Argument<'b>) -> Option<&'a Expression<'b>> {
@@ -296,3 +351,134 @@ fn collect_binding_names(pat: &BindingPattern<'_>, out: &mut Vec<String>) {
         BindingPattern::AssignmentPattern(a) => collect_binding_names(&a.left, out),
     }
 }
+
+fn single_binding_name(pat: &BindingPattern<'_>) -> Option<String> {
+    if let BindingPattern::BindingIdentifier(id) = pat {
+        Some(id.name.to_string())
+    } else {
+        None
+    }
+}
+
+/// Slice 2 — recognise `new URL(IDENT)` and return IDENT's name.
+/// Drills through trivial wrappers (`await`, parens, TS casts) on
+/// both the outer expression and the first argument so common
+/// shapes like `new URL(input as string)` resolve correctly.
+fn extract_url_constructor_input(expr: &Expression<'_>) -> Option<String> {
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            Expression::AwaitExpression(a) => cursor = &a.argument,
+            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
+            Expression::TSAsExpression(t) => cursor = &t.expression,
+            Expression::TSNonNullExpression(t) => cursor = &t.expression,
+            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
+            Expression::TSTypeAssertion(t) => cursor = &t.expression,
+            _ => break,
+        }
+    }
+    let Expression::NewExpression(new_expr) = cursor else {
+        return None;
+    };
+    if !is_url_callee(&new_expr.callee) {
+        return None;
+    }
+    let first_arg = new_expr.arguments.first().and_then(argument_expr)?;
+    extract_underlying_ident(first_arg)
+}
+
+/// True iff the callee of a `new` expression is the global `URL`
+/// constructor. Bare `URL` only — qualified shapes like
+/// `globalThis.URL` are uncommon enough to skip in slice 2.
+fn is_url_callee(callee: &Expression<'_>) -> bool {
+    matches!(callee, Expression::Identifier(id) if id.name == "URL")
+}
+
+/// Drill through trivial wrappers (parens, TS casts) and return
+/// the underlying bare-identifier name, or `None` if the expression
+/// is not a wrapped identifier.
+fn extract_underlying_ident(expr: &Expression<'_>) -> Option<String> {
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            Expression::Identifier(id) => return Some(id.name.to_string()),
+            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
+            Expression::TSAsExpression(t) => cursor = &t.expression,
+            Expression::TSNonNullExpression(t) => cursor = &t.expression,
+            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
+            Expression::TSTypeAssertion(t) => cursor = &t.expression,
+            _ => return None,
+        }
+    }
+}
+
+/// Slice 2 — match the canonical URL allow-list guard:
+///
+/// - `!ALLOWED.has(IDENT.host)`
+/// - `!ALLOWED.includes(IDENT.hostname)`
+/// - `!ALLOWED.includes(IDENT.origin)`
+///
+/// Returns IDENT's name on match. The guard is recognised
+/// negated-only (early-return on disallowed); positive-form guards
+/// would require tracking the consequent's narrowed branch instead
+/// of the post-If continuation.
+fn match_url_allow_list_guard(test: &Expression<'_>) -> Option<String> {
+    let Expression::UnaryExpression(unary) = test else {
+        return None;
+    };
+    if unary.operator != UnaryOperator::LogicalNot {
+        return None;
+    }
+    let mut cursor = &unary.argument;
+    while let Expression::ParenthesizedExpression(p) = cursor {
+        cursor = &p.expression;
+    }
+    let Expression::CallExpression(call) = cursor else {
+        return None;
+    };
+    // Callee must be a member access of the shape `X.has` or `X.includes`.
+    let Expression::StaticMemberExpression(callee) = &call.callee else {
+        return None;
+    };
+    if !matches!(callee.property.name.as_str(), "has" | "includes") {
+        return None;
+    }
+    // First argument must be `IDENT.host`/`IDENT.hostname`/`IDENT.origin`.
+    let arg = call.arguments.first().and_then(argument_expr)?;
+    let mut cursor = arg;
+    while let Expression::ParenthesizedExpression(p) = cursor {
+        cursor = &p.expression;
+    }
+    let Expression::StaticMemberExpression(m) = cursor else {
+        return None;
+    };
+    if !matches!(m.property.name.as_str(), "host" | "hostname" | "origin") {
+        return None;
+    }
+    let Expression::Identifier(id) = &m.object else {
+        return None;
+    };
+    Some(id.name.to_string())
+}
+
+/// True iff `branch` is guaranteed to leave the enclosing scope —
+/// a bare return/throw statement, or a block whose first statement
+/// is one. Mirrors `flow/unvalidated-body-to-db`'s `branch_returns`
+/// for the discriminated-union validator pattern.
+fn branch_returns(branch: &Statement<'_>) -> bool {
+    match branch {
+        Statement::ReturnStatement(_) | Statement::ThrowStatement(_) => true,
+        Statement::BlockStatement(bs) => bs
+            .body
+            .iter()
+            .any(|s| matches!(s, Statement::ReturnStatement(_) | Statement::ThrowStatement(_))),
+        _ => false,
+    }
+}
+
+// Re-export under a local module-private alias so the type is
+// load-bearing for the helpers above. `NewExpression` arrives via
+// the central `ast` import; this is just to silence the
+// unused-import lint when the new-construct path is the only user.
+#[allow(dead_code)]
+type _NewExprAlias<'a> = NewExpression<'a>;
