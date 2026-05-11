@@ -15,13 +15,13 @@ use stryx_ast::{
     Visit,
     ast::{
         Argument, ArrowFunctionExpression, BindingPattern, CallExpression, ChainElement,
-        Expression, Function, IfStatement, NewExpression, ObjectPropertyKind, PropertyKey,
-        Statement, UnaryOperator, VariableDeclarator,
+        Expression, Function, IfStatement, ObjectPropertyKind, PropertyKey, VariableDeclarator,
     },
     to_span,
 };
 use stryx_core::{Finding, Severity};
 
+use crate::steps::sanitizers::{branch_returns, extract_url_constructor_input, match_url_allow_list_guard};
 use crate::steps::sinks::{FetchSink, is_http_sink_call};
 use crate::steps::sources::BodySource;
 use crate::steps::{StepCtx, StepKind};
@@ -373,155 +373,6 @@ fn single_binding_name(pat: &BindingPattern<'_>) -> Option<String> {
     }
 }
 
-/// Slice 2 — recognise `new URL(IDENT)` and return IDENT's name.
-/// Drills through trivial wrappers (`await`, parens, TS casts) on
-/// both the outer expression and the first argument so common
-/// shapes like `new URL(input as string)` resolve correctly.
-fn extract_url_constructor_input(expr: &Expression<'_>) -> Option<String> {
-    let mut cursor = expr;
-    loop {
-        match cursor {
-            Expression::AwaitExpression(a) => cursor = &a.argument,
-            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
-            Expression::TSAsExpression(t) => cursor = &t.expression,
-            Expression::TSNonNullExpression(t) => cursor = &t.expression,
-            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
-            Expression::TSTypeAssertion(t) => cursor = &t.expression,
-            _ => break,
-        }
-    }
-    let Expression::NewExpression(new_expr) = cursor else {
-        return None;
-    };
-    if !is_url_callee(&new_expr.callee) {
-        return None;
-    }
-    let first_arg = new_expr.arguments.first().and_then(argument_expr)?;
-    extract_underlying_ident(first_arg)
-}
-
-/// True iff the callee of a `new` expression is the global `URL`
-/// constructor. Bare `URL` only — qualified shapes like
-/// `globalThis.URL` are uncommon enough to skip in slice 2.
-fn is_url_callee(callee: &Expression<'_>) -> bool {
-    matches!(callee, Expression::Identifier(id) if id.name == "URL")
-}
-
-/// Drill through trivial wrappers (parens, TS casts) and return
-/// the underlying bare-identifier name, or `None` if the expression
-/// is not a wrapped identifier.
-fn extract_underlying_ident(expr: &Expression<'_>) -> Option<String> {
-    let mut cursor = expr;
-    loop {
-        match cursor {
-            Expression::Identifier(id) => return Some(id.name.to_string()),
-            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
-            Expression::TSAsExpression(t) => cursor = &t.expression,
-            Expression::TSNonNullExpression(t) => cursor = &t.expression,
-            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
-            Expression::TSTypeAssertion(t) => cursor = &t.expression,
-            _ => return None,
-        }
-    }
-}
-
-/// Slice 2 / 3 — match the canonical URL allow-list guard. Returns
-/// the URL-binding's name on match. Recognised callee shapes
-/// (negated-only — early-return on disallowed):
-///
-/// - `!ALLOWED.has(IDENT.host)` — `Set.has` / `Map.has`
-/// - `!ALLOWED.includes(IDENT.hostname)` — `Array.includes`
-/// - `!ALLOWED.includes(IDENT.origin)`
-/// - `!validatorFn(IDENT.host)` where `validatorFn` is a bare
-///   identifier starting with `isAllowed` / `isValid` / `validate`
-///   / `verify` / `check` (slice 3 — validator-function form).
-///
-/// In all shapes, the call's first argument must be a static-member
-/// access of the form `IDENT.host` / `IDENT.hostname` /
-/// `IDENT.origin` — IDENT being the binding the visitor's
-/// `url_inits` map tracks back to the original URL input.
-///
-/// Positive-form guards (`if (ALLOWED.has(parsed.host)) { fetch }`)
-/// are deferred — they require tracking the consequent's narrowed
-/// branch instead of the post-If continuation.
-fn match_url_allow_list_guard(test: &Expression<'_>) -> Option<String> {
-    let Expression::UnaryExpression(unary) = test else {
-        return None;
-    };
-    if unary.operator != UnaryOperator::LogicalNot {
-        return None;
-    }
-    let mut cursor = &unary.argument;
-    while let Expression::ParenthesizedExpression(p) = cursor {
-        cursor = &p.expression;
-    }
-    let Expression::CallExpression(call) = cursor else {
-        return None;
-    };
-    // Callee shape — either `X.has` / `X.includes`, or a bare
-    // validator-named identifier (slice 3).
-    let callee_ok = match &call.callee {
-        Expression::StaticMemberExpression(callee) => {
-            matches!(callee.property.name.as_str(), "has" | "includes")
-        }
-        Expression::Identifier(id) => is_validator_callee_name(id.name.as_str()),
-        _ => false,
-    };
-    if !callee_ok {
-        return None;
-    }
-    // First argument must be `IDENT.host` / `IDENT.hostname` /
-    // `IDENT.origin` — the URL-binding's member access.
-    let arg = call.arguments.first().and_then(argument_expr)?;
-    let mut cursor = arg;
-    while let Expression::ParenthesizedExpression(p) = cursor {
-        cursor = &p.expression;
-    }
-    let Expression::StaticMemberExpression(m) = cursor else {
-        return None;
-    };
-    if !matches!(m.property.name.as_str(), "host" | "hostname" | "origin") {
-        return None;
-    }
-    let Expression::Identifier(id) = &m.object else {
-        return None;
-    };
-    Some(id.name.to_string())
-}
-
-/// Slice 3 — true iff `name` looks like a host-validator function
-/// (leading camelCase word from `isAllowed`/`isValid`/`validate`/
-/// `verify`/`check`). The boundary requires the next char to be
-/// ASCII-uppercase or end-of-name so `validating` doesn't match.
-fn is_validator_callee_name(name: &str) -> bool {
-    const PREFIXES: &[&str] = &["isAllowed", "isValid", "validate", "verify", "check"];
-    PREFIXES.iter().any(|prefix| {
-        if name.len() < prefix.len() {
-            return false;
-        }
-        let (head, tail) = name.split_at(prefix.len());
-        if !head.eq_ignore_ascii_case(prefix) {
-            return false;
-        }
-        tail.is_empty() || tail.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-    })
-}
-
-/// True iff `branch` is guaranteed to leave the enclosing scope —
-/// a bare return/throw statement, or a block whose first statement
-/// is one. Mirrors `flow/unvalidated-body-to-db`'s `branch_returns`
-/// for the discriminated-union validator pattern.
-fn branch_returns(branch: &Statement<'_>) -> bool {
-    match branch {
-        Statement::ReturnStatement(_) | Statement::ThrowStatement(_) => true,
-        Statement::BlockStatement(bs) => bs
-            .body
-            .iter()
-            .any(|s| matches!(s, Statement::ReturnStatement(_) | Statement::ThrowStatement(_))),
-        _ => false,
-    }
-}
-
 /// True iff `expr` is a template literal whose leading static quasi
 /// pins a URL scheme + host — `https://example.com/...` or
 /// `http://example.com/...`. In that shape, body-tainted
@@ -572,9 +423,3 @@ fn is_host_pinned_template(expr: &Expression<'_>) -> bool {
         .any(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
-// Re-export under a local module-private alias so the type is
-// load-bearing for the helpers above. `NewExpression` arrives via
-// the central `ast` import; this is just to silence the
-// unused-import lint when the new-construct path is the only user.
-#[allow(dead_code)]
-type _NewExprAlias<'a> = NewExpression<'a>;

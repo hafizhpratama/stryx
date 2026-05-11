@@ -19,13 +19,13 @@ use stryx_ast::{
     Visit,
     ast::{
         Argument, ArrowFunctionExpression, BindingPattern, CallExpression, ChainElement,
-        Expression, Function, IfStatement, ObjectPropertyKind, PropertyKey, Statement,
-        UnaryOperator, VariableDeclarator,
+        Expression, Function, IfStatement, ObjectPropertyKind, PropertyKey, VariableDeclarator,
     },
     to_span,
 };
 use stryx_core::{Finding, Severity};
 
+use crate::steps::sanitizers::{branch_returns, extract_url_constructor_input, match_url_allow_list_guard};
 use crate::steps::sinks::{RedirectSink, is_redirect_sink_call};
 use crate::steps::sources::BodySource;
 use crate::steps::{StepCtx, StepKind};
@@ -282,11 +282,10 @@ impl<'a> Visit<'a> for RedirectVisitor {
     }
 }
 
-// ── Local mirrors of `ssrf_via_fetch`'s allow-list helpers. ─────────
-// Both rules share the same URL allow-list sanitiser shape. The
-// helpers live here as local copies for now; extracting them into
-// a shared `steps/sanitizers/url_allowlist.rs` becomes worthwhile
-// at the third consumer (per the rule-of-three).
+// Allow-list sanitiser helpers (extract_url_constructor_input,
+// match_url_allow_list_guard, branch_returns) live in
+// `crate::steps::sanitizers::url_allowlist`. Shared with
+// `flow/ssrf-via-fetch`.
 
 fn argument_expr<'a, 'b>(arg: &'a Argument<'b>) -> Option<&'a Expression<'b>> {
     match arg {
@@ -322,109 +321,5 @@ fn single_binding_name(pat: &BindingPattern<'_>) -> Option<String> {
         Some(id.name.to_string())
     } else {
         None
-    }
-}
-
-fn extract_url_constructor_input(expr: &Expression<'_>) -> Option<String> {
-    let mut cursor = expr;
-    loop {
-        match cursor {
-            Expression::AwaitExpression(a) => cursor = &a.argument,
-            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
-            Expression::TSAsExpression(t) => cursor = &t.expression,
-            Expression::TSNonNullExpression(t) => cursor = &t.expression,
-            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
-            Expression::TSTypeAssertion(t) => cursor = &t.expression,
-            _ => break,
-        }
-    }
-    let Expression::NewExpression(new_expr) = cursor else {
-        return None;
-    };
-    if !matches!(&new_expr.callee, Expression::Identifier(id) if id.name == "URL") {
-        return None;
-    }
-    let first_arg = new_expr.arguments.first().and_then(argument_expr)?;
-    extract_underlying_ident(first_arg)
-}
-
-fn extract_underlying_ident(expr: &Expression<'_>) -> Option<String> {
-    let mut cursor = expr;
-    loop {
-        match cursor {
-            Expression::Identifier(id) => return Some(id.name.to_string()),
-            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
-            Expression::TSAsExpression(t) => cursor = &t.expression,
-            Expression::TSNonNullExpression(t) => cursor = &t.expression,
-            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
-            Expression::TSTypeAssertion(t) => cursor = &t.expression,
-            _ => return None,
-        }
-    }
-}
-
-fn match_url_allow_list_guard(test: &Expression<'_>) -> Option<String> {
-    let Expression::UnaryExpression(unary) = test else {
-        return None;
-    };
-    if unary.operator != UnaryOperator::LogicalNot {
-        return None;
-    }
-    let mut cursor = &unary.argument;
-    while let Expression::ParenthesizedExpression(p) = cursor {
-        cursor = &p.expression;
-    }
-    let Expression::CallExpression(call) = cursor else {
-        return None;
-    };
-    let callee_ok = match &call.callee {
-        Expression::StaticMemberExpression(callee) => {
-            matches!(callee.property.name.as_str(), "has" | "includes")
-        }
-        Expression::Identifier(id) => is_validator_callee_name(id.name.as_str()),
-        _ => false,
-    };
-    if !callee_ok {
-        return None;
-    }
-    let arg = call.arguments.first().and_then(argument_expr)?;
-    let mut cursor = arg;
-    while let Expression::ParenthesizedExpression(p) = cursor {
-        cursor = &p.expression;
-    }
-    let Expression::StaticMemberExpression(m) = cursor else {
-        return None;
-    };
-    if !matches!(m.property.name.as_str(), "host" | "hostname" | "origin") {
-        return None;
-    }
-    let Expression::Identifier(id) = &m.object else {
-        return None;
-    };
-    Some(id.name.to_string())
-}
-
-fn is_validator_callee_name(name: &str) -> bool {
-    const PREFIXES: &[&str] = &["isAllowed", "isValid", "validate", "verify", "check"];
-    PREFIXES.iter().any(|prefix| {
-        if name.len() < prefix.len() {
-            return false;
-        }
-        let (head, tail) = name.split_at(prefix.len());
-        if !head.eq_ignore_ascii_case(prefix) {
-            return false;
-        }
-        tail.is_empty() || tail.chars().next().is_some_and(|c| c.is_ascii_uppercase())
-    })
-}
-
-fn branch_returns(branch: &Statement<'_>) -> bool {
-    match branch {
-        Statement::ReturnStatement(_) | Statement::ThrowStatement(_) => true,
-        Statement::BlockStatement(bs) => bs
-            .body
-            .iter()
-            .any(|s| matches!(s, Statement::ReturnStatement(_) | Statement::ThrowStatement(_))),
-        _ => false,
     }
 }
