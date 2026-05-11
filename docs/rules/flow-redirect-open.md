@@ -9,7 +9,7 @@
 | Rule ID | `flow/redirect-open` |
 | Status | experimental |
 | Severity | high |
-| Frameworks | nextjs >= 13, express, fastify (single-file slice 1) |
+| Frameworks | nextjs >= 13, express, fastify (single-file + cross-file slice 2) |
 | Default | enabled |
 | Added in | v0.1.0 |
 
@@ -85,7 +85,7 @@ export async function POST(req: NextRequest) {
 | Source labels | `UserInput` (body / query / headers) |
 | Sink ids | `http.redirect` (Next.js `NextResponse.redirect`, `next/navigation` `redirect`, Express `res.redirect`, `Response.redirect`) |
 | Sanitizers recognized | URL-allowlist check (`Set.has` / `Array.includes` on `parsed.host` etc., validator-function form) — shared with `flow/ssrf-via-fetch` |
-| Scope | `SingleFile` (slice 1); `CrossFile` (slice 2) |
+| Scope | `SingleFile` + `CrossFile` |
 
 ## Detection logic
 
@@ -101,9 +101,13 @@ export async function POST(req: NextRequest) {
    `flow/ssrf-via-fetch`: `Set.has` / `Array.includes` on `.host`
    / `.hostname` / `.origin`, validator-function form), emit a
    Finding at the sink span.
-
-Slice 1 covers same-file flows. Slice 2 extends to cross-file via
-the existing summary index.
+4. **Cross-file (slice 2).** The extract pass simulates each
+   exported function with one parameter pre-tainted and records
+   `ParamFlow::reaches_redirect_sink_unsanitized` when the
+   simulation observes a redirect sink. The run pass walks call
+   sites; when a tainted argument flows into a reach-flagged
+   parameter slot of a callee resolved via the project index, a
+   High-severity finding is emitted at the call site.
 
 ## Known false positive zones
 
@@ -156,3 +160,4 @@ severity = "high"
 | Version | Change |
 |---|---|
 | v0.1.0 | Initial single-file slice — body source → `NextResponse.redirect` / `redirect` / `res.redirect` / `Response.redirect` sink. |
+| (unreleased) | Slice 2 — cross-file taint via `ExportedFunctionSummary::reaches_redirect_sink_unsanitized`. Route handler → imported helper → redirect call chains now fire at the call site. URL allow-list guard inside the helper suppresses the call-site finding. |

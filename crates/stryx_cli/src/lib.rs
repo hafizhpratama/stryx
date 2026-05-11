@@ -384,6 +384,13 @@ struct ConvergenceSignal {
     /// can taint to fetch without tainting to DB, so flipping this
     /// flag across rounds is a separate convergence event.
     fetch_sink_params: usize,
+    /// Slice 2 of `flow/redirect-open` — params that reach a
+    /// redirect sink (NextResponse.redirect / bare redirect /
+    /// res.redirect / Response.redirect) as the target URL.
+    /// Independent axis from `sink_params` and `fetch_sink_params`
+    /// — a helper can taint to redirect alone (e.g. an OAuth
+    /// callback redirector) without touching a DB or fetch sink.
+    redirect_sink_params: usize,
     /// Per ADR 0007 slice 3.1 — total Tainted leaves across every
     /// summarised param's `return_shape` tree. Mirrors
     /// `tainted_leaf_total` but for the return side. Required so the
@@ -401,8 +408,9 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
     let mut tainted_leaf_total = 0;
     let mut return_leaf_total = 0;
     let mut fetch_sink_params = 0;
+    let mut redirect_sink_params = 0;
     for file in index.files() {
-        for export in file.exports.values() {
+        for export in file.exports.values().chain(file.locals.values()) {
             for param in &export.params {
                 if param.reaches_db_sink_unsanitized {
                     sink_params += 1;
@@ -410,25 +418,8 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
                 if param.reaches_fetch_sink_unsanitized {
                     fetch_sink_params += 1;
                 }
-                if param.propagates_to_return {
-                    propagating_params += 1;
-                }
-                tainted_offset_total += param.tainted_offsets.len();
-                if let Some(shape) = &param.param_shape {
-                    tainted_leaf_total += shape.count_tainted_leaves();
-                }
-                if let Some(shape) = &param.return_shape {
-                    return_leaf_total += shape.count_tainted_leaves();
-                }
-            }
-        }
-        for local in file.locals.values() {
-            for param in &local.params {
-                if param.reaches_db_sink_unsanitized {
-                    sink_params += 1;
-                }
-                if param.reaches_fetch_sink_unsanitized {
-                    fetch_sink_params += 1;
+                if param.reaches_redirect_sink_unsanitized {
+                    redirect_sink_params += 1;
                 }
                 if param.propagates_to_return {
                     propagating_params += 1;
@@ -452,6 +443,7 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
         tainted_leaf_total,
         return_leaf_total,
         fetch_sink_params,
+        redirect_sink_params,
     }
 }
 
@@ -556,6 +548,24 @@ mod tests {
             ..Default::default()
         }));
         assert_ne!(zero, one, "fetch_sink_params axis must affect the signal");
+    }
+
+    /// Slice 2 of `flow/redirect-open` added
+    /// `reaches_redirect_sink_unsanitized`. Same ADR 0004 contract
+    /// as the fetch flag — the convergence tuple must reflect it
+    /// or chains through helpers that redirect (without DB or
+    /// fetch sinks) will silently under-detect.
+    #[test]
+    fn convergence_signal_reflects_reaches_redirect_sink_unsanitized() {
+        let zero = signal_for(fixture_with_param(ParamFlow::default()));
+        let one = signal_for(fixture_with_param(ParamFlow {
+            reaches_redirect_sink_unsanitized: true,
+            ..Default::default()
+        }));
+        assert_ne!(
+            zero, one,
+            "redirect_sink_params axis must affect the signal"
+        );
     }
 
     /// Slice 2 of ADR 0006 added `tainted_offsets`. Per ADR 0004, it

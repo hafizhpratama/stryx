@@ -86,6 +86,7 @@ fn scan_dir(dir: &Path) -> Vec<Finding> {
             .map(|p| {
                 usize::from(p.reaches_db_sink_unsanitized)
                     + usize::from(p.reaches_fetch_sink_unsanitized)
+                    + usize::from(p.reaches_redirect_sink_unsanitized)
             })
             .sum();
         index = next;
@@ -163,6 +164,7 @@ fn extract_index(dir: &Path) -> ProjectIndex {
             .map(|p| {
                 usize::from(p.reaches_db_sink_unsanitized)
                     + usize::from(p.reaches_fetch_sink_unsanitized)
+                    + usize::from(p.reaches_redirect_sink_unsanitized)
             })
             .sum();
         index = next;
@@ -1549,6 +1551,55 @@ fn redirect_open_good_fixture_silent() {
         findings.is_empty(),
         "good.ts has only hardcoded/env URLs and allow-list-protected redirects — expected zero redirect-open findings, got {:?}",
         findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn redirect_open_cross_file_bad_fires() {
+    // Slice 2 — the redirect sink lives in `./lib.ts`. The extract
+    // pass must summarise `loginRedirect(target)` with
+    // `reaches_redirect_sink_unsanitized = true` on param 0, and
+    // the run pass must emit a finding on `route.ts` at the call
+    // site.
+    let dir = fixtures_root().join("flow-redirect-open/cross-file-bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/redirect-open")
+        .collect();
+    let route_path = dir.join("route.ts");
+    let cross_file_finding = findings
+        .iter()
+        .find(|f| f.span.file == route_path && f.message.contains("loginRedirect"));
+    assert!(
+        cross_file_finding.is_some(),
+        "expected a cross-file open-redirect finding on route.ts referencing loginRedirect; got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(cross_file_finding.unwrap().severity, Severity::High);
+}
+
+#[test]
+fn redirect_open_cross_file_good_silent() {
+    // Same call shape as cross-file-bad, but the helper validates
+    // the host against an allow-list before redirecting. The
+    // simulator must observe the early-return guard and drop the
+    // `reaches_redirect_sink_unsanitized` flag, leaving the route's
+    // call site silent.
+    let dir = fixtures_root().join("flow-redirect-open/cross-file-good");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/redirect-open")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "expected zero redirect-open findings on cross-file-good/, got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
     );
 }
 

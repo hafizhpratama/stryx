@@ -41,6 +41,16 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - `ConvergenceSignal::fetch_sink_params` per ADR 0004's contract
   (every monotone axis that can change across iterations must be
   in the convergence tuple).
+- `flow/ssrf-via-fetch` three-level chain convergence — route →
+  service → client → fetch. The per-param simulator now consumes
+  the previous round's index, so cross-file calls already known
+  to sink contribute to the chain's sink hit. Mirrors how
+  `flow/unvalidated-body-to-db` converges multi-hop.
+- `flow/redirect-open` slice 2 — symmetric cross-file taint
+  detection for open-redirect chains. `ParamFlow::reaches_redirect_sink_unsanitized`
+  + `taints_through_redirect_param` + `ConvergenceSignal::redirect_sink_params`.
+  Same simulation pattern as SSRF; URL allow-list guards inside
+  the callee suppress the call-site finding.
 
 ## [0.1.0] — 2026-05-11
 

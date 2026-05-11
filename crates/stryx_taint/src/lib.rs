@@ -540,6 +540,15 @@ pub struct ParamFlow {
     /// this flag leave it `false` (serde default).
     #[serde(default)]
     pub reaches_fetch_sink_unsanitized: bool,
+    /// True iff there is a control-flow path from this parameter to a
+    /// redirect call (`NextResponse.redirect`, bare `redirect`,
+    /// `res.redirect`, `Response.redirect`) used as the target URL,
+    /// with no recognised URL allow-list sanitiser along the way.
+    /// Populated by `flow/redirect-open`'s slice 2 extract pass.
+    /// Pre-slice-2 cache entries and rules that don't write to this
+    /// flag leave it `false` (serde default).
+    #[serde(default)]
+    pub reaches_redirect_sink_unsanitized: bool,
     /// Which field/index offsets of this parameter flow to a sink, if
     /// the rule populating the summary records that detail. Empty list
     /// means either "no taint reaches a sink" or "the rule has not yet
@@ -639,6 +648,15 @@ impl ExportedFunctionSummary {
             .is_some_and(|p| p.reaches_fetch_sink_unsanitized)
     }
 
+    /// True if calling this function with a tainted value at parameter
+    /// position `idx` would result in that taint reaching a redirect
+    /// call as the target URL — i.e. a cross-file open redirect.
+    pub fn taints_through_redirect_param(&self, idx: usize) -> bool {
+        self.params
+            .get(idx)
+            .is_some_and(|p| p.reaches_redirect_sink_unsanitized)
+    }
+
     /// Merge per-rule sink flags from `other` into `self`. Used when
     /// multiple rules' extract passes produce summaries for the same
     /// export name — each rule populates its own `reaches_*_sink_*`
@@ -650,8 +668,9 @@ impl ExportedFunctionSummary {
     /// `propagates_to_return`, `sink_span`) are left at their existing
     /// values — by convention the rule that produced the more
     /// sophisticated shape is the one whose summary was inserted
-    /// first, and slice 2 of SSRF deliberately doesn't populate
-    /// shapes (the simpler simulator only records reachability).
+    /// first, and slice 2 of SSRF/redirect-open deliberately doesn't
+    /// populate shapes (the simpler simulator only records
+    /// reachability).
     pub fn merge_per_rule_flags(&mut self, other: &ExportedFunctionSummary) {
         self.contains_auth_check |= other.contains_auth_check;
         self.validates_request_body |= other.validates_request_body;
@@ -659,6 +678,7 @@ impl ExportedFunctionSummary {
             if let Some(p) = self.params.get_mut(i) {
                 p.reaches_db_sink_unsanitized |= other_p.reaches_db_sink_unsanitized;
                 p.reaches_fetch_sink_unsanitized |= other_p.reaches_fetch_sink_unsanitized;
+                p.reaches_redirect_sink_unsanitized |= other_p.reaches_redirect_sink_unsanitized;
             }
         }
     }

@@ -2717,11 +2717,13 @@ fn build_summary(
         params_out.push(ParamFlow {
             name: pname.clone(),
             reaches_db_sink_unsanitized: reaches,
-            // The DB rule's simulation doesn't observe fetch sinks
-            // — that's `flow/ssrf-via-fetch`'s job. Leave the flag
-            // at the default; cross-file merging on collision unions
-            // it with the SSRF rule's contribution.
+            // The DB rule's simulation doesn't observe fetch or
+            // redirect sinks — those belong to `flow/ssrf-via-fetch`
+            // and `flow/redirect-open`. Leave both flags at default;
+            // cross-file merging on collision unions them with the
+            // peer rule's contribution.
             reaches_fetch_sink_unsanitized: false,
+            reaches_redirect_sink_unsanitized: false,
             propagates_to_return,
             sink_span,
             tainted_offsets,

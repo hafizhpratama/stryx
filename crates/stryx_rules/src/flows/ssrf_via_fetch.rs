@@ -631,33 +631,33 @@ fn simulate_initialiser(
     }
 }
 
-fn simulate_function<'idx>(
+fn simulate_function(
     file: &Path,
     name: &str,
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: Option<&FunctionBody<'_>>,
-    index: Option<&'idx stryx_index::ProjectIndex>,
+    index: Option<&stryx_index::ProjectIndex>,
 ) -> Option<ExportedFunctionSummary> {
     let body_stmts = body.map(|b| b.statements.as_slice()).unwrap_or(&[]);
     Some(build_summary(file, name, params, body_stmts, index))
 }
 
-fn simulate_arrow<'idx>(
+fn simulate_arrow(
     file: &Path,
     name: &str,
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: &FunctionBody<'_>,
-    index: Option<&'idx stryx_index::ProjectIndex>,
+    index: Option<&stryx_index::ProjectIndex>,
 ) -> ExportedFunctionSummary {
     build_summary(file, name, params, &body.statements, index)
 }
 
-fn build_summary<'idx>(
+fn build_summary(
     file: &Path,
     name: &str,
     params: &stryx_ast::ast::FormalParameters<'_>,
     body: &[Statement<'_>],
-    index: Option<&'idx stryx_index::ProjectIndex>,
+    index: Option<&stryx_index::ProjectIndex>,
 ) -> ExportedFunctionSummary {
     let param_names: Vec<String> = params
         .items
