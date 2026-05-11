@@ -1352,3 +1352,38 @@ fn unvalidated_body_to_db_good_fixture_silent() {
         flow_findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
     );
 }
+
+#[test]
+fn ssrf_via_fetch_bad_fixture_fires() {
+    let path = fixtures_root().join("flow-ssrf-via-fetch/bad.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/ssrf-via-fetch")
+        .collect();
+    let messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(
+        findings.len(),
+        4,
+        "bad.ts has 4 SSRF cases (fetch, axios.get, got, template-concat); got {}: {:?}",
+        findings.len(),
+        messages,
+    );
+    for f in &findings {
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(f.span.file, path);
+    }
+}
+
+#[test]
+fn ssrf_via_fetch_good_fixture_silent() {
+    let path = fixtures_root().join("flow-ssrf-via-fetch/good.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/ssrf-via-fetch")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "good.ts has only hardcoded/env URLs — expected zero ssrf findings, got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}

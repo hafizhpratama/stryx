@@ -7,10 +7,12 @@
 //! `flow/secret-to-response`).
 
 pub mod db;
+pub mod http;
 pub mod response;
 
 pub use db::{
     DrizzleWriteSink, OrmWriteSink, PrismaWriteSink, is_db_write_sink, is_drizzle_write_sink,
     is_orm_write_sink, is_prisma_write_sink,
 };
+pub use http::{FetchSink, is_http_sink_call};
 pub use response::{ResponseSink, is_response_constructor, response_sink_label};

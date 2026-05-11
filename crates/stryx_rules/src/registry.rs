@@ -30,5 +30,6 @@ pub fn builtin_rules() -> RuleRegistry {
     reg.register(Arc::new(flows::UnvalidatedBodyToDb::new()));
     reg.register(Arc::new(flows::SecretToResponse::new()));
     reg.register(Arc::new(flows::AuthBypassViaWrapper::new()));
+    reg.register(Arc::new(flows::SsrfViaFetch::new()));
     reg
 }
