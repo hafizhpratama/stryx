@@ -71,7 +71,13 @@ severity threshold are emitted, so it works as a CI gate.
 
 ## What Stryx catches
 
-Three v0.1 rules demonstrating cross-file taint analysis:
+Eight rules in the registry today — three stable cross-file flows,
+two cross-file flows promoted from experimental, two new
+experimental flows for the AI-coding-tool audience, and one
+single-file generic. See [`docs/rules/`](docs/rules/) for the full
+contracts.
+
+**Stable (v0.1):**
 
 - **`flow/unvalidated-body-to-db`** — request body flows to a database
   write without zod, valibot, ajv, joi, or yup along the path, even
@@ -82,9 +88,28 @@ Three v0.1 rules demonstrating cross-file taint analysis:
 - **`flow/secret-to-response`** — a `process.env.X` value (or a
   hardcoded credential-shaped string) reaches a response body without
   redaction.
+- **`generic/hardcoded-secret`** — credential-shaped strings inline
+  in source.
 
-Phase 2 adds single-file table-stakes rules and additional flow rules.
-See [`docs/rules/`](docs/rules/) for the full catalog.
+**Experimental (cross-file, slice 2 unreleased):**
+
+- **`flow/ssrf-via-fetch`** — body taint reaches `fetch` /
+  `axios.<method>` / `got` as the URL, route → helper → sink
+  chains included, URL-allow-list guards recognised.
+- **`flow/redirect-open`** — same as SSRF but for redirect sinks
+  (`NextResponse.redirect`, `next/navigation` `redirect`,
+  `res.redirect`, `Response.redirect`).
+
+**Experimental (single-file, unreleased):**
+
+- **`flow/path-traversal`** — body taint reaches `fs.<method>` /
+  `fsPromises.<method>` as the path argument.
+- **`flow/prompt-injection`** — body taint reaches an LLM call's
+  prompt content (`openai.chat.completions.create`,
+  `openai.responses.create`, `anthropic.messages.create`).
+- **`flow/xss-via-dangerously-set-inner-html`** — body taint reaches
+  React's `dangerouslySetInnerHTML={{ __html: ... }}` JSX attribute
+  without DOMPurify / sanitize-html wrapping.
 
 ## How Stryx works
 
@@ -122,21 +147,27 @@ Phase 2 plan.
 
 - ✅ Architecture, ADRs, rule specs
 - ✅ Foundational crates `stryx_index` and `stryx_taint`
-- ✅ v0.1 flow rules:
+- ✅ v0.1 flow rules (stable):
   - `flow/unvalidated-body-to-db` (cross-file)
   - `flow/auth-bypass-via-wrapper` (cross-file)
   - `flow/secret-to-response` (single-file)
-  - `flow/ssrf-via-fetch` (single-file, experimental)
-  - `flow/redirect-open` (single-file, experimental)
-  - `flow/path-traversal` (single-file, experimental)
+- ✅ Cross-file slice 2 for the v0.1 experimental rules (unreleased):
+  - `flow/ssrf-via-fetch` (cross-file, with three-level chain
+    convergence and URL-allow-list sanitisers)
+  - `flow/redirect-open` (cross-file)
+- ✅ Experimental v0.2 flow rules (unreleased):
+  - `flow/path-traversal` (single-file)
+  - `flow/prompt-injection` (single-file, OpenAI + Anthropic)
+  - `flow/xss-via-dangerously-set-inner-html` (single-file,
+    DOMPurify + sanitize-html sanitisers)
 - ✅ CLI binary (`cargo install --path crates/stryx_cli`)
 - ✅ Pre-built binaries on [GitHub Releases](https://github.com/hafizhpratama/stryx/releases)
 - 🚧 GitHub Action
 - 🚧 napi-rs npm distribution
 - 🚧 Homebrew formula
-- 📋 Cross-file slice 2 for the three experimental rules (Phase 2)
-- 📋 Additional rules: prompt-injection, XSS, command-injection,
-  SQL-injection (Phase 2)
+- 📋 `flow/path-traversal` slice 2 (deferred — 0 OSS TPs in
+  Phase 1 sample)
+- 📋 Additional rules: command-injection, SQL-injection (Phase 2)
 - 📋 Hono / Express support via source/sink adapters (Phase 3)
 - 📋 Type-aware analysis, custom taint configs (Phase 4)
 
