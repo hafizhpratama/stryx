@@ -7,6 +7,7 @@
 //! `flow/secret-to-response`).
 
 pub mod db;
+pub mod exec;
 pub mod fs;
 pub mod http;
 pub mod llm;
@@ -18,6 +19,7 @@ pub use db::{
     DrizzleWriteSink, OrmWriteSink, PrismaWriteSink, is_db_write_sink, is_drizzle_write_sink,
     is_orm_write_sink, is_prisma_write_sink,
 };
+pub use exec::{ExecSink, is_exec_sink_call};
 pub use fs::{FsSink, is_fs_sink_call};
 pub use http::{FetchSink, is_http_sink_call};
 pub use llm::{LlmPromptSink, is_llm_prompt_sink_call};

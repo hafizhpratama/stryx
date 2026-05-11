@@ -98,6 +98,20 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   Critical (OWASP A03, CWE-89). ADR 0011 Track B candidate #4.
 - `SqlSink` step variant in `steps::sinks::sql`; wired through
   `StepKind` (16 variants × 6 trait methods = 96 dispatch sites).
+- `flow/command-injection-via-exec` slice 1 — new flow rule
+  catching body-tainted values reaching Node.js `child_process`
+  APIs (`exec` / `execSync` / `execFile` / `execFileSync` /
+  `spawn` / `spawnSync`). Two callee shapes recognised:
+  bare-ident (after `import { exec } from "child_process"`) and
+  member calls on conventional namespace receivers (`cp`,
+  `childProcess`, `child_process`). For shell-interpreted
+  variants (`exec` / `execSync`) the entire first argument is the
+  sink; for `execFile` / `spawn` the first argument is the binary
+  path — body-controlled binary paths still permit arbitrary
+  on-disk binary execution. Severity Critical (OWASP A03,
+  CWE-78). ADR 0011 Track B candidate #3.
+- `ExecSink` step variant in `steps::sinks::exec`; wired through
+  `StepKind` — 17 variants × 6 trait methods = 102 dispatch sites.
 
 ## [0.1.0] — 2026-05-11
 

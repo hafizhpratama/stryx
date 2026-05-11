@@ -57,3 +57,7 @@ harness = false
 [[bench]]
 name    = "sql_injection"
 harness = false
+
+[[bench]]
+name    = "command_injection_via_exec"
+harness = false

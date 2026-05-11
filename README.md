@@ -71,11 +71,11 @@ severity threshold are emitted, so it works as a CI gate.
 
 ## What Stryx catches
 
-Eight rules in the registry today — three stable cross-file flows,
-two cross-file flows promoted from experimental, two new
-experimental flows for the AI-coding-tool audience, and one
-single-file generic. See [`docs/rules/`](docs/rules/) for the full
-contracts.
+Ten rules in the registry today — three stable cross-file flows,
+two cross-file flows promoted from experimental, four new
+experimental flows for the AI-coding-tool audience and the
+critical-severity injection classes, and one single-file generic.
+See [`docs/rules/`](docs/rules/) for the full contracts.
 
 **Stable (v0.1):**
 
@@ -110,6 +110,12 @@ contracts.
 - **`flow/xss-via-dangerously-set-inner-html`** — body taint reaches
   React's `dangerouslySetInnerHTML={{ __html: ... }}` JSX attribute
   without DOMPurify / sanitize-html wrapping.
+- **`flow/sql-injection`** — body taint reaches a raw-SQL escape
+  hatch (Prisma `$queryRawUnsafe` / `$executeRawUnsafe`, Drizzle
+  `sql.raw`, node-postgres / mysql2 `<conn>.query`). Critical.
+- **`flow/command-injection-via-exec`** — body taint reaches
+  Node.js `child_process` `exec` / `execSync` / `execFile` /
+  `execFileSync` / `spawn` / `spawnSync`. Critical.
 
 ## How Stryx works
 
@@ -160,6 +166,13 @@ Phase 2 plan.
   - `flow/prompt-injection` (single-file, OpenAI + Anthropic)
   - `flow/xss-via-dangerously-set-inner-html` (single-file,
     DOMPurify + sanitize-html sanitisers)
+  - `flow/sql-injection` (single-file, Critical — Prisma
+    `$queryRawUnsafe` / Drizzle `sql.raw` / node-postgres
+    raw query)
+  - `flow/command-injection-via-exec` (single-file, Critical —
+    Node.js `child_process` exec / spawn / execFile)
+- ✅ App Router `searchParams.X` recognised as a body source
+  (lifts every body-flow rule's coverage)
 - ✅ CLI binary (`cargo install --path crates/stryx_cli`)
 - ✅ Pre-built binaries on [GitHub Releases](https://github.com/hafizhpratama/stryx/releases)
 - 🚧 GitHub Action
@@ -167,7 +180,8 @@ Phase 2 plan.
 - 🚧 Homebrew formula
 - 📋 `flow/path-traversal` slice 2 (deferred — 0 OSS TPs in
   Phase 1 sample)
-- 📋 Additional rules: command-injection, SQL-injection (Phase 2)
+- 📋 v0.2 release tag (10 rules + new sources, all on main but
+  not yet bundled)
 - 📋 Hono / Express support via source/sink adapters (Phase 3)
 - 📋 Type-aware analysis, custom taint configs (Phase 4)
 

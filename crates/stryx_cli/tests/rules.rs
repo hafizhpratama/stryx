@@ -1695,6 +1695,41 @@ fn xss_via_dangerously_set_inner_html_bad_fixture_fires() {
 }
 
 #[test]
+fn command_injection_via_exec_bad_fixture_fires() {
+    let path = fixtures_root().join("flow-command-injection-via-exec/bad.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/command-injection-via-exec")
+        .collect();
+    let messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(
+        findings.len(),
+        6,
+        "bad.ts has 6 command-injection cases (exec template, execSync template, execFile binary, spawn binary, cp.exec, exec with searchParams binding); got {}: {:?}",
+        findings.len(),
+        messages,
+    );
+    for f in &findings {
+        assert_eq!(f.severity, Severity::Critical);
+        assert_eq!(f.span.file, path);
+    }
+}
+
+#[test]
+fn command_injection_via_exec_good_fixture_silent() {
+    let path = fixtures_root().join("flow-command-injection-via-exec/good.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/command-injection-via-exec")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "good.ts covers hardcoded / env / execFile-with-literal-binary — expected zero command-injection findings, got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn sql_injection_bad_fixture_fires() {
     let path = fixtures_root().join("flow-sql-injection/bad.ts");
     let findings: Vec<_> = scan_file(&path)

@@ -48,6 +48,7 @@ What actually shipped (counting commits through `fc908ec`):
 | `flow/prompt-injection` | experimental (v0.2) | Single-file | (no public-repo data yet; AI-coding-tool audience match per ADR 0011 Track B) |
 | `flow/xss-via-dangerously-set-inner-html` | experimental (v0.2) | Single-file | (no public-repo data yet; React/Next.js audience match per ADR 0011 Track B) |
 | `flow/sql-injection` | experimental (v0.2) | Single-file | (no public-repo data yet; raw-SQL escape-hatch coverage that the typed-prisma rule doesn't reach) |
+| `flow/command-injection-via-exec` | experimental (v0.2) | Single-file | (no public-repo data yet; covers Node.js `child_process` shell + binary-path injection) |
 | `generic/hardcoded-secret` | stable | Single-file | (live in registry) |
 
 **Real-world validation arc:**
@@ -139,7 +140,10 @@ frequency:
 
 3. `flow/command-injection-via-exec` — body → `child_process.exec`
    / `execSync` / `spawn`. Less common in serverless Next.js but
-   real in self-hosted Node services.
+   real in self-hosted Node services. ✅ **shipped** in v0.2 —
+   `ExecSink` step variant + rule recognises six method names
+   across bare-ident (destructured imports) and three
+   conventional namespace receivers. Severity Critical.
 
 4. `flow/sql-injection` — body → raw SQL string via
    `prisma.$queryRaw` / direct `pg.query` / Drizzle's `sql\`\``
