@@ -1,0 +1,216 @@
+name: Release
+
+# Fires on every `v*` tag push (the v0.1.0 + future stable tags).
+# Manual `workflow_dispatch` is also wired so a maintainer can
+# re-run the matrix without re-tagging if a single platform fails.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build (e.g. v0.1.0)"
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+  # Release builds must NOT treat warnings as errors — that's a
+  # development-time guard. RUSTFLAGS is intentionally unset here.
+
+jobs:
+  # ── CLI binaries — `stryx` binary for Homebrew + Cargo install.
+  build-cli:
+    name: cli (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+            archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+            archive: tar.gz
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+            archive: zip
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.target }}
+
+      - name: Build CLI (${{ matrix.target }})
+        run: cargo build --release --bin stryx --target ${{ matrix.target }}
+
+      # Resolve binary name (Windows appends .exe). Output the
+      # finalised archive path so the upload step is platform-agnostic.
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME:-${{ inputs.tag }}}"
+          version="${version#v}"
+          bin="target/${{ matrix.target }}/release/stryx"
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            bin="${bin}.exe"
+          fi
+          test -f "$bin"
+          name="stryx-${version}-${{ matrix.target }}"
+          mkdir -p "dist/$name"
+          cp "$bin" "dist/$name/"
+          cp LICENSE README.md CHANGELOG.md "dist/$name/"
+          cd dist
+          if [[ "${{ matrix.archive }}" == "zip" ]]; then
+            7z a -tzip "${name}.zip" "$name" >/dev/null
+            echo "asset=dist/${name}.zip" >> "$GITHUB_OUTPUT"
+          else
+            tar czf "${name}.tar.gz" "$name"
+            echo "asset=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.target }}
+          path: ${{ steps.package.outputs.asset }}
+          retention-days: 7
+
+  # ── napi-rs binaries — per-platform .node files for npm packaging.
+  build-napi:
+    name: napi (${{ matrix.target }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+          - target: x86_64-apple-darwin
+            runner: macos-13
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-pc-windows-msvc
+            runner: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.93"
+          targets: ${{ matrix.target }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Cache cargo registry + build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "crates/stryx_napi -> target"
+          shared-key: napi-${{ matrix.target }}
+
+      - name: Install napi-rs CLI
+        working-directory: crates/stryx_napi
+        run: npm ci
+
+      - name: Build napi (${{ matrix.target }})
+        working-directory: crates/stryx_napi
+        run: npx napi build --platform --release --target ${{ matrix.target }}
+
+      # napi-rs names the artifact `stryx.<platform>.node` (e.g.
+      # stryx.linux-x64-gnu.node). Both the .node and the generated
+      # index.js + index.d.ts are ready for npm publish.
+      - name: Upload napi artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-${{ matrix.target }}
+          path: |
+            crates/stryx_napi/stryx.*.node
+            crates/stryx_napi/index.js
+            crates/stryx_napi/index.d.ts
+          retention-days: 7
+
+  # ── Aggregate + attach to the GitHub Release.
+  publish-release:
+    name: Attach to GitHub Release
+    needs: [build-cli, build-napi]
+    runs-on: ubuntu-latest
+    # Skip on workflow_dispatch — re-runs are usually for debugging
+    # a single platform, not for republishing release assets.
+    if: github.event_name == 'push'
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Stage release assets
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          mkdir -p release
+          # CLI archives — one per target (tar.gz on Unix, zip on Windows).
+          for f in artifacts/cli-*/*.tar.gz artifacts/cli-*/*.zip; do
+            cp "$f" release/
+          done
+          # napi .node files — flatten across targets.
+          for f in artifacts/napi-*/stryx.*.node; do
+            cp "$f" release/
+          done
+          # index.js + index.d.ts are identical across napi targets;
+          # keep one copy.
+          first_napi_dir=$(ls -d artifacts/napi-* 2>/dev/null | head -1 || true)
+          if [[ -n "$first_napi_dir" ]]; then
+            cp "$first_napi_dir/index.js" "$first_napi_dir/index.d.ts" release/
+          fi
+          ls -la release/
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          # Wait briefly in case the tag-triggered release isn't
+          # visible yet (the manual `gh release create` step may
+          # have happened in a separate run).
+          for i in 1 2 3; do
+            if gh release view "$tag" >/dev/null 2>&1; then break; fi
+            echo "release $tag not yet visible, retry $i/3"
+            sleep 5
+          done
+          gh release upload "$tag" release/* --clobber
