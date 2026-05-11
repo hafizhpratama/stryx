@@ -8,6 +8,7 @@
 
 pub mod db;
 pub mod http;
+pub mod redirect;
 pub mod response;
 
 pub use db::{
@@ -15,4 +16,5 @@ pub use db::{
     is_orm_write_sink, is_prisma_write_sink,
 };
 pub use http::{FetchSink, is_http_sink_call};
+pub use redirect::{RedirectSink, is_redirect_sink_call};
 pub use response::{ResponseSink, is_response_constructor, response_sink_label};
