@@ -34,6 +34,9 @@ use stryx_index::{ClassInfo, FileSummary, ImportRef};
 use stryx_taint::{Cell, ExportedFunctionSummary, Offset, ParamFlow, Shape, TaintLabel, Xtaint};
 
 use crate::steps::sanitizers::{ParserSanitizer, is_sanitizer_call};
+use crate::steps::sinks::{
+    DrizzleWriteSink, OrmWriteSink, PrismaWriteSink, is_db_write_sink, is_prisma_write_sink,
+};
 use crate::steps::sources::{BodySource, is_body_source_call, is_request_body_member};
 use crate::steps::{StepCtx, StepKind};
 
@@ -48,6 +51,11 @@ const RULE_STEPS: &[StepKind] = &[
     // Slice 8.3a — parser-style sanitiser (zod/valibot/yup +
     // conform `parse(x, { schema })` + Stripe webhook constructEvent).
     StepKind::ParserSanitizer(ParserSanitizer),
+    // Slice 8.4 — DB write sinks across Prisma, Drizzle, and
+    // generic TypeORM/Mongoose shapes.
+    StepKind::PrismaWriteSink(PrismaWriteSink),
+    StepKind::DrizzleWriteSink(DrizzleWriteSink),
+    StepKind::OrmWriteSink(OrmWriteSink),
 ];
 
 use super::auth_bypass_via_wrapper::contains_auth_helper_call;
@@ -277,6 +285,21 @@ impl<'idx> FlowVisitor<'idx> {
     fn registry_as_sanitizer(&self, call: &CallExpression<'_>) -> bool {
         let ctx = self.step_ctx();
         RULE_STEPS.iter().any(|step| step.as_sanitizer(&ctx, call))
+    }
+
+    /// Slice 8.4 of ADR 0008 — registry-dispatched sink check.
+    /// Returns the first matching `SinkSpec` (severity hint) or
+    /// `None` if no [`RULE_STEPS`] entry recognises `call` as a
+    /// sink. Closed-enum dispatch; release builds compile to a
+    /// jump table.
+    fn registry_as_sink(&self, call: &CallExpression<'_>) -> Option<crate::steps::SinkSpec> {
+        let ctx = self.step_ctx();
+        for step in RULE_STEPS {
+            if let Some(spec) = step.as_sink(&ctx, call) {
+                return Some(spec);
+            }
+        }
+        None
     }
 
     fn taint(&mut self, name: String) {
@@ -1287,7 +1310,24 @@ impl<'idx> FlowVisitor<'idx> {
                 // sinking to the DB without sanitisation.
                 self.check_cross_file_call(call);
 
-                if is_db_write_sink(call) {
+                // Slice 8.4 of ADR 0008 — registry-dispatched sink
+                // recognition. Other call sites of is_db_write_sink
+                // in this file stay on the legacy path until later
+                // slices migrate them; debug-assert parallel check
+                // verifies the registry agrees with the legacy
+                // predicate.
+                let registry_sink = self.registry_as_sink(call);
+                #[cfg(debug_assertions)]
+                {
+                    let legacy = is_db_write_sink(call);
+                    debug_assert_eq!(
+                        registry_sink.is_some(),
+                        legacy,
+                        "DB write sink registry diverged from legacy at call {:?}",
+                        call.span,
+                    );
+                }
+                if registry_sink.is_some() {
                     self.emit_db_sink_finding(call);
                 }
                 // Recurse into callee + args to catch nested sinks.
@@ -1680,94 +1720,11 @@ fn is_db_read_call(call: &CallExpression<'_>) -> bool {
     false
 }
 
-/// Top-level sink matcher: returns true if `call` is a DB write across
-/// any recognised ORM. Shapes covered:
-/// - Prisma: `<prisma|db|database>.<model>.<crud>(...)`
-/// - Drizzle: `<chain>.values(...)` after `<x>.insert(t)`,
-///   `<chain>.set(...)` after `<x>.update(t)`
-/// - TypeORM/Mongoose-ish: `<expr>.save(...)`, `<expr>.insert(...)`,
-///   `<expr>.upsert(...)` on any receiver — these verbs are
-///   DB-specific enough that we don't gate on the receiver shape.
-fn is_db_write_sink(call: &CallExpression<'_>) -> bool {
-    is_prisma_write_sink(call) || is_drizzle_write_sink(call) || is_orm_write_sink(call)
-}
-
-fn is_prisma_write_sink(call: &CallExpression<'_>) -> bool {
-    // Prisma-shape: <prisma|db|database>.<model>.<method>
-    const SINK_METHODS: &[&str] = &[
-        "create",
-        "createMany",
-        "createManyAndReturn",
-        "update",
-        "updateMany",
-        "upsert",
-        "delete",
-        "deleteMany",
-    ];
-
-    let Some(callee) = call.callee.as_member_expression() else {
-        return false;
-    };
-    let MemberExpression::StaticMemberExpression(method) = callee else {
-        return false;
-    };
-    if !SINK_METHODS.contains(&method.property.name.as_str()) {
-        return false;
-    }
-    let Expression::StaticMemberExpression(model_member) = &method.object else {
-        return false;
-    };
-    let Expression::Identifier(root_id) = &model_member.object else {
-        return false;
-    };
-    matches!(root_id.name.as_str(), "prisma" | "db" | "database")
-}
-
-fn is_drizzle_write_sink(call: &CallExpression<'_>) -> bool {
-    // Drizzle-shape: `<x>.insert(table).values(arg)` / `<x>.update(table).set(arg)`.
-    // The terminal call is `<chain>.values` or `<chain>.set` and the
-    // chain itself contains an `.insert` or `.update` call.
-    let Some(callee) = call.callee.as_member_expression() else {
-        return false;
-    };
-    let MemberExpression::StaticMemberExpression(terminal) = callee else {
-        return false;
-    };
-    let expected_inner = match terminal.property.name.as_str() {
-        "values" => "insert",
-        "set" => "update",
-        _ => return false,
-    };
-    // The receiver of the terminal call must itself be a `.insert(...)`
-    // or `.update(...)` call.
-    let Expression::CallExpression(inner_call) = &terminal.object else {
-        return false;
-    };
-    let Some(inner_callee) = inner_call.callee.as_member_expression() else {
-        return false;
-    };
-    let MemberExpression::StaticMemberExpression(inner_method) = inner_callee else {
-        return false;
-    };
-    inner_method.property.name.as_str() == expected_inner
-}
-
-fn is_orm_write_sink(call: &CallExpression<'_>) -> bool {
-    // TypeORM / Mongoose / generic ORM: `<receiver>.save(...)`,
-    // `<receiver>.insert(...)`, `<receiver>.upsert(...)`. We don't
-    // restrict the receiver shape — these verbs are DB-specific enough
-    // that any tainted argument arriving here is worth flagging.
-    if call.arguments.is_empty() {
-        return false;
-    }
-    let Some(callee) = call.callee.as_member_expression() else {
-        return false;
-    };
-    let MemberExpression::StaticMemberExpression(method) = callee else {
-        return false;
-    };
-    matches!(method.property.name.as_str(), "save" | "insert" | "upsert")
-}
+// `is_db_write_sink`, `is_prisma_write_sink`, `is_drizzle_write_sink`,
+// `is_orm_write_sink` moved to `crate::steps::sinks::db`
+// (ADR 0008 slice 8.4). Imported at the top of this file; one call
+// site in scan_for_sinks dispatches through `RULE_STEPS` via
+// `registry_as_sink`.
 
 /// Best-effort extraction of an Expression from a `ForStatementInit`
 /// when it isn't a `VariableDeclaration`. Slice 1.5: only the bare
