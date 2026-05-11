@@ -23,7 +23,9 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
-use crate::steps::sanitizers::{RedactorSanitizer, is_boolean_coercion, is_redactor_call};
+use crate::steps::sanitizers::RedactorSanitizer;
+#[cfg(debug_assertions)]
+use crate::steps::sanitizers::{is_boolean_coercion, is_redactor_call};
 use crate::steps::sinks::{ResponseSink, is_response_constructor, response_sink_label};
 use crate::steps::{StepCtx, StepKind};
 use crate::{Rule, RuleContext, RuleMeta};
@@ -313,11 +315,13 @@ impl<'r> SecretFlowVisitor<'r> {
                 // label is a future refinement; today the parallel-
                 // assert verifies the registry and legacy agree on
                 // *whether* the call is a sink.
+                #[cfg(debug_assertions)]
                 let ctx = StepCtx {
                     file: &self.file,
                     index: None,
                     body_source_active: false,
                 };
+                #[cfg(debug_assertions)]
                 let registry_is_sink = RULE_STEPS.iter().any(|s| s.as_sink(&ctx, call).is_some());
                 let legacy_label = response_sink_label(call);
                 #[cfg(debug_assertions)]

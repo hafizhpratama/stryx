@@ -179,6 +179,20 @@ struct FlowVisitor<'idx> {
     /// slice 3.7 will collapse it onto a derived accessor once
     /// consumers migrate.
     return_shape_seen: Cell,
+    /// Task #96 — discriminated-union validator lineage. Maps a
+    /// binding name to the name of the first tainted ident passed
+    /// to a validator-shaped call (`validate*`/`verify*`/`check*`/
+    /// `assert*`). Populated in `handle_var_decl` when we see e.g.
+    /// `const r = validateThing(body)`. Consumed in IfStatement
+    /// narrowing when we see `if (!r.success) return ...`: the
+    /// guard proves the validator accepted `body`, so we can
+    /// untaint it past the return.
+    ///
+    /// Observed FP source: trigger.dev's
+    /// `admin.api.v1/v2.orgs.$organizationId.feature-flags.ts`
+    /// using `validatePartialFeatureFlags(body)` returning
+    /// `{success, error}` discriminated union.
+    validator_inits: std::collections::HashMap<String, String>,
 }
 
 impl<'idx> FlowVisitor<'idx> {
@@ -196,11 +210,25 @@ impl<'idx> FlowVisitor<'idx> {
             pending_binding_name: None,
             param_shape_seen: Cell::bot(),
             return_shape_seen: Cell::bot(),
+            validator_inits: std::collections::HashMap::new(),
         }
     }
 
     fn enter_fn(&mut self) {
         self.scopes.push(std::collections::HashMap::new());
+        // Task #96 — validator lineage is per-function. A binding
+        // declared inside one function should not leak its
+        // validator-input mapping into the next function the
+        // visitor walks. The simplest discipline matching the
+        // visitor's per-function model is to clear on entry.
+        // Nested-function semantics: clearing on entry means a
+        // nested function's local validator inits override the
+        // outer ones for the duration of the nested scope, but
+        // they don't restore on exit — acceptable because the
+        // outer function's IfStatement narrowing has already run
+        // (statements are walked top-to-bottom before nested
+        // functions are visited via Visit::visit_function).
+        self.validator_inits.clear();
     }
 
     fn exit_fn(&mut self) {
@@ -534,6 +562,29 @@ impl<'idx> FlowVisitor<'idx> {
                             scope.remove(&name);
                         }
                     }
+                    // Task #96 — discriminated-union validator guard:
+                    // `if (!X.success) return ...` (or `.ok`) where X
+                    // was bound from a validator-shaped call. The
+                    // guard proves the validator accepted its first
+                    // input AND that the binding's discriminant is
+                    // the success-shaped variant, so both the input
+                    // and the binding itself untaint past the return.
+                    //
+                    // The binding-untainting matters specifically for
+                    // shapes like trigger.dev's
+                    // `prisma.organization.update({data: { ...result.data }})`
+                    // where the sink reads from `result.data` rather
+                    // than the original input — without untainting
+                    // the binding, the conservative-propagation taint
+                    // on `result` would still reach the sink.
+                    if let Some(validator_binding) = match_discriminant_guard(&is.test)
+                        && let Some(input_name) =
+                            self.validator_inits.get(&validator_binding).cloned()
+                        && let Some(scope) = self.current_scope_mut()
+                    {
+                        scope.remove(&input_name);
+                        scope.remove(&validator_binding);
+                    }
                 }
             }
             Statement::TryStatement(ts) => {
@@ -635,6 +686,21 @@ impl<'idx> FlowVisitor<'idx> {
             let Some(init) = &declarator.init else {
                 continue;
             };
+            // Task #96 — track validator-shaped call lineage. When
+            // we see `const r = validateThing(body)`, remember that
+            // `r` binds the result of validating `body`. The
+            // IfStatement narrowing path consumes this in the
+            // `!r.success` / `!r.ok` discriminant-guard pattern to
+            // untaint `body` past the guard. Recorded
+            // unconditionally — the consumer only fires if the
+            // structural guard is present.
+            let binding_names = collect_binding_names(&declarator.id);
+            if binding_names.len() == 1
+                && let Some(arg_name) = extract_validator_input(init)
+            {
+                self.validator_inits
+                    .insert(binding_names[0].clone(), arg_name);
+            }
             let tainted = self.expr_taint(init);
             self.scan_for_sinks(init);
             if !tainted {
@@ -1877,6 +1943,111 @@ fn literal_offset_or_any(expr: &Expression<'_>) -> Offset {
         Expression::StringLiteral(s) => Offset::Field(s.value.to_string()),
         _ => Offset::Any,
     }
+}
+
+/// Task #96 — recognise a validator-shaped call and return the
+/// name of its first ident-shaped argument, suitable for storing
+/// in `FlowVisitor.validator_inits` so a later
+/// `if (!X.success) return ...` guard can untaint it.
+///
+/// Recognised callee names: any starting with `validate`, `verify`,
+/// `check`, or `assert` as a leading camelCase word (e.g.
+/// `validatePartialFeatureFlags`, `verifyToken`, `checkAuth`,
+/// `assertOwnership`). The name boundary requires the next char
+/// to be ASCII-uppercase or end-of-name — so `validating` (next
+/// char lowercase) doesn't match.
+///
+/// Wrappers (`await`, parens, casts) are drilled through on both
+/// the outer expression and the first argument so common shapes
+/// like `await validate(body as T)` resolve correctly.
+fn extract_validator_input(expr: &Expression<'_>) -> Option<String> {
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            Expression::AwaitExpression(a) => cursor = &a.argument,
+            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
+            Expression::TSAsExpression(t) => cursor = &t.expression,
+            Expression::TSNonNullExpression(t) => cursor = &t.expression,
+            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
+            Expression::TSTypeAssertion(t) => cursor = &t.expression,
+            _ => break,
+        }
+    }
+    let Expression::CallExpression(call) = cursor else {
+        return None;
+    };
+    let Expression::Identifier(callee) = &call.callee else {
+        return None;
+    };
+    if !is_validator_name(callee.name.as_str()) {
+        return None;
+    }
+    let first_arg = call.arguments.first().and_then(argument_expr)?;
+    extract_underlying_ident(first_arg)
+}
+
+/// True iff `name` begins with `validate`/`verify`/`check`/`assert`
+/// as a leading camelCase word. ASCII-case-insensitive on the
+/// prefix; the boundary is enforced by requiring the next char to
+/// be ASCII-uppercase or end-of-name.
+fn is_validator_name(name: &str) -> bool {
+    const PREFIXES: &[&str] = &["validate", "verify", "check", "assert"];
+    PREFIXES.iter().any(|prefix| {
+        if name.len() < prefix.len() {
+            return false;
+        }
+        let (head, tail) = name.split_at(prefix.len());
+        if !head.eq_ignore_ascii_case(prefix) {
+            return false;
+        }
+        tail.is_empty() || tail.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+    })
+}
+
+/// Drill through trivial wrappers (parens, TS casts) and return
+/// the underlying bare-identifier name, or `None` if the expression
+/// is not a wrapped identifier.
+fn extract_underlying_ident(expr: &Expression<'_>) -> Option<String> {
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            Expression::Identifier(id) => return Some(id.name.to_string()),
+            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
+            Expression::TSAsExpression(t) => cursor = &t.expression,
+            Expression::TSNonNullExpression(t) => cursor = &t.expression,
+            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
+            Expression::TSTypeAssertion(t) => cursor = &t.expression,
+            _ => return None,
+        }
+    }
+}
+
+/// Task #96 — match `!IDENT.success` or `!IDENT.ok` patterns and
+/// return IDENT's name. Drilled through paren wrappers on the
+/// operand. Used by the IfStatement narrowing path to look up
+/// validator lineage.
+fn match_discriminant_guard(test: &Expression<'_>) -> Option<String> {
+    let Expression::UnaryExpression(unary) = test else {
+        return None;
+    };
+    if unary.operator != UnaryOperator::LogicalNot {
+        return None;
+    }
+    let mut cursor = &unary.argument;
+    while let Expression::ParenthesizedExpression(p) = cursor {
+        cursor = &p.expression;
+    }
+    let Expression::StaticMemberExpression(m) = cursor else {
+        return None;
+    };
+    let prop = m.property.name.as_str();
+    if !matches!(prop, "success" | "ok") {
+        return None;
+    }
+    let Expression::Identifier(id) = &m.object else {
+        return None;
+    };
+    Some(id.name.to_string())
 }
 
 /// True if the body of an if-branch is guaranteed to leave the

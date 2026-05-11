@@ -24,7 +24,9 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
-use crate::steps::sanitizers::{AuthCheckSanitizer, call_invokes_auth_helper};
+use crate::steps::sanitizers::AuthCheckSanitizer;
+#[cfg(debug_assertions)]
+use crate::steps::sanitizers::call_invokes_auth_helper;
 use crate::steps::{StepCtx, StepKind};
 use crate::{Rule, RuleContext, RuleMeta};
 

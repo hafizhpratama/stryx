@@ -537,6 +537,61 @@ fn unvalidated_body_to_db_conform_parse_recognised_as_sanitizer() {
     // refactoring drops the variable.
 }
 
+/// Task #96 regression — observed on trigger.dev's
+/// admin.api.v1/v2.orgs.$organizationId.feature-flags.ts routes
+/// during 2026-05-11 OSS validation. The pattern:
+///
+///   const body = await req.json();
+///   const result = validatePartialFeatureFlags(body);
+///   if (!result.success) return ...;
+///   // body flows to prisma.organization.update
+///
+/// `validatePartialFeatureFlags` is a custom validator returning
+/// `{success: true, data: T} | {success: false, error: ...}`. The
+/// early-return guard on `!result.success` proves the validator
+/// accepted the body. Stryx tracks `validator_inits` lineage at
+/// the var declaration, then the IfStatement narrowing path
+/// consumes it when the test matches `!X.success` / `!X.ok` and
+/// the branch returns.
+///
+/// The fixture pins 5 cases: 3 suppression boundaries (canonical
+/// shape, `.ok` discriminant, `body as T` cast) and 2 firing
+/// boundaries (non-validator callee name, missing guard) to keep
+/// the heuristic from over-suppressing.
+#[test]
+fn unvalidated_body_to_db_discriminant_validator_guard() {
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/discriminant-validator");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+
+    let messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
+
+    // CASES 1-3 must suppress: zero findings on validatorGuard,
+    // validatorOkGuard, validatorWithCast — each performs
+    // body→prisma.user.update past a recognised validator guard.
+    //
+    // CASES 4 (nonValidatorName) and 5 (missingGuard) must still
+    // fire — both use body in prisma.user.update without a
+    // recognised validator guard.
+    //
+    // Total: exactly 2 findings, both on the same prisma sink.
+    assert_eq!(
+        findings.len(),
+        2,
+        "expected exactly two findings (CASES 4 + 5); validator-guard \
+         suppression in CASES 1-3 must hold. got: {messages:?}",
+    );
+    for f in &findings {
+        assert!(
+            f.message.contains("prisma.user.update"),
+            "remaining findings should be on prisma.user.update; got: {}",
+            f.message,
+        );
+    }
+}
+
 /// Task #92 regression — observed on documenso's `getSession`
 /// helper during real-world OSS validation. When a body-tainted
 /// parameter flows into a DB-writing helper through a wrapping
