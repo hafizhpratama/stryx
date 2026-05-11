@@ -487,6 +487,56 @@ fn unvalidated_body_to_db_local_shape_propagates_at_sink() {
     }
 }
 
+/// Task #95 regression — observed on trigger.dev's Remix routes
+/// (apps/webapp/app/routes/_app.orgs...alerts/route.tsx and
+/// siblings) during 2026-05-11 OSS validation. The
+/// `@conform-to/zod` library uses a free-function `parse(input,
+/// { schema })` shape, not the member-call `<schema>.parse(input)`
+/// form Stryx originally recognised. Stryx now treats the
+/// free-function call as a sanitizer when the second argument is
+/// an object literal containing a `schema` property. Generic
+/// `parse(x, y)` calls (e.g. base-conversion parsers) must NOT
+/// match — the third case in the fixture asserts a finding still
+/// fires when the conform shape isn't present.
+#[test]
+fn unvalidated_body_to_db_conform_parse_recognised_as_sanitizer() {
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/conform-parse");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+
+    let messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
+
+    // CASE 1 + CASE 2: conform-parse forms should suppress.
+    // The handlers are `conformParse` and `conformParseAliased`; if
+    // either fires, the recogniser failed.
+    let conform_findings: Vec<_> = findings
+        .iter()
+        .filter(|f| {
+            f.message.contains("prisma.user.update")
+                && !messages.iter().any(|m| m.contains("genericParse"))
+                && f.span.file.to_string_lossy().ends_with("lib.ts")
+        })
+        .collect();
+    // The findings list should have exactly one — the CASE 3
+    // genericParse handler. Both conform-parse cases must be silent.
+    assert_eq!(
+        findings.len(),
+        1,
+        "expected exactly one finding (CASE 3 only); conform `parse(x, {{ schema }})` \
+         in CASES 1 and 2 must be recognised as sanitizer. got: {messages:?}",
+    );
+    assert!(
+        findings[0].message.contains("prisma.user.update"),
+        "the remaining finding should be on the genericParse → prisma.user.update path; \
+         got: {}",
+        findings[0].message,
+    );
+    let _ = conform_findings; // silence the dead-let in case future
+    // refactoring drops the variable.
+}
+
 /// Task #92 regression — observed on documenso's `getSession`
 /// helper during real-world OSS validation. When a body-tainted
 /// parameter flows into a DB-writing helper through a wrapping

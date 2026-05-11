@@ -1583,6 +1583,25 @@ impl FlowVisitor<'_> {
 // dispatched via `RULE_STEPS` through `registry_as_source`.
 
 fn is_sanitizer_call(call: &CallExpression<'_>) -> bool {
+    // Free-function form: `parse(input, { schema })` —
+    // `@conform-to/zod`'s `parse` (and the parallel `@conform-to/yup`,
+    // `@conform-to/valibot`) take the input as arg 0 and a config
+    // object containing a `schema` key as arg 1. The function
+    // validates `input` against the schema and returns a discriminated
+    // result. Stryx recognises this only when the second argument is
+    // an object literal with a `schema` property — so generic
+    // `parse(x, y)` calls (e.g. a custom int parser, `parse(text,
+    // base)`) do not match.
+    //
+    // Observed FP source: trigger.dev's Remix routes (alerts,
+    // settings _index, etc.) using `parse(formData, { schema })`.
+    if let Expression::Identifier(id) = &call.callee
+        && id.name == "parse"
+        && second_arg_has_schema_key(call)
+    {
+        return true;
+    }
+
     let Some(callee) = call.callee.as_member_expression() else {
         return false;
     };
@@ -1613,6 +1632,37 @@ fn is_sanitizer_call(call: &CallExpression<'_>) -> bool {
     }
 
     false
+}
+
+/// True iff `call`'s second argument is an object-literal expression
+/// containing a `schema` property (either shorthand `{ schema }` or
+/// keyed `{ schema: ... }`). Used to distinguish conform-style
+/// `parse(input, { schema })` from generic 2-arg `parse` calls.
+fn second_arg_has_schema_key(call: &CallExpression<'_>) -> bool {
+    let Some(second_arg) = call.arguments.get(1).and_then(argument_expr) else {
+        return false;
+    };
+    let mut cursor = second_arg;
+    loop {
+        match cursor {
+            Expression::ObjectExpression(obj) => {
+                return obj.properties.iter().any(|p| match p {
+                    ObjectPropertyKind::ObjectProperty(prop) => {
+                        matches!(
+                            &prop.key,
+                            PropertyKey::StaticIdentifier(id) if id.name == "schema"
+                        )
+                    }
+                    ObjectPropertyKind::SpreadProperty(_) => false,
+                });
+            }
+            // Trivial wrappers — drill through.
+            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
+            Expression::TSAsExpression(t) => cursor = &t.expression,
+            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
+            _ => return false,
+        }
+    }
 }
 
 fn is_db_read_call(call: &CallExpression<'_>) -> bool {
