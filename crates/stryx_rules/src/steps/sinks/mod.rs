@@ -9,6 +9,7 @@
 pub mod db;
 pub mod fs;
 pub mod http;
+pub mod llm;
 pub mod redirect;
 pub mod response;
 
@@ -18,5 +19,6 @@ pub use db::{
 };
 pub use fs::{FsSink, is_fs_sink_call};
 pub use http::{FetchSink, is_http_sink_call};
+pub use llm::{LlmPromptSink, is_llm_prompt_sink_call};
 pub use redirect::{RedirectSink, is_redirect_sink_call};
 pub use response::{ResponseSink, is_response_constructor, response_sink_label};

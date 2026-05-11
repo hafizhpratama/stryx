@@ -42,9 +42,10 @@ What actually shipped (counting commits through `fc908ec`):
 | `flow/unvalidated-body-to-db` | stable | Cross-file | 71 on papermark/dub |
 | `flow/auth-bypass-via-wrapper` | stable | Cross-file | (no public-repo data yet) |
 | `flow/secret-to-response` | stable | Single-file | (clean across OSS sample) |
-| `flow/ssrf-via-fetch` | experimental | Single-file | 4 across papermark + dub |
-| `flow/redirect-open` | experimental | Single-file | 1 borderline on dub (Jackson SAML) |
+| `flow/ssrf-via-fetch` | experimental | Cross-file (slice 2 in v0.2) | 4 single-file across papermark + dub; +2 new cross-file TPs in papermark (`handleDocumentCreate`/`Update`) |
+| `flow/redirect-open` | experimental | Cross-file (slice 2 in v0.2) | 1 borderline single-file on dub (Jackson SAML) |
 | `flow/path-traversal` | experimental | Single-file | 0 across OSS sample (cloud-blob storage dominates) |
+| `flow/prompt-injection` | experimental (v0.2) | Single-file | (no public-repo data yet; AI-coding-tool audience match per ADR 0011 Track B) |
 | `generic/hardcoded-secret` | stable | Single-file | (live in registry) |
 
 **Real-world validation arc:**
@@ -93,9 +94,17 @@ slice-2 cross-file extensions:
 
 - `flow/ssrf-via-fetch` slice 2 — `ExportedFunctionSummary`
   consumer so body taint can flow through a helper module before
-  reaching `fetch`. Estimated 1 multi-commit slice.
-- `flow/redirect-open` slice 2 — same pattern.
-- `flow/path-traversal` slice 2 — same pattern.
+  reaching `fetch`. ✅ **shipped** (commits 70b41e5 / 74a2061 /
+  1fa6bb5 — substrate + consumer + three-level chain
+  convergence). 2 new TPs surfaced in OSS sweep
+  (`handleDocumentCreate` / `handleDocumentUpdate` in papermark).
+- `flow/redirect-open` slice 2 — same pattern. ✅ **shipped**
+  (commit 169e2c6).
+- `flow/path-traversal` slice 2 — same pattern. ⏳ remaining.
+  Note: ADR 0011's OSS-sweep data showed 0 path-traversal TPs in
+  the v0.1 sample (cloud-blob storage dominates), so slice 2
+  here is more about symmetry than impact. Defer until a
+  motivating real-world finding.
 
 The slice-1 single-file versions are intentionally conservative
 in scope. Cross-file is what makes the rules catch the
@@ -111,8 +120,12 @@ frequency:
    field. Highest AI-tool-frequency since the target audience is
    already AI-coding. Recognition is fuzzier than the other rules
    (provider-specific shapes, prompt-vs-context ambiguity).
-   Probably needs slice 1 = OpenAI / Anthropic provider name
-   match + body taint in the `messages[].content` field.
+   Slice 1 = OpenAI / Anthropic provider name match + body taint
+   in the `messages[].content` / `input` fields. ✅ **shipped**
+   in v0.2 — `LlmPromptSink` step variant + `flow/prompt-injection`
+   rule + bad/good fixtures + bench. Single-file only; slice 2
+   cross-file via `ExportedFunctionSummary` deferred until OSS
+   data motivates it.
 
 2. `flow/xss-via-dangerously-set-inner-html` — body → React
    `dangerouslySetInnerHTML` attribute. Next.js-specific. Sink

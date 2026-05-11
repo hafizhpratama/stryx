@@ -51,6 +51,19 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   + `taints_through_redirect_param` + `ConvergenceSignal::redirect_sink_params`.
   Same simulation pattern as SSRF; URL allow-list guards inside
   the callee suppress the call-site finding.
+- `flow/prompt-injection` slice 1 — new flow rule catching
+  request-body data flowing into an LLM provider call's prompt or
+  message content. Recognises `<x>.chat.completions.create(...)`
+  (OpenAI chat), `<x>.responses.create(...)` (OpenAI Responses
+  API), and `<x>.messages.create(...)` (Anthropic). Inspects the
+  call's first-argument object for body-tainted entries in
+  `messages[].content` and `input`. Severity High; no sanitiser
+  recognition (schema validation enforces shape, not prompt-
+  injection safety). ADR 0011 Track B candidate #1 — Stryx's
+  AI-coding-tool audience match.
+- `LlmPromptSink` step variant in `steps::sinks::llm`; wired
+  through `StepKind` (15 variants × 6 trait methods = 90 dispatch
+  sites). Path-shape recogniser only — no import-map consultation.
 
 ## [0.1.0] — 2026-05-11
 
