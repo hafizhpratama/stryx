@@ -412,16 +412,25 @@ fn extract_underlying_ident(expr: &Expression<'_>) -> Option<String> {
     }
 }
 
-/// Slice 2 — match the canonical URL allow-list guard:
+/// Slice 2 / 3 — match the canonical URL allow-list guard. Returns
+/// the URL-binding's name on match. Recognised callee shapes
+/// (negated-only — early-return on disallowed):
 ///
-/// - `!ALLOWED.has(IDENT.host)`
-/// - `!ALLOWED.includes(IDENT.hostname)`
+/// - `!ALLOWED.has(IDENT.host)` — `Set.has` / `Map.has`
+/// - `!ALLOWED.includes(IDENT.hostname)` — `Array.includes`
 /// - `!ALLOWED.includes(IDENT.origin)`
+/// - `!validatorFn(IDENT.host)` where `validatorFn` is a bare
+///   identifier starting with `isAllowed` / `isValid` / `validate`
+///   / `verify` / `check` (slice 3 — validator-function form).
 ///
-/// Returns IDENT's name on match. The guard is recognised
-/// negated-only (early-return on disallowed); positive-form guards
-/// would require tracking the consequent's narrowed branch instead
-/// of the post-If continuation.
+/// In all shapes, the call's first argument must be a static-member
+/// access of the form `IDENT.host` / `IDENT.hostname` /
+/// `IDENT.origin` — IDENT being the binding the visitor's
+/// `url_inits` map tracks back to the original URL input.
+///
+/// Positive-form guards (`if (ALLOWED.has(parsed.host)) { fetch }`)
+/// are deferred — they require tracking the consequent's narrowed
+/// branch instead of the post-If continuation.
 fn match_url_allow_list_guard(test: &Expression<'_>) -> Option<String> {
     let Expression::UnaryExpression(unary) = test else {
         return None;
@@ -436,14 +445,20 @@ fn match_url_allow_list_guard(test: &Expression<'_>) -> Option<String> {
     let Expression::CallExpression(call) = cursor else {
         return None;
     };
-    // Callee must be a member access of the shape `X.has` or `X.includes`.
-    let Expression::StaticMemberExpression(callee) = &call.callee else {
-        return None;
+    // Callee shape — either `X.has` / `X.includes`, or a bare
+    // validator-named identifier (slice 3).
+    let callee_ok = match &call.callee {
+        Expression::StaticMemberExpression(callee) => {
+            matches!(callee.property.name.as_str(), "has" | "includes")
+        }
+        Expression::Identifier(id) => is_validator_callee_name(id.name.as_str()),
+        _ => false,
     };
-    if !matches!(callee.property.name.as_str(), "has" | "includes") {
+    if !callee_ok {
         return None;
     }
-    // First argument must be `IDENT.host`/`IDENT.hostname`/`IDENT.origin`.
+    // First argument must be `IDENT.host` / `IDENT.hostname` /
+    // `IDENT.origin` — the URL-binding's member access.
     let arg = call.arguments.first().and_then(argument_expr)?;
     let mut cursor = arg;
     while let Expression::ParenthesizedExpression(p) = cursor {
@@ -459,6 +474,24 @@ fn match_url_allow_list_guard(test: &Expression<'_>) -> Option<String> {
         return None;
     };
     Some(id.name.to_string())
+}
+
+/// Slice 3 — true iff `name` looks like a host-validator function
+/// (leading camelCase word from `isAllowed`/`isValid`/`validate`/
+/// `verify`/`check`). The boundary requires the next char to be
+/// ASCII-uppercase or end-of-name so `validating` doesn't match.
+fn is_validator_callee_name(name: &str) -> bool {
+    const PREFIXES: &[&str] = &["isAllowed", "isValid", "validate", "verify", "check"];
+    PREFIXES.iter().any(|prefix| {
+        if name.len() < prefix.len() {
+            return false;
+        }
+        let (head, tail) = name.split_at(prefix.len());
+        if !head.eq_ignore_ascii_case(prefix) {
+            return false;
+        }
+        tail.is_empty() || tail.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+    })
 }
 
 /// True iff `branch` is guaranteed to leave the enclosing scope —

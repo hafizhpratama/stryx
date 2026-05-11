@@ -58,3 +58,28 @@ export async function urlAllowListIncludes(req: NextRequest) {
   const response = await fetch(url);
   return new Response(await response.text());
 }
+
+// CASE 6: validator-function form. Recognised when the callee name
+// starts with `isAllowed`/`isValid`/`validate`/`verify`/`check`.
+declare function isAllowedHost(host: string): boolean;
+export async function urlValidatorFunction(req: NextRequest) {
+  const { url } = await req.json();
+  const parsed = new URL(url);
+  if (!isAllowedHost(parsed.host)) {
+    return new Response("Host not allowed", { status: 403 });
+  }
+  const response = await fetch(url);
+  return new Response(await response.text());
+}
+
+// CASE 7: throw-based guard (instead of return). `branch_returns`
+// recognises both return and throw early-exits.
+export async function urlAllowListThrow(req: NextRequest) {
+  const { url } = await req.json();
+  const parsed = new URL(url);
+  if (!ALLOWED_HOSTS.has(parsed.host)) {
+    throw new Error("Host not allowed");
+  }
+  const response = await fetch(url);
+  return new Response(await response.text());
+}
