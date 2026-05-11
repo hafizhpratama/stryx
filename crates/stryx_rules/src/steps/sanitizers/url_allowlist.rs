@@ -156,10 +156,12 @@ fn is_validator_callee_name(name: &str) -> bool {
 pub fn branch_returns(branch: &Statement<'_>) -> bool {
     match branch {
         Statement::ReturnStatement(_) | Statement::ThrowStatement(_) => true,
-        Statement::BlockStatement(bs) => bs
-            .body
-            .iter()
-            .any(|s| matches!(s, Statement::ReturnStatement(_) | Statement::ThrowStatement(_))),
+        Statement::BlockStatement(bs) => bs.body.iter().any(|s| {
+            matches!(
+                s,
+                Statement::ReturnStatement(_) | Statement::ThrowStatement(_)
+            )
+        }),
         _ => false,
     }
 }

@@ -317,11 +317,7 @@ impl<'idx> FlowVisitor<'idx> {
 
     /// Kind-specialised source check for member-access sites with a
     /// destructured `(object, prop)` pair — see [`TaintStep::as_member_source`].
-    fn registry_as_member_source(
-        &self,
-        object: &Expression<'_>,
-        prop: &str,
-    ) -> Option<TaintLabel> {
+    fn registry_as_member_source(&self, object: &Expression<'_>, prop: &str) -> Option<TaintLabel> {
         let ctx = self.step_ctx();
         for step in RULE_STEPS {
             if let Some(label) = step.as_member_source(&ctx, object, prop) {

@@ -1373,10 +1373,22 @@ fn ssrf_via_fetch_bad_fixture_fires() {
     }
     // Severity tier split: 4 High (CASES 1-4, full SSRF) + 1
     // Medium (CASE 5, path-injection in a host-pinned template).
-    let high = findings.iter().filter(|f| f.severity == Severity::High).count();
-    let medium = findings.iter().filter(|f| f.severity == Severity::Medium).count();
-    assert_eq!(high, 4, "expected 4 High-severity SSRF findings, got {high}");
-    assert_eq!(medium, 1, "expected 1 Medium-severity path-injection finding, got {medium}");
+    let high = findings
+        .iter()
+        .filter(|f| f.severity == Severity::High)
+        .count();
+    let medium = findings
+        .iter()
+        .filter(|f| f.severity == Severity::Medium)
+        .count();
+    assert_eq!(
+        high, 4,
+        "expected 4 High-severity SSRF findings, got {high}"
+    );
+    assert_eq!(
+        medium, 1,
+        "expected 1 Medium-severity path-injection finding, got {medium}"
+    );
 }
 
 #[test]

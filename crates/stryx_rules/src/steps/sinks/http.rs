@@ -56,13 +56,7 @@ pub fn is_http_sink_call(call: &CallExpression<'_>) -> bool {
                 && receiver.name == "axios"
                 && matches!(
                     prop,
-                    "get" | "post"
-                        | "put"
-                        | "patch"
-                        | "delete"
-                        | "head"
-                        | "options"
-                        | "request"
+                    "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "request"
                 )
             {
                 return true;
@@ -70,10 +64,7 @@ pub fn is_http_sink_call(call: &CallExpression<'_>) -> bool {
             // `got.<method>(...)` — the `got` library's per-verb methods.
             if let Expression::Identifier(receiver) = &method.object
                 && receiver.name == "got"
-                && matches!(
-                    prop,
-                    "get" | "post" | "put" | "patch" | "delete" | "head"
-                )
+                && matches!(prop, "get" | "post" | "put" | "patch" | "delete" | "head")
             {
                 return true;
             }

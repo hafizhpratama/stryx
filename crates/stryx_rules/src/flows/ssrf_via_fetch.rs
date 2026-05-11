@@ -21,7 +21,9 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
-use crate::steps::sanitizers::{branch_returns, extract_url_constructor_input, match_url_allow_list_guard};
+use crate::steps::sanitizers::{
+    branch_returns, extract_url_constructor_input, match_url_allow_list_guard,
+};
 use crate::steps::sinks::{FetchSink, is_http_sink_call};
 use crate::steps::sources::BodySource;
 use crate::steps::{StepCtx, StepKind};
@@ -191,8 +193,12 @@ impl SsrfVisitor {
             Expression::ConditionalExpression(c) => {
                 self.expr_taint(&c.consequent) || self.expr_taint(&c.alternate)
             }
-            Expression::LogicalExpression(b) => self.expr_taint(&b.left) || self.expr_taint(&b.right),
-            Expression::BinaryExpression(b) => self.expr_taint(&b.left) || self.expr_taint(&b.right),
+            Expression::LogicalExpression(b) => {
+                self.expr_taint(&b.left) || self.expr_taint(&b.right)
+            }
+            Expression::BinaryExpression(b) => {
+                self.expr_taint(&b.left) || self.expr_taint(&b.right)
+            }
             Expression::ChainExpression(c) => match &c.expression {
                 ChainElement::CallExpression(call) => {
                     self.registry_as_call_source(call)
@@ -422,4 +428,3 @@ fn is_host_pinned_template(expr: &Expression<'_>) -> bool {
         .take_while(|c| *c != '/')
         .any(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
-

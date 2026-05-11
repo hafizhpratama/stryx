@@ -25,7 +25,9 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
-use crate::steps::sanitizers::{branch_returns, extract_url_constructor_input, match_url_allow_list_guard};
+use crate::steps::sanitizers::{
+    branch_returns, extract_url_constructor_input, match_url_allow_list_guard,
+};
 use crate::steps::sinks::{RedirectSink, is_redirect_sink_call};
 use crate::steps::sources::BodySource;
 use crate::steps::{StepCtx, StepKind};
@@ -173,8 +175,12 @@ impl RedirectVisitor {
             Expression::ConditionalExpression(c) => {
                 self.expr_taint(&c.consequent) || self.expr_taint(&c.alternate)
             }
-            Expression::LogicalExpression(b) => self.expr_taint(&b.left) || self.expr_taint(&b.right),
-            Expression::BinaryExpression(b) => self.expr_taint(&b.left) || self.expr_taint(&b.right),
+            Expression::LogicalExpression(b) => {
+                self.expr_taint(&b.left) || self.expr_taint(&b.right)
+            }
+            Expression::BinaryExpression(b) => {
+                self.expr_taint(&b.left) || self.expr_taint(&b.right)
+            }
             Expression::ChainExpression(c) => match &c.expression {
                 ChainElement::CallExpression(call) => {
                     self.registry_as_call_source(call)

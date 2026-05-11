@@ -152,8 +152,12 @@ impl PathTraversalVisitor {
             Expression::ConditionalExpression(c) => {
                 self.expr_taint(&c.consequent) || self.expr_taint(&c.alternate)
             }
-            Expression::LogicalExpression(b) => self.expr_taint(&b.left) || self.expr_taint(&b.right),
-            Expression::BinaryExpression(b) => self.expr_taint(&b.left) || self.expr_taint(&b.right),
+            Expression::LogicalExpression(b) => {
+                self.expr_taint(&b.left) || self.expr_taint(&b.right)
+            }
+            Expression::BinaryExpression(b) => {
+                self.expr_taint(&b.left) || self.expr_taint(&b.right)
+            }
             Expression::ChainExpression(c) => match &c.expression {
                 ChainElement::CallExpression(call) => {
                     self.registry_as_call_source(call)
