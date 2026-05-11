@@ -32,7 +32,7 @@ small subset of genuinely ambiguous zones to a cached LLM check.
 
 ## Install
 
-While Stryx is still in alpha, install from source:
+From source — works today:
 
 ```bash
 git clone https://github.com/hafizhpratama/stryx
@@ -40,9 +40,12 @@ cd stryx
 cargo install --path crates/stryx_cli
 ```
 
+Pre-built binaries — attached to the [v0.1.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.1.0)
+across five targets (Linux x64/arm64, macOS x64/arm64, Windows x64).
+
 Cargo (`cargo install stryx-cli`), npm (`npx stryx scan`), and Homebrew
-(`brew install stryx/tap/stryx`) distribution channels open with the
-v0.1.0 release.
+(`brew install stryx/tap/stryx`) distribution channels follow once
+the npm namespace + Homebrew tap repo are set up.
 
 ## First scan
 
@@ -109,20 +112,30 @@ with `--no-llm` for fully local deterministic scans (the default).
 
 ## Status
 
-**Alpha.** All three v0.1 flow rules are implemented, tested, and
-benchmarked. APIs may still change before 1.0. See
-[ADR 0003](docs/decisions/0003-cross-file-and-taint-as-core.md) for
-the v0.1 commitment.
+**v0.1.0 — first stable release.** Phase 1 closed: substrate stable,
+6 flow rules + 1 generic rule in the registry, 8-repo OSS
+validation arc (~28,800 TS files, 0 engine-level false positives).
+APIs follow SemVer from this point. See
+[ADR 0011](docs/decisions/0011-v01-to-v02-transition.md) for the
+Phase 2 plan.
 
 - ✅ Architecture, ADRs, rule specs
 - ✅ Foundational crates `stryx_index` and `stryx_taint`
-- ✅ v0.1 flow rules: `flow/unvalidated-body-to-db`,
-  `flow/auth-bypass-via-wrapper`, `flow/secret-to-response`
+- ✅ v0.1 flow rules:
+  - `flow/unvalidated-body-to-db` (cross-file)
+  - `flow/auth-bypass-via-wrapper` (cross-file)
+  - `flow/secret-to-response` (single-file)
+  - `flow/ssrf-via-fetch` (single-file, experimental)
+  - `flow/redirect-open` (single-file, experimental)
+  - `flow/path-traversal` (single-file, experimental)
 - ✅ CLI binary (`cargo install --path crates/stryx_cli`)
+- ✅ Pre-built binaries on [GitHub Releases](https://github.com/hafizhpratama/stryx/releases)
 - 🚧 GitHub Action
 - 🚧 napi-rs npm distribution
 - 🚧 Homebrew formula
-- 📋 Additional rules (Phase 2)
+- 📋 Cross-file slice 2 for the three experimental rules (Phase 2)
+- 📋 Additional rules: prompt-injection, XSS, command-injection,
+  SQL-injection (Phase 2)
 - 📋 Hono / Express support via source/sink adapters (Phase 3)
 - 📋 Type-aware analysis, custom taint configs (Phase 4)
 
