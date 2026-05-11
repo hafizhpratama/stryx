@@ -1363,15 +1363,20 @@ fn ssrf_via_fetch_bad_fixture_fires() {
     let messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
     assert_eq!(
         findings.len(),
-        4,
-        "bad.ts has 4 SSRF cases (fetch, axios.get, got, template-concat); got {}: {:?}",
+        5,
+        "bad.ts has 5 SSRF cases (4 full-SSRF + 1 path-injection); got {}: {:?}",
         findings.len(),
         messages,
     );
     for f in &findings {
-        assert_eq!(f.severity, Severity::High);
         assert_eq!(f.span.file, path);
     }
+    // Severity tier split: 4 High (CASES 1-4, full SSRF) + 1
+    // Medium (CASE 5, path-injection in a host-pinned template).
+    let high = findings.iter().filter(|f| f.severity == Severity::High).count();
+    let medium = findings.iter().filter(|f| f.severity == Severity::Medium).count();
+    assert_eq!(high, 4, "expected 4 High-severity SSRF findings, got {high}");
+    assert_eq!(medium, 1, "expected 1 Medium-severity path-injection finding, got {medium}");
 }
 
 #[test]

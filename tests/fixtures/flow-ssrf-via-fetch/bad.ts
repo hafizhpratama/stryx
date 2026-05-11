@@ -27,8 +27,22 @@ export async function gotCase(req: NextRequest) {
 }
 
 // CASE 4: indirect via template-literal concat — body still flows in.
+// Host is itself an interpolation slot, NOT a pinned literal, so
+// severity stays High (full SSRF).
 export async function templateConcatCase(req: NextRequest) {
   const { host } = await req.json();
   const response = await fetch(`https://${host}/api/v1/info`);
+  return new Response(await response.text());
+}
+
+// CASE 5: path-injection — host is pinned in the leading quasi
+// (`https://api.example.com/.../`) and only a path segment is
+// body-controlled. Severity downgrades to Medium per the tier
+// split — bounded blast radius to the pinned API.
+export async function pathInjectionCase(req: NextRequest) {
+  const { domain } = await req.json();
+  const response = await fetch(
+    `https://api.example.com/v1/domains/${domain}`,
+  );
   return new Response(await response.text());
 }

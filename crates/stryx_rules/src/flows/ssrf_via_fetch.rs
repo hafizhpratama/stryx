@@ -254,16 +254,29 @@ impl SsrfVisitor {
         if !self.expr_taint(first_arg) {
             return;
         }
-        self.findings.push(
-            Finding::ast(
-                RULE_ID,
+        // Severity tier — distinguish full-URL SSRF from
+        // path-injection within a fixed host. When the first arg is
+        // a template literal whose leading quasi pins the URL scheme
+        // and host (`https://example.com/...`), the body data fills
+        // only a path/query slot — bounded blast radius, downgrade
+        // to Medium. Bare-ident shapes (`fetch(body.url)`) are
+        // full SSRF, host-arbitrary → High.
+        let (severity, message) = if is_host_pinned_template(first_arg) {
+            (
+                Severity::Medium,
+                "Untrusted request input reaches an outbound HTTP call as a path/query segment within a fixed-host URL — path-injection surface against the pinned API.".to_string(),
+            )
+        } else {
+            (
                 Severity::High,
                 "Untrusted request input reaches an outbound HTTP call as the URL without a recognised allow-list check.".to_string(),
-                to_span(&self.file, call.span),
             )
-            .with_help(
-                "Parse the URL with `new URL(input)` and check the host against an allow-list before calling fetch/axios/got. Reject anything outside the allow-list with a 4xx response.",
-            ),
+        };
+        self.findings.push(
+            Finding::ast(RULE_ID, severity, message, to_span(&self.file, call.span))
+                .with_help(
+                    "Parse the URL with `new URL(input)` and check the host against an allow-list before calling fetch/axios/got. For path-segment substitution, validate against an allow-list of expected path values and reject anything else with a 4xx response.",
+                ),
         );
     }
 }
@@ -507,6 +520,56 @@ fn branch_returns(branch: &Statement<'_>) -> bool {
             .any(|s| matches!(s, Statement::ReturnStatement(_) | Statement::ThrowStatement(_))),
         _ => false,
     }
+}
+
+/// True iff `expr` is a template literal whose leading static quasi
+/// pins a URL scheme + host — `https://example.com/...` or
+/// `http://example.com/...`. In that shape, body-tainted
+/// interpolations can only inject into the path/query, not control
+/// the destination host. Used by `check_http_sink` to downgrade
+/// the severity from High (full SSRF) to Medium (path-injection).
+///
+/// Recognition is intentionally conservative: requires a literal
+/// scheme prefix AND at least one host-like character following the
+/// scheme inside the same quasi (so the host name is not itself an
+/// interpolation slot like `https://${body.host}/...`).
+fn is_host_pinned_template(expr: &Expression<'_>) -> bool {
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
+            Expression::TSAsExpression(t) => cursor = &t.expression,
+            Expression::TSNonNullExpression(t) => cursor = &t.expression,
+            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
+            Expression::TSTypeAssertion(t) => cursor = &t.expression,
+            _ => break,
+        }
+    }
+    let Expression::TemplateLiteral(t) = cursor else {
+        return false;
+    };
+    // The leading quasi is the literal text before the first
+    // `${...}` interpolation. For a host-pinned template that's
+    // where the scheme+host live.
+    let Some(leading) = t.quasis.first() else {
+        return false;
+    };
+    let raw = leading.value.cooked.as_deref().unwrap_or("");
+    if !(raw.starts_with("https://") || raw.starts_with("http://")) {
+        return false;
+    }
+    // After the scheme there must be at least one host character
+    // before the first path separator — guarding against shapes
+    // like `https://${body.host}/...` where the host is itself
+    // interpolated.
+    let after_scheme = raw
+        .strip_prefix("https://")
+        .or_else(|| raw.strip_prefix("http://"))
+        .unwrap_or("");
+    after_scheme
+        .chars()
+        .take_while(|c| *c != '/')
+        .any(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
 }
 
 // Re-export under a local module-private alias so the type is
