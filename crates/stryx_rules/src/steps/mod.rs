@@ -107,36 +107,40 @@ pub trait TaintStep {
 
 /// Closed-enum registry of all step variants the engine knows about.
 ///
-/// Slice 8.1 scaffolds this as an uninhabited type — the dispatch
-/// methods are defined but uncallable. The first variant
-/// (`BodySource`) lands at slice 8.2, at which point this enum
-/// becomes inhabited and the methods become live dispatch.
+/// Slice 8.2 lands the first variant, [`sources::BodySource`].
+/// Subsequent slices add sinks (8.4), sanitisers (8.3), and
+/// propagators (8.5). The closed-enum shape keeps dispatch on the
+/// hot path as a jump table — no `Box<dyn TaintStep>`
+/// ([CLAUDE.md] hard rule #3).
 ///
-/// The uninhabited-now / variants-later shape is deliberate: it
-/// fixes the dispatch contract at slice 8.1 (every step variant
-/// must answer every method), but defers the variant additions to
-/// the per-role migration slices where they belong.
-pub enum StepKind {}
+/// [CLAUDE.md]: ../../../../CLAUDE.md
+pub enum StepKind {
+    BodySource(sources::BodySource),
+}
 
 impl StepKind {
-    pub fn as_source(&self, _ctx: &StepCtx<'_, '_>, _expr: &Expression<'_>) -> Option<TaintLabel> {
-        match *self {}
+    pub fn as_source(&self, ctx: &StepCtx<'_, '_>, expr: &Expression<'_>) -> Option<TaintLabel> {
+        match self {
+            StepKind::BodySource(s) => s.as_source(ctx, expr),
+        }
     }
 
-    pub fn as_sink(&self, _ctx: &StepCtx<'_, '_>, _call: &CallExpression<'_>) -> Option<SinkSpec> {
-        match *self {}
+    pub fn as_sink(&self, ctx: &StepCtx<'_, '_>, call: &CallExpression<'_>) -> Option<SinkSpec> {
+        match self {
+            StepKind::BodySource(s) => s.as_sink(ctx, call),
+        }
     }
 
-    pub fn as_sanitizer(&self, _ctx: &StepCtx<'_, '_>, _call: &CallExpression<'_>) -> bool {
-        match *self {}
+    pub fn as_sanitizer(&self, ctx: &StepCtx<'_, '_>, call: &CallExpression<'_>) -> bool {
+        match self {
+            StepKind::BodySource(s) => s.as_sanitizer(ctx, call),
+        }
     }
 
-    pub fn as_propagator(
-        &self,
-        _ctx: &StepCtx<'_, '_>,
-        _expr: &Expression<'_>,
-    ) -> Option<PropSpec> {
-        match *self {}
+    pub fn as_propagator(&self, ctx: &StepCtx<'_, '_>, expr: &Expression<'_>) -> Option<PropSpec> {
+        match self {
+            StepKind::BodySource(s) => s.as_propagator(ctx, expr),
+        }
     }
 }
 

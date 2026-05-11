@@ -33,6 +33,16 @@ use stryx_core::{Finding, Severity, Span};
 use stryx_index::{ClassInfo, FileSummary, ImportRef};
 use stryx_taint::{Cell, ExportedFunctionSummary, Offset, ParamFlow, Shape, TaintLabel, Xtaint};
 
+use crate::steps::sources::{BodySource, is_body_source_call, is_request_body_member};
+use crate::steps::{StepCtx, StepKind};
+
+/// Slice 8.2 of ADR 0008 — closed-enum step registry consulted by
+/// `FlowVisitor::registry_as_source`. The first variant
+/// (`BodySource`) recognises request-body sources across Next.js
+/// and Hono shapes; remaining slices add the other shipped
+/// predicates as variants here.
+const RULE_STEPS: &[StepKind] = &[StepKind::BodySource(BodySource)];
+
 use super::auth_bypass_via_wrapper::contains_auth_helper_call;
 
 use crate::{ExtractOutput, Rule, RuleContext, RuleMeta};
@@ -225,6 +235,32 @@ impl<'idx> FlowVisitor<'idx> {
 
     fn matches_body_call(&self, call: &CallExpression<'_>) -> bool {
         self.body_source_active() && is_body_source_call(call)
+    }
+
+    /// Slice 8.2 of ADR 0008 — construct the read-only [`StepCtx`]
+    /// every step recogniser consumes. Pulled from visitor state at
+    /// call time; cheap, no allocation.
+    fn step_ctx(&self) -> StepCtx<'_, 'idx> {
+        StepCtx {
+            file: &self.file,
+            index: self.index,
+            body_source_active: self.body_source_active(),
+        }
+    }
+
+    /// Slice 8.2 of ADR 0008 — registry-dispatched source check.
+    /// Iterates [`RULE_STEPS`] and returns the first matching
+    /// label, or `None` if no step recognises `expr` as a source.
+    /// Closed-enum dispatch over `StepKind`; release builds compile
+    /// to a jump table.
+    fn registry_as_source(&self, expr: &Expression<'_>) -> Option<TaintLabel> {
+        let ctx = self.step_ctx();
+        for step in RULE_STEPS {
+            if let Some(label) = step.as_source(&ctx, expr) {
+                return Some(label);
+            }
+        }
+        None
     }
 
     fn taint(&mut self, name: String) {
@@ -689,7 +725,24 @@ impl<'idx> FlowVisitor<'idx> {
                     return false;
                 }
                 // A request-body source call returns tainted data.
-                if self.matches_body_call(call) {
+                // Slice 8.2 of ADR 0008 — registry-dispatched source
+                // recognition. The legacy `matches_body_call` path
+                // continues to serve other call sites in this file
+                // until later slices migrate them; the parallel-
+                // assertion below verifies the registry doesn't
+                // diverge from the legacy predicate in debug builds.
+                let registry_source = self.registry_as_source(expr);
+                #[cfg(debug_assertions)]
+                {
+                    let legacy = self.matches_body_call(call);
+                    debug_assert_eq!(
+                        registry_source.is_some(),
+                        legacy,
+                        "BodySource registry diverged from legacy at call {:?}",
+                        call.span,
+                    );
+                }
+                if registry_source.is_some() {
                     return true;
                 }
                 // For any other call, taint propagates if a tainted
@@ -715,7 +768,22 @@ impl<'idx> FlowVisitor<'idx> {
 
             Expression::StaticMemberExpression(m) => {
                 // `req.body` / `request.body` are body sources.
-                if self.matches_body_member(&m.object, m.property.name.as_str()) {
+                // Slice 8.2 of ADR 0008 — registry-dispatched
+                // source recognition, with debug-assert parallel-
+                // check against the legacy `matches_body_member`
+                // predicate.
+                let registry_source = self.registry_as_source(expr);
+                #[cfg(debug_assertions)]
+                {
+                    let legacy = self.matches_body_member(&m.object, m.property.name.as_str());
+                    debug_assert_eq!(
+                        registry_source.is_some(),
+                        legacy,
+                        "BodySource registry diverged from legacy at member {:?}",
+                        m.span,
+                    );
+                }
+                if registry_source.is_some() {
                     return true;
                 }
                 self.expr_taint(&m.object)
@@ -1477,54 +1545,11 @@ impl FlowVisitor<'_> {
 }
 
 // ── Pattern matchers ──────────────────────────────────────────────────────
-
-fn is_request_body_member(object: &Expression<'_>, prop: &str) -> bool {
-    if prop != "body" {
-        return false;
-    }
-    is_request_like_expr(object)
-}
-
-fn is_body_source_call(call: &CallExpression<'_>) -> bool {
-    // Forms recognised:
-    //   req.json()        request.json()         req.text()       req.formData()
-    //   c.req.json()      ctx.req.json()         c.request.json() ctx.request.json()
-    //   The Hono variants chain through a context object (`c` or `ctx`).
-    let Some(callee) = call.callee.as_member_expression() else {
-        return false;
-    };
-    let MemberExpression::StaticMemberExpression(method_member) = callee else {
-        return false;
-    };
-    if !matches!(
-        method_member.property.name.as_str(),
-        "json" | "text" | "formData" | "arrayBuffer" | "blob"
-    ) {
-        return false;
-    }
-    is_request_like_expr(&method_member.object)
-}
-
-/// Matches an expression that we treat as a request object: either a bare
-/// `req`/`request`/`ctx`/`c` identifier, or a Hono-style `c.req`/`ctx.request`
-/// chain.
-fn is_request_like_expr(expr: &Expression<'_>) -> bool {
-    match expr {
-        Expression::Identifier(id) => {
-            matches!(id.name.as_str(), "req" | "request" | "ctx" | "c")
-        }
-        Expression::StaticMemberExpression(m) => {
-            if !matches!(m.property.name.as_str(), "req" | "request") {
-                return false;
-            }
-            matches!(
-                &m.object,
-                Expression::Identifier(id) if matches!(id.name.as_str(), "ctx" | "c")
-            )
-        }
-        _ => false,
-    }
-}
+//
+// `is_request_body_member`, `is_body_source_call`, and the helper
+// `is_request_like_expr` moved to `crate::steps::sources::body`
+// (ADR 0008 slice 8.2). Imported at the top of this file and
+// dispatched via `RULE_STEPS` through `registry_as_source`.
 
 fn is_sanitizer_call(call: &CallExpression<'_>) -> bool {
     let Some(callee) = call.callee.as_member_expression() else {
