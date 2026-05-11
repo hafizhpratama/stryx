@@ -18,6 +18,120 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.1.0] — 2026-05-11
+
+First stable release. Closes Phase 1 of [ADR 0003](docs/decisions/0003-cross-file-and-taint-as-core.md)
+(cross-file taint as the v0.1 core). The substrate is stable; six
+flow rules + one generic rule ship in the registry. ADR 0008
+(taint-step trait substrate) closed at slice 8.7; the closed-enum
+`StepKind` registry has 14 variants × 6 trait methods = 84 dispatch
+sites.
+
+**Real-world validation arc** — eight production-grade Next.js
+repos scanned (~28,800 TypeScript files total), zero engine-level
+false positives. Zero-finding repos (formbricks, inbox-zero,
+typebot, midday, lobe-chat, payload) confirm zod / TRPC / strong
+framework validation is recognised correctly. TP-heavy repos
+(papermark with 70 findings, dub with 6) catch the TS-cast-on-body
+and template-literal-host-injection patterns AI tools produce.
+
+**Performance** — 8,513 TS files scanned in 2.16s on lobe-chat
+(~3,900 files/sec), well under the `≤ 30s / 10k files` budget
+([ARCHITECTURE.md](ARCHITECTURE.md)).
+
+### Added
+
+- **Rule: `flow/ssrf-via-fetch`** ([docs](docs/rules/flow-ssrf-via-fetch.md))
+  — body source → `fetch` / `axios.<method>` / `got` sink. Slice 1
+  single-file; slice 2 adds the URL allow-list sanitiser
+  (`new URL(x)` + `!ALLOWED.has(parsed.host)` early-return); slice
+  3 adds the validator-function form
+  (`!isAllowedHost(parsed.host)`). Severity tier split: full-URL
+  SSRF emits High; host-pinned template path-injection emits
+  Medium.
+- **Rule: `flow/redirect-open`** ([docs](docs/rules/flow-redirect-open.md))
+  — body source → `NextResponse.redirect` / `redirect` / `res.redirect`
+  / `Response.redirect` sink. Slice 1 single-file. Shares the URL
+  allow-list sanitiser with `flow/ssrf-via-fetch`.
+- **Rule: `flow/path-traversal`** ([docs](docs/rules/flow-path-traversal.md))
+  — body source → `fs.<method>` / `fsPromises.<method>` /
+  `fs.promises.<method>` sink. Slice 1 single-file.
+- **ADR 0008 substrate** (closed) — `TaintStep` trait + closed-enum
+  `StepKind` registry with sources, sinks, sanitisers,
+  propagators, and HOF substrate. Adding a new rule wires its
+  detectors as step variants; visitors consult them via
+  `registry_as_*` helpers. Closed-enum dispatch keeps the hot path
+  as a jump table per [CLAUDE.md hard rule #3](CLAUDE.md).
+- **Step variants shipped at v0.1.0**: `BodySource`,
+  `ParserSanitizer`, `AuthCheckSanitizer`, `RedactorSanitizer`,
+  `PrismaWriteSink`, `DrizzleWriteSink`, `OrmWriteSink`,
+  `ResponseSink`, `FetchSink`, `RedirectSink`, `FsSink`,
+  `StructuralPropagator`, `FunCallable` (substrate placeholder),
+  `FunPropagation` (substrate placeholder), plus the URL
+  allow-list sanitiser helpers shared by SSRF + redirect-open.
+- **Kind-specialised source methods** on `TaintStep`:
+  `as_call_source(&CallExpression)` and
+  `as_member_source(&Expression, &str)` for contexts that don't
+  hold a full `&Expression` (chain-element walks, summary
+  extraction).
+- **Discriminated-union validator pattern recognition** in
+  `flow/unvalidated-body-to-db`: `const r = validate(body); if
+  (!r.success) return ...` untaints both `body` and `r` past the
+  guard. Eliminated 7 false positives observed on trigger.dev's
+  `feature-flags.ts` routes.
+- **Crate READMEs** for `stryx_taint`, `stryx_index`, `stryx_rules`,
+  `stryx_ast`.
+- **ADR 0011** — Phase 1 → Phase 2 transition plan with three
+  Phase 2 tracks (depth on existing rules, coverage breadth,
+  pulling drafted ADRs 0009/0010 into implementation).
+
+### Changed
+
+- **`flow/unvalidated-body-to-db`** routes sanitiser and sink
+  checks through the registry instead of calling the underlying
+  `is_*` predicates directly (`chain_element_taint`,
+  `expr_is_tainted_readonly`, `scan_for_sinks` ChainExpression
+  arm). Body-source checks use the new kind-specialised methods.
+- **`flow/secret-to-response`** routes redactor checks through
+  `RedactorSanitizer` (slice 8.3c) and response-sink detection
+  through `ResponseSink` (slice 8.4b).
+- **`flow/auth-bypass-via-wrapper`** routes auth-helper recognition
+  through `AuthCheckSanitizer` (slice 8.3b).
+- **URL allow-list sanitiser helpers** extracted to
+  `crate::steps::sanitizers::url_allowlist` and consumed by both
+  `flow/ssrf-via-fetch` and `flow/redirect-open` (rule-of-three).
+- **Parallel-assert guards deleted** after sufficient OSS validation
+  across ADR 0008 slices. The registry is now the single source of
+  truth from each rule's visitor.
+
+### Fixed
+
+- **`flow/secret-to-response` false positives** on dub's
+  `publicToken` / `embedToken` shapes. `INTENTIONAL_PUBLIC_PREFIXES`
+  (`public*`, `embed*`) and `init_looks_like_user_input` helper
+  recognise validator-output chains and intentionally-public names.
+- **`flow/unvalidated-body-to-db` false positives** on
+  trigger.dev's discriminated-union validator pattern
+  (`validate(body)` → `{success: true, data} | {success: false,
+  error}`).
+- **`flow/unvalidated-body-to-db` engine bug** on call-wrapped
+  sinks observed on documenso. The conservative fallback now
+  records root-level taint when `expr_is_tainted_readonly` returns
+  true but no structural shape matches.
+- **`flow/unvalidated-body-to-db` recognition** of conform-style
+  `parse(formData, { schema })` free-function sanitiser shape
+  (trigger.dev FP source).
+
+### Notes
+
+- Public CLI flags, JSON output schema, and rule IDs are now under
+  SemVer; backward-incompatible changes require a major bump.
+- The three new flow rules (`flow/ssrf-via-fetch`,
+  `flow/redirect-open`, `flow/path-traversal`) ship as
+  `experimental` status — single-file scope only. Cross-file
+  slice-2 extensions are the Track A critical path for v0.2 per
+  [ADR 0011](docs/decisions/0011-v01-to-v02-transition.md).
+
 ## [0.1.0-alpha.3] — 2026-05-10
 
 Phase 2 substrate of ADR 0006 (field-sensitive shape lattice) is
