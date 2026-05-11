@@ -9,7 +9,8 @@ using cross-file taint analysis with optional LLM-confirmed intent on
 genuinely ambiguous flows.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Status](https://img.shields.io/badge/status-pre--alpha-orange.svg)](#status)
+[![Release](https://img.shields.io/github/v/release/hafizhpratama/stryx?label=release)](https://github.com/hafizhpratama/stryx/releases/latest)
+[![CI](https://github.com/hafizhpratama/stryx/actions/workflows/ci.yml/badge.svg)](https://github.com/hafizhpratama/stryx/actions/workflows/ci.yml)
 
 ## Why
 
