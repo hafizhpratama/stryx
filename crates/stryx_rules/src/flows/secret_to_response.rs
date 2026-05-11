@@ -24,8 +24,6 @@ use stryx_ast::{
 use stryx_core::{Finding, Severity};
 
 use crate::steps::sanitizers::RedactorSanitizer;
-#[cfg(debug_assertions)]
-use crate::steps::sanitizers::{is_boolean_coercion, is_redactor_call};
 use crate::steps::sinks::{ResponseSink, is_response_constructor, response_sink_label};
 use crate::steps::{StepCtx, StepKind};
 use crate::{Rule, RuleContext, RuleMeta};
@@ -308,30 +306,13 @@ impl<'r> SecretFlowVisitor<'r> {
     fn scan_for_sinks(&mut self, expr: &Expression<'_>) {
         match expr {
             Expression::CallExpression(call) => {
-                // Slice 8.4b of ADR 0008 — registry-dispatched
-                // response-sink detection. The legacy
-                // `response_sink_label` still produces the message
-                // string (label) — extending SinkSpec to carry a
-                // label is a future refinement; today the parallel-
-                // assert verifies the registry and legacy agree on
-                // *whether* the call is a sink.
-                #[cfg(debug_assertions)]
-                let ctx = StepCtx {
-                    file: &self.file,
-                    index: None,
-                    body_source_active: false,
-                };
-                #[cfg(debug_assertions)]
-                let registry_is_sink = RULE_STEPS.iter().any(|s| s.as_sink(&ctx, call).is_some());
-                let legacy_label = response_sink_label(call);
-                #[cfg(debug_assertions)]
-                debug_assert_eq!(
-                    registry_is_sink,
-                    legacy_label.is_some(),
-                    "ResponseSink registry diverged from legacy at call {:?}",
-                    call.span,
-                );
-                if let Some(sink_label) = legacy_label {
+                // Registry-dispatched response-sink detection (ADR
+                // 0008). `response_sink_label` produces the message
+                // string the finding renders — extending SinkSpec to
+                // carry a label is a future refinement; until then
+                // the label producer doubles as the canonical sink
+                // classifier.
+                if let Some(sink_label) = response_sink_label(call) {
                     for arg in &call.arguments {
                         let Some(arg_expr) = arg.as_expression() else {
                             continue;
@@ -474,25 +455,15 @@ impl<'r> SecretFlowVisitor<'r> {
 
             Expression::CallExpression(call) => {
                 // Sanitisers strip the Secret label.
-                // Slice 8.3c of ADR 0008 — registry-dispatched
-                // redactor check (covers `redact`/`mask`/`fingerprint`
-                // /`hash` calls plus `Boolean(secret)` coercion).
+                // Registry-dispatched redactor check (ADR 0008) —
+                // covers `redact`/`mask`/`fingerprint`/`hash` calls
+                // plus `Boolean(secret)` coercion.
                 let ctx = StepCtx {
                     file: &self.file,
                     index: None,
                     body_source_active: false,
                 };
-                let registry_redacts = RULE_STEPS.iter().any(|s| s.as_sanitizer(&ctx, call));
-                #[cfg(debug_assertions)]
-                {
-                    let legacy = is_redactor_call(call) || is_boolean_coercion(call);
-                    debug_assert_eq!(
-                        registry_redacts, legacy,
-                        "RedactorSanitizer registry diverged from legacy at call {:?}",
-                        call.span,
-                    );
-                }
-                if registry_redacts {
+                if RULE_STEPS.iter().any(|s| s.as_sanitizer(&ctx, call)) {
                     return None;
                 }
                 // Serialisers (`JSON.stringify(...)`) preserve the

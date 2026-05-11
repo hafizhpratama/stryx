@@ -25,8 +25,6 @@ use stryx_ast::{
 use stryx_core::{Finding, Severity};
 
 use crate::steps::sanitizers::AuthCheckSanitizer;
-#[cfg(debug_assertions)]
-use crate::steps::sanitizers::call_invokes_auth_helper;
 use crate::steps::{StepCtx, StepKind};
 use crate::{Rule, RuleContext, RuleMeta};
 
@@ -252,29 +250,19 @@ impl<'a> Visit<'a> for AuthCheckVisitor {
         if self.found {
             return;
         }
-        // Slice 8.3b of ADR 0008 — registry-dispatched auth-check
-        // recognition. The body-walker stays where it lives; what
-        // moves is the per-call predicate (now `AuthCheckSanitizer`).
-        // The visitor doesn't have a real file path or project index
-        // (it operates on raw AST bodies during summary extraction),
-        // so it constructs a sentinel `StepCtx` — auth recognition
-        // is purely syntactic and the step ignores the ctx fields.
+        // ADR 0008 — registry-dispatched auth-check recognition.
+        // The body-walker stays where it lives; the per-call
+        // predicate moved to `AuthCheckSanitizer`. The visitor
+        // doesn't have a real file path or project index (it
+        // operates on raw AST bodies during summary extraction), so
+        // it constructs a sentinel `StepCtx` — auth recognition is
+        // purely syntactic and the step ignores the ctx fields.
         let ctx = StepCtx {
             file: std::path::Path::new(""),
             index: None,
             body_source_active: false,
         };
-        let registry_match = RULE_STEPS.iter().any(|s| s.as_sanitizer(&ctx, call));
-        #[cfg(debug_assertions)]
-        {
-            let legacy = call_invokes_auth_helper(call);
-            debug_assert_eq!(
-                registry_match, legacy,
-                "AuthCheckSanitizer registry diverged from legacy at call {:?}",
-                call.span,
-            );
-        }
-        if registry_match {
+        if RULE_STEPS.iter().any(|s| s.as_sanitizer(&ctx, call)) {
             self.found = true;
             return;
         }

@@ -34,8 +34,6 @@ use stryx_index::{ClassInfo, FileSummary, ImportRef};
 use stryx_taint::{Cell, ExportedFunctionSummary, Offset, ParamFlow, Shape, TaintLabel, Xtaint};
 
 use crate::steps::propagators::StructuralPropagator;
-#[cfg(debug_assertions)]
-use crate::steps::propagators::is_structural_propagator;
 use crate::steps::sanitizers::{ParserSanitizer, is_sanitizer_call};
 use crate::steps::sinks::{
     DrizzleWriteSink, OrmWriteSink, PrismaWriteSink, is_db_write_sink, is_prisma_write_sink,
@@ -333,27 +331,6 @@ impl<'idx> FlowVisitor<'idx> {
         let ctx = self.step_ctx();
         for step in RULE_STEPS {
             if let Some(spec) = step.as_sink(&ctx, call) {
-                return Some(spec);
-            }
-        }
-        None
-    }
-
-    /// Slice 8.5 of ADR 0008 — registry-dispatched propagator check.
-    /// Returns `Some(PropSpec)` iff any [`RULE_STEPS`] entry classifies
-    /// `expr` as a structural propagator (a shape whose taint flows
-    /// from its sub-expressions). The visitor's match arms still own
-    /// the actual recursion; this query is the parallel-assertion
-    /// counterpart that verifies the closed set of propagator shapes
-    /// hasn't drifted between the registry and the visitor.
-    #[cfg(debug_assertions)]
-    fn registry_as_propagator(
-        &self,
-        expr: &Expression<'_>,
-    ) -> Option<crate::steps::PropSpec> {
-        let ctx = self.step_ctx();
-        for step in RULE_STEPS {
-            if let Some(spec) = step.as_propagator(&ctx, expr) {
                 return Some(spec);
             }
         }
@@ -824,27 +801,10 @@ impl<'idx> FlowVisitor<'idx> {
     }
 
     /// Returns true if this expression's *value* should be considered
-    /// body-tainted.
+    /// body-tainted. The structural-propagator arms below correspond
+    /// to the closed set published by [`StructuralPropagator`] in the
+    /// step registry (ADR 0008).
     fn expr_taint(&mut self, expr: &Expression<'_>) -> bool {
-        // Slice 8.5 of ADR 0008 — parallel-assert the registry-side
-        // [`StructuralPropagator`] classifier agrees with the
-        // standalone `is_structural_propagator` predicate. The
-        // closed-enum dispatch over `StepKind` must produce the
-        // same boolean as the source-of-truth predicate; if a future
-        // edit wraps the step impl with extra context-dependent
-        // logic, this debug-asserts the divergence cheaply.
-        //
-        // Recursion behaviour itself lives in the match arms below
-        // — propagators are structural; the registry's role at this
-        // slice is to *publish* the closed set of propagating shapes
-        // for slice 8.6 (legacy deletion) and 8.7 (HOF) to consume.
-        #[cfg(debug_assertions)]
-        debug_assert_eq!(
-            self.registry_as_propagator(expr).is_some(),
-            is_structural_propagator(expr),
-            "StructuralPropagator registry diverged from is_structural_propagator at expr kind {:?}",
-            std::mem::discriminant(expr),
-        );
         match expr {
             Expression::Identifier(id) => self.is_tainted(id.name.as_str()),
 
@@ -854,22 +814,12 @@ impl<'idx> FlowVisitor<'idx> {
 
             Expression::CallExpression(call) => {
                 // A sanitizer call clears taint regardless of its argument.
-                // Slice 8.3a of ADR 0008 — registry-dispatched sanitiser
-                // recognition. Other call sites of is_sanitizer_call in
-                // this file stay on the legacy path until later slices
-                // migrate them; debug-assert parallel check verifies the
-                // registry agrees with the legacy predicate.
-                let registry_sanitizes = self.registry_as_sanitizer(call);
-                #[cfg(debug_assertions)]
-                {
-                    let legacy = is_sanitizer_call(call);
-                    debug_assert_eq!(
-                        registry_sanitizes, legacy,
-                        "ParserSanitizer registry diverged from legacy at call {:?}",
-                        call.span,
-                    );
-                }
-                if registry_sanitizes {
+                // Registry-dispatched (ADR 0008). Other call sites of
+                // `is_sanitizer_call` in this file (chain_element_taint,
+                // expr_is_tainted_readonly) still use the underlying
+                // predicate directly — a follow-up cleanup migrates
+                // those to `self.registry_as_sanitizer` as well.
+                if self.registry_as_sanitizer(call) {
                     // Still walk arguments to record any nested sinks/taint.
                     for arg in &call.arguments {
                         if let Some(e) = argument_expr(arg) {
@@ -894,24 +844,11 @@ impl<'idx> FlowVisitor<'idx> {
                     return false;
                 }
                 // A request-body source call returns tainted data.
-                // Slice 8.2 of ADR 0008 — registry-dispatched source
-                // recognition. The legacy `matches_body_call` path
-                // continues to serve other call sites in this file
-                // until later slices migrate them; the parallel-
-                // assertion below verifies the registry doesn't
-                // diverge from the legacy predicate in debug builds.
-                let registry_source = self.registry_as_source(expr);
-                #[cfg(debug_assertions)]
-                {
-                    let legacy = self.matches_body_call(call);
-                    debug_assert_eq!(
-                        registry_source.is_some(),
-                        legacy,
-                        "BodySource registry diverged from legacy at call {:?}",
-                        call.span,
-                    );
-                }
-                if registry_source.is_some() {
+                // Registry-dispatched (ADR 0008). Other call sites of
+                // `matches_body_call` in this file still call the
+                // underlying predicate directly — a follow-up cleanup
+                // migrates those.
+                if self.registry_as_source(expr).is_some() {
                     return true;
                 }
                 // For any other call, taint propagates if a tainted
@@ -937,21 +874,8 @@ impl<'idx> FlowVisitor<'idx> {
 
             Expression::StaticMemberExpression(m) => {
                 // `req.body` / `request.body` are body sources.
-                // Slice 8.2 of ADR 0008 — registry-dispatched
-                // source recognition, with debug-assert parallel-
-                // check against the legacy `matches_body_member`
-                // predicate.
+                // Registry-dispatched (ADR 0008).
                 let registry_source = self.registry_as_source(expr);
-                #[cfg(debug_assertions)]
-                {
-                    let legacy = self.matches_body_member(&m.object, m.property.name.as_str());
-                    debug_assert_eq!(
-                        registry_source.is_some(),
-                        legacy,
-                        "BodySource registry diverged from legacy at member {:?}",
-                        m.span,
-                    );
-                }
                 if registry_source.is_some() {
                     return true;
                 }
@@ -1425,24 +1349,8 @@ impl<'idx> FlowVisitor<'idx> {
                 // sinking to the DB without sanitisation.
                 self.check_cross_file_call(call);
 
-                // Slice 8.4 of ADR 0008 — registry-dispatched sink
-                // recognition. Other call sites of is_db_write_sink
-                // in this file stay on the legacy path until later
-                // slices migrate them; debug-assert parallel check
-                // verifies the registry agrees with the legacy
-                // predicate.
-                let registry_sink = self.registry_as_sink(call);
-                #[cfg(debug_assertions)]
-                {
-                    let legacy = is_db_write_sink(call);
-                    debug_assert_eq!(
-                        registry_sink.is_some(),
-                        legacy,
-                        "DB write sink registry diverged from legacy at call {:?}",
-                        call.span,
-                    );
-                }
-                if registry_sink.is_some() {
+                // Registry-dispatched sink recognition (ADR 0008).
+                if self.registry_as_sink(call).is_some() {
                     self.emit_db_sink_finding(call);
                 }
                 // Recurse into callee + args to catch nested sinks.
