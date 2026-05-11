@@ -532,6 +532,14 @@ pub struct ParamFlow {
     /// populating offsets and slice 3 collapses this field into a
     /// derived accessor (`!self.tainted_offsets.is_empty()`).
     pub reaches_db_sink_unsanitized: bool,
+    /// True iff there is a control-flow path from this parameter to an
+    /// outbound HTTP call (`fetch` / `axios.<m>` / `got`) used as the
+    /// URL argument, with no recognised URL allow-list sanitiser along
+    /// the way. Populated by `flow/ssrf-via-fetch`'s slice 2 extract
+    /// pass. Pre-slice-2 cache entries and rules that don't write to
+    /// this flag leave it `false` (serde default).
+    #[serde(default)]
+    pub reaches_fetch_sink_unsanitized: bool,
     /// Which field/index offsets of this parameter flow to a sink, if
     /// the rule populating the summary records that detail. Empty list
     /// means either "no taint reaches a sink" or "the rule has not yet
@@ -620,6 +628,40 @@ impl ExportedFunctionSummary {
             .get(idx)
             .is_some_and(|p| p.reaches_db_sink_unsanitized)
     }
+
+    /// True if calling this function with a tainted value at parameter
+    /// position `idx` would result in that taint reaching an outbound
+    /// HTTP call (`fetch`/`axios`/`got`) as the URL — i.e. a
+    /// cross-file SSRF.
+    pub fn taints_through_fetch_param(&self, idx: usize) -> bool {
+        self.params
+            .get(idx)
+            .is_some_and(|p| p.reaches_fetch_sink_unsanitized)
+    }
+
+    /// Merge per-rule sink flags from `other` into `self`. Used when
+    /// multiple rules' extract passes produce summaries for the same
+    /// export name — each rule populates its own `reaches_*_sink_*`
+    /// flag, and the merged summary must carry all of them so the
+    /// run pass can answer cross-file queries for every rule.
+    ///
+    /// Only the per-rule sink flags are unioned. Richer fields
+    /// (`tainted_offsets`, `param_shape`, `return_shape`,
+    /// `propagates_to_return`, `sink_span`) are left at their existing
+    /// values — by convention the rule that produced the more
+    /// sophisticated shape is the one whose summary was inserted
+    /// first, and slice 2 of SSRF deliberately doesn't populate
+    /// shapes (the simpler simulator only records reachability).
+    pub fn merge_per_rule_flags(&mut self, other: &ExportedFunctionSummary) {
+        self.contains_auth_check |= other.contains_auth_check;
+        self.validates_request_body |= other.validates_request_body;
+        for (i, other_p) in other.params.iter().enumerate() {
+            if let Some(p) = self.params.get_mut(i) {
+                p.reaches_db_sink_unsanitized |= other_p.reaches_db_sink_unsanitized;
+                p.reaches_fetch_sink_unsanitized |= other_p.reaches_fetch_sink_unsanitized;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -654,6 +696,56 @@ mod tests {
         let pf: ParamFlow = serde_json::from_str(pre).unwrap();
         assert!(pf.reaches_db_sink_unsanitized);
         assert!(pf.tainted_offsets.is_empty());
+    }
+
+    #[test]
+    fn paramflow_deserializes_pre_slice2_json_without_fetch_flag() {
+        // Cache entries written before slice 2 of flow/ssrf-via-fetch
+        // landed have no `reaches_fetch_sink_unsanitized` key. They
+        // must still deserialize, with the field defaulting to false
+        // — same cache-rollover contract as `tainted_offsets` (ADR
+        // 0005). Under-approximating is safe: a missing fetch flag
+        // just means the cross-file SSRF finding is silently skipped
+        // until the next extract pass rewrites the summary.
+        let pre = r#"{
+            "name": "fetchHelper",
+            "reaches_db_sink_unsanitized": false,
+            "propagates_to_return": false
+        }"#;
+        let pf: ParamFlow = serde_json::from_str(pre).unwrap();
+        assert!(!pf.reaches_db_sink_unsanitized);
+        assert!(!pf.reaches_fetch_sink_unsanitized);
+    }
+
+    #[test]
+    fn taints_through_fetch_param_reads_the_fetch_flag_only() {
+        // The two per-rule sink flags are independent — a param can
+        // taint to a DB sink without tainting to a fetch sink, and
+        // vice versa. The accessor must read its own flag.
+        let summary = ExportedFunctionSummary {
+            name: "h".into(),
+            params: vec![
+                ParamFlow {
+                    name: "p0".into(),
+                    reaches_db_sink_unsanitized: true,
+                    reaches_fetch_sink_unsanitized: false,
+                    ..Default::default()
+                },
+                ParamFlow {
+                    name: "p1".into(),
+                    reaches_db_sink_unsanitized: false,
+                    reaches_fetch_sink_unsanitized: true,
+                    ..Default::default()
+                },
+            ],
+            span: Span::new(std::path::PathBuf::new(), 0, 0),
+            contains_auth_check: false,
+            validates_request_body: false,
+        };
+        assert!(summary.taints_through_param(0));
+        assert!(!summary.taints_through_fetch_param(0));
+        assert!(!summary.taints_through_param(1));
+        assert!(summary.taints_through_fetch_param(1));
     }
 
     #[test]

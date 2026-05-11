@@ -378,6 +378,12 @@ struct ConvergenceSignal {
     /// `body.where`). Tracked separately so the convergence loop
     /// notices shape growth even when the offset list is unchanged.
     tainted_leaf_total: usize,
+    /// Slice 2 of `flow/ssrf-via-fetch` — params that reach a
+    /// fetch/axios/got sink as the URL argument. Independent axis
+    /// from `sink_params` (which counts DB-sink params): a callee
+    /// can taint to fetch without tainting to DB, so flipping this
+    /// flag across rounds is a separate convergence event.
+    fetch_sink_params: usize,
     /// Per ADR 0007 slice 3.1 — total Tainted leaves across every
     /// summarised param's `return_shape` tree. Mirrors
     /// `tainted_leaf_total` but for the return side. Required so the
@@ -394,11 +400,15 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
     let mut tainted_offset_total = 0;
     let mut tainted_leaf_total = 0;
     let mut return_leaf_total = 0;
+    let mut fetch_sink_params = 0;
     for file in index.files() {
         for export in file.exports.values() {
             for param in &export.params {
                 if param.reaches_db_sink_unsanitized {
                     sink_params += 1;
+                }
+                if param.reaches_fetch_sink_unsanitized {
+                    fetch_sink_params += 1;
                 }
                 if param.propagates_to_return {
                     propagating_params += 1;
@@ -416,6 +426,9 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
             for param in &local.params {
                 if param.reaches_db_sink_unsanitized {
                     sink_params += 1;
+                }
+                if param.reaches_fetch_sink_unsanitized {
+                    fetch_sink_params += 1;
                 }
                 if param.propagates_to_return {
                     propagating_params += 1;
@@ -438,6 +451,7 @@ fn convergence_signal(index: &ProjectIndex) -> ConvergenceSignal {
         tainted_offset_total,
         tainted_leaf_total,
         return_leaf_total,
+        fetch_sink_params,
     }
 }
 
@@ -526,6 +540,25 @@ mod tests {
             ..Default::default()
         }));
         assert_ne!(zero, one, "propagating_params axis must affect the signal");
+    }
+
+    /// Slice 2 of `flow/ssrf-via-fetch` added
+    /// `reaches_fetch_sink_unsanitized`. Per ADR 0004, it must be in
+    /// the convergence tuple — this test guards against the
+    /// silent-under-detection regression where the loop declares
+    /// convergence while a callee's fetch-sink reachability is still
+    /// flipping across iterations.
+    #[test]
+    fn convergence_signal_reflects_reaches_fetch_sink_unsanitized() {
+        let zero = signal_for(fixture_with_param(ParamFlow::default()));
+        let one = signal_for(fixture_with_param(ParamFlow {
+            reaches_fetch_sink_unsanitized: true,
+            ..Default::default()
+        }));
+        assert_ne!(
+            zero, one,
+            "fetch_sink_params axis must affect the signal"
+        );
     }
 
     /// Slice 2 of ADR 0006 added `tainted_offsets`. Per ADR 0004, it

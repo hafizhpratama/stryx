@@ -105,15 +105,38 @@ impl FileSummary {
     /// Existing entries on a conflicting key are kept — rules
     /// touching the same name should agree, and silent
     /// last-writer-wins is the bug `insert_file` previously had.
+    ///
+    /// Exception: per-rule sink flags on [`ExportedFunctionSummary`]
+    /// (`reaches_db_sink_unsanitized`, `reaches_fetch_sink_unsanitized`,
+    /// `contains_auth_check`, `validates_request_body`) are *unioned*
+    /// on collision rather than dropped. Each rule simulates the
+    /// callee's body to populate its own flag; without the union,
+    /// the second rule's contribution would be lost and cross-file
+    /// findings would silently disappear. See
+    /// `ExportedFunctionSummary::merge_per_rule_flags`.
     pub fn merge_with(&mut self, other: FileSummary) {
         if matches!(self.framework, FrameworkHint::Generic) {
             self.framework = other.framework;
         }
         for (k, v) in other.exports {
-            self.exports.entry(k).or_insert(v);
+            match self.exports.entry(k) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(v);
+                }
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    e.get_mut().merge_per_rule_flags(&v);
+                }
+            }
         }
         for (k, v) in other.locals {
-            self.locals.entry(k).or_insert(v);
+            match self.locals.entry(k) {
+                std::collections::hash_map::Entry::Vacant(e) => {
+                    e.insert(v);
+                }
+                std::collections::hash_map::Entry::Occupied(mut e) => {
+                    e.get_mut().merge_per_rule_flags(&v);
+                }
+            }
         }
         for (k, v) in other.imports {
             self.imports.entry(k).or_insert(v);
@@ -557,6 +580,63 @@ mod tests {
             merged.wildcard_re_exports,
             vec!["./shared".to_string(), "./other".to_string()],
             "wildcard re-exports must dedupe across merges"
+        );
+    }
+
+    #[test]
+    fn merge_unions_per_rule_sink_flags_on_export_collision() {
+        // Two rules each simulate the same exported helper: rule A
+        // (flow/unvalidated-body-to-db) records that param 0 reaches
+        // a DB sink; rule B (flow/ssrf-via-fetch slice 2) records
+        // that the same param 0 reaches a fetch sink. The merged
+        // summary must carry both flags — otherwise the run pass
+        // sees only the first-writer's flag and one cross-file
+        // finding silently disappears.
+        use stryx_taint::ParamFlow;
+        let path = PathBuf::from("/helper.ts");
+        let mut idx = ProjectIndex::new();
+
+        let mut a_summary = dummy_summary("doStuff");
+        a_summary.params.push(ParamFlow {
+            name: "input".into(),
+            reaches_db_sink_unsanitized: true,
+            reaches_fetch_sink_unsanitized: false,
+            ..Default::default()
+        });
+        let mut a = FileSummary {
+            path: path.clone(),
+            ..Default::default()
+        };
+        a.exports.insert("doStuff".into(), a_summary);
+        idx.insert_file(a);
+
+        let mut b_summary = dummy_summary("doStuff");
+        b_summary.params.push(ParamFlow {
+            name: "input".into(),
+            reaches_db_sink_unsanitized: false,
+            reaches_fetch_sink_unsanitized: true,
+            ..Default::default()
+        });
+        let mut b = FileSummary {
+            path: path.clone(),
+            ..Default::default()
+        };
+        b.exports.insert("doStuff".into(), b_summary);
+        idx.insert_file(b);
+
+        let merged = idx.file(&path).expect("merged");
+        let merged_export = merged
+            .exports
+            .get("doStuff")
+            .expect("doStuff export present");
+        let param = merged_export.params.first().expect("param 0 present");
+        assert!(
+            param.reaches_db_sink_unsanitized,
+            "rule A's DB-sink flag was lost on collision"
+        );
+        assert!(
+            param.reaches_fetch_sink_unsanitized,
+            "rule B's fetch-sink flag was lost on collision"
         );
     }
 }
