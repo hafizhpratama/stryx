@@ -32,5 +32,6 @@ pub fn builtin_rules() -> RuleRegistry {
     reg.register(Arc::new(flows::AuthBypassViaWrapper::new()));
     reg.register(Arc::new(flows::SsrfViaFetch::new()));
     reg.register(Arc::new(flows::RedirectOpen::new()));
+    reg.register(Arc::new(flows::PathTraversal::new()));
     reg
 }

@@ -1427,3 +1427,38 @@ fn redirect_open_good_fixture_silent() {
         findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
     );
 }
+
+#[test]
+fn path_traversal_bad_fixture_fires() {
+    let path = fixtures_root().join("flow-path-traversal/bad.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/path-traversal")
+        .collect();
+    let messages: Vec<&str> = findings.iter().map(|f| f.message.as_str()).collect();
+    assert_eq!(
+        findings.len(),
+        5,
+        "bad.ts has 5 path-traversal cases (readFileSync, fs.promises.readFile, writeFile, createReadStream, unlink); got {}: {:?}",
+        findings.len(),
+        messages,
+    );
+    for f in &findings {
+        assert_eq!(f.severity, Severity::High);
+        assert_eq!(f.span.file, path);
+    }
+}
+
+#[test]
+fn path_traversal_good_fixture_silent() {
+    let path = fixtures_root().join("flow-path-traversal/good.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/path-traversal")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "good.ts has only hardcoded/env paths — expected zero path-traversal findings, got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
