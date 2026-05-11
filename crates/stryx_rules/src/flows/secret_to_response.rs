@@ -24,16 +24,20 @@ use stryx_ast::{
 use stryx_core::{Finding, Severity};
 
 use crate::steps::sanitizers::{RedactorSanitizer, is_boolean_coercion, is_redactor_call};
+use crate::steps::sinks::{ResponseSink, is_response_constructor, response_sink_label};
 use crate::steps::{StepCtx, StepKind};
 use crate::{Rule, RuleContext, RuleMeta};
 
 const RULE_ID: &str = "flow/secret-to-response";
 
-/// Per-rule step registry (ADR 0008 slice 8.3c). The redactor
-/// sanitiser recogniser is the first variant; future slices add
-/// secret sources (env-var reads, hardcoded credentials) and
-/// response-body sinks here.
-const RULE_STEPS: &[StepKind] = &[StepKind::RedactorSanitizer(RedactorSanitizer)];
+/// Per-rule step registry. The redactor sanitiser strips Secret on
+/// `redact`/`mask`/`Boolean(...)` calls (slice 8.3c); the response
+/// sink fires findings on `Response.json` / `res.send` / `c.json`
+/// shapes (slice 8.4b).
+const RULE_STEPS: &[StepKind] = &[
+    StepKind::RedactorSanitizer(RedactorSanitizer),
+    StepKind::ResponseSink(ResponseSink),
+];
 
 /// Names treated as public-by-convention regardless of suffix. Backed by
 /// concrete prefix and exact-name lists so a `stryx.toml` override can
@@ -302,7 +306,28 @@ impl<'r> SecretFlowVisitor<'r> {
     fn scan_for_sinks(&mut self, expr: &Expression<'_>) {
         match expr {
             Expression::CallExpression(call) => {
-                if let Some(sink_label) = response_sink_label(call) {
+                // Slice 8.4b of ADR 0008 — registry-dispatched
+                // response-sink detection. The legacy
+                // `response_sink_label` still produces the message
+                // string (label) — extending SinkSpec to carry a
+                // label is a future refinement; today the parallel-
+                // assert verifies the registry and legacy agree on
+                // *whether* the call is a sink.
+                let ctx = StepCtx {
+                    file: &self.file,
+                    index: None,
+                    body_source_active: false,
+                };
+                let registry_is_sink = RULE_STEPS.iter().any(|s| s.as_sink(&ctx, call).is_some());
+                let legacy_label = response_sink_label(call);
+                #[cfg(debug_assertions)]
+                debug_assert_eq!(
+                    registry_is_sink,
+                    legacy_label.is_some(),
+                    "ResponseSink registry diverged from legacy at call {:?}",
+                    call.span,
+                );
+                if let Some(sink_label) = legacy_label {
                     for arg in &call.arguments {
                         let Some(arg_expr) = arg.as_expression() else {
                             continue;
@@ -550,44 +575,9 @@ fn process_env_name(expr: &Expression<'_>) -> Option<String> {
     Some(outer.property.name.to_string())
 }
 
-/// Returns a label like "Response.json" when `call` is a recognised
-/// response-body sink.
-fn response_sink_label(call: &CallExpression<'_>) -> Option<String> {
-    let MemberExpression::StaticMemberExpression(method) = call.callee.as_member_expression()?
-    else {
-        return None;
-    };
-    let prop = method.property.name.as_str();
-    let receiver = match &method.object {
-        Expression::Identifier(id) => id.name.as_str().to_string(),
-        // `ctx.json(...)` is fine via Identifier path. But Hono's `c.req`
-        // chain isn't a response sink; skip member receivers entirely.
-        _ => return None,
-    };
-
-    let is_sink = match (receiver.as_str(), prop) {
-        // Express / Pages Router style.
-        ("res", "json" | "send" | "end" | "write") => true,
-        // Fastify.
-        ("reply", "send") => true,
-        // Hono.
-        ("c" | "ctx", "json" | "text" | "html" | "body") => true,
-        // Web standard / Next.js App Router static helpers.
-        ("Response" | "NextResponse", "json") => true,
-        _ => false,
-    };
-    if !is_sink {
-        return None;
-    }
-    Some(format!("{receiver}.{prop}"))
-}
-
-fn is_response_constructor(callee: &Expression<'_>) -> bool {
-    matches!(
-        callee,
-        Expression::Identifier(id) if id.name == "Response"
-    )
-}
+// `response_sink_label` and `is_response_constructor` moved to
+// `crate::steps::sinks::response` (ADR 0008 slice 8.4b). Imported
+// at the top of this file.
 
 // `is_redactor_call` and `is_boolean_coercion` moved to
 // `crate::steps::sanitizers::redactor` (ADR 0008 slice 8.3c).
