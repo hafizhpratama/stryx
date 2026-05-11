@@ -33,15 +33,22 @@ use stryx_core::{Finding, Severity, Span};
 use stryx_index::{ClassInfo, FileSummary, ImportRef};
 use stryx_taint::{Cell, ExportedFunctionSummary, Offset, ParamFlow, Shape, TaintLabel, Xtaint};
 
+use crate::steps::sanitizers::{ParserSanitizer, is_sanitizer_call};
 use crate::steps::sources::{BodySource, is_body_source_call, is_request_body_member};
 use crate::steps::{StepCtx, StepKind};
 
-/// Slice 8.2 of ADR 0008 — closed-enum step registry consulted by
-/// `FlowVisitor::registry_as_source`. The first variant
-/// (`BodySource`) recognises request-body sources across Next.js
-/// and Hono shapes; remaining slices add the other shipped
-/// predicates as variants here.
-const RULE_STEPS: &[StepKind] = &[StepKind::BodySource(BodySource)];
+/// Closed-enum step registry consulted by `FlowVisitor`. Each
+/// variant maps onto one of the four taint roles (source/sink/
+/// sanitizer/propagator) and is queried via the matching
+/// `registry_as_*` helper. ADR 0008 slices migrate predicates one
+/// role at a time.
+const RULE_STEPS: &[StepKind] = &[
+    // Slice 8.2 — body-source recogniser (Next.js + Hono).
+    StepKind::BodySource(BodySource),
+    // Slice 8.3a — parser-style sanitiser (zod/valibot/yup +
+    // conform `parse(x, { schema })` + Stripe webhook constructEvent).
+    StepKind::ParserSanitizer(ParserSanitizer),
+];
 
 use super::auth_bypass_via_wrapper::contains_auth_helper_call;
 
@@ -261,6 +268,15 @@ impl<'idx> FlowVisitor<'idx> {
             }
         }
         None
+    }
+
+    /// Slice 8.3a of ADR 0008 — registry-dispatched sanitiser check.
+    /// Returns `true` if any [`RULE_STEPS`] entry recognises `call`
+    /// as a sanitiser; same closed-enum dispatch shape as
+    /// `registry_as_source`.
+    fn registry_as_sanitizer(&self, call: &CallExpression<'_>) -> bool {
+        let ctx = self.step_ctx();
+        RULE_STEPS.iter().any(|step| step.as_sanitizer(&ctx, call))
     }
 
     fn taint(&mut self, name: String) {
@@ -700,7 +716,22 @@ impl<'idx> FlowVisitor<'idx> {
 
             Expression::CallExpression(call) => {
                 // A sanitizer call clears taint regardless of its argument.
-                if is_sanitizer_call(call) {
+                // Slice 8.3a of ADR 0008 — registry-dispatched sanitiser
+                // recognition. Other call sites of is_sanitizer_call in
+                // this file stay on the legacy path until later slices
+                // migrate them; debug-assert parallel check verifies the
+                // registry agrees with the legacy predicate.
+                let registry_sanitizes = self.registry_as_sanitizer(call);
+                #[cfg(debug_assertions)]
+                {
+                    let legacy = is_sanitizer_call(call);
+                    debug_assert_eq!(
+                        registry_sanitizes, legacy,
+                        "ParserSanitizer registry diverged from legacy at call {:?}",
+                        call.span,
+                    );
+                }
+                if registry_sanitizes {
                     // Still walk arguments to record any nested sinks/taint.
                     for arg in &call.arguments {
                         if let Some(e) = argument_expr(arg) {
@@ -1582,88 +1613,10 @@ impl FlowVisitor<'_> {
 // (ADR 0008 slice 8.2). Imported at the top of this file and
 // dispatched via `RULE_STEPS` through `registry_as_source`.
 
-fn is_sanitizer_call(call: &CallExpression<'_>) -> bool {
-    // Free-function form: `parse(input, { schema })` —
-    // `@conform-to/zod`'s `parse` (and the parallel `@conform-to/yup`,
-    // `@conform-to/valibot`) take the input as arg 0 and a config
-    // object containing a `schema` key as arg 1. The function
-    // validates `input` against the schema and returns a discriminated
-    // result. Stryx recognises this only when the second argument is
-    // an object literal with a `schema` property — so generic
-    // `parse(x, y)` calls (e.g. a custom int parser, `parse(text,
-    // base)`) do not match.
-    //
-    // Observed FP source: trigger.dev's Remix routes (alerts,
-    // settings _index, etc.) using `parse(formData, { schema })`.
-    if let Expression::Identifier(id) = &call.callee
-        && id.name == "parse"
-        && second_arg_has_schema_key(call)
-    {
-        return true;
-    }
-
-    let Some(callee) = call.callee.as_member_expression() else {
-        return false;
-    };
-    let MemberExpression::StaticMemberExpression(method) = callee else {
-        return false;
-    };
-    let prop = method.property.name.as_str();
-
-    // Zod / valibot / yup parser style: any object exposing
-    // `.parse`, `.safeParse`, `.parseAsync`, `.safeParseAsync`. Covers
-    // `Schema.parse(body)`, `CreateUserSchema.safeParse(...)`, etc.
-    if matches!(
-        prop,
-        "parse" | "safeParse" | "parseAsync" | "safeParseAsync"
-    ) {
-        return true;
-    }
-
-    // Stripe webhook signature verification:
-    //   `stripe.webhooks.constructEvent(body, signature, secret)`
-    // Throws on bad signature; on success returns a verified Stripe.Event
-    // whose shape is enforced by the Stripe SDK. Treat it as a sanitiser.
-    if prop == "constructEvent"
-        && let Expression::StaticMemberExpression(inner) = &method.object
-        && inner.property.name == "webhooks"
-    {
-        return true;
-    }
-
-    false
-}
-
-/// True iff `call`'s second argument is an object-literal expression
-/// containing a `schema` property (either shorthand `{ schema }` or
-/// keyed `{ schema: ... }`). Used to distinguish conform-style
-/// `parse(input, { schema })` from generic 2-arg `parse` calls.
-fn second_arg_has_schema_key(call: &CallExpression<'_>) -> bool {
-    let Some(second_arg) = call.arguments.get(1).and_then(argument_expr) else {
-        return false;
-    };
-    let mut cursor = second_arg;
-    loop {
-        match cursor {
-            Expression::ObjectExpression(obj) => {
-                return obj.properties.iter().any(|p| match p {
-                    ObjectPropertyKind::ObjectProperty(prop) => {
-                        matches!(
-                            &prop.key,
-                            PropertyKey::StaticIdentifier(id) if id.name == "schema"
-                        )
-                    }
-                    ObjectPropertyKind::SpreadProperty(_) => false,
-                });
-            }
-            // Trivial wrappers — drill through.
-            Expression::ParenthesizedExpression(p) => cursor = &p.expression,
-            Expression::TSAsExpression(t) => cursor = &t.expression,
-            Expression::TSSatisfiesExpression(t) => cursor = &t.expression,
-            _ => return false,
-        }
-    }
-}
+// `is_sanitizer_call` and `second_arg_has_schema_key` moved to
+// `crate::steps::sanitizers::parser` (ADR 0008 slice 8.3a). Imported
+// at the top of this file; expr_taint dispatches through
+// `RULE_STEPS` via `registry_as_sanitizer`.
 
 fn is_db_read_call(call: &CallExpression<'_>) -> bool {
     let Some(callee) = call.callee.as_member_expression() else {

@@ -116,30 +116,35 @@ pub trait TaintStep {
 /// [CLAUDE.md]: ../../../../CLAUDE.md
 pub enum StepKind {
     BodySource(sources::BodySource),
+    ParserSanitizer(sanitizers::ParserSanitizer),
 }
 
 impl StepKind {
     pub fn as_source(&self, ctx: &StepCtx<'_, '_>, expr: &Expression<'_>) -> Option<TaintLabel> {
         match self {
             StepKind::BodySource(s) => s.as_source(ctx, expr),
+            StepKind::ParserSanitizer(s) => s.as_source(ctx, expr),
         }
     }
 
     pub fn as_sink(&self, ctx: &StepCtx<'_, '_>, call: &CallExpression<'_>) -> Option<SinkSpec> {
         match self {
             StepKind::BodySource(s) => s.as_sink(ctx, call),
+            StepKind::ParserSanitizer(s) => s.as_sink(ctx, call),
         }
     }
 
     pub fn as_sanitizer(&self, ctx: &StepCtx<'_, '_>, call: &CallExpression<'_>) -> bool {
         match self {
             StepKind::BodySource(s) => s.as_sanitizer(ctx, call),
+            StepKind::ParserSanitizer(s) => s.as_sanitizer(ctx, call),
         }
     }
 
     pub fn as_propagator(&self, ctx: &StepCtx<'_, '_>, expr: &Expression<'_>) -> Option<PropSpec> {
         match self {
             StepKind::BodySource(s) => s.as_propagator(ctx, expr),
+            StepKind::ParserSanitizer(s) => s.as_propagator(ctx, expr),
         }
     }
 }
