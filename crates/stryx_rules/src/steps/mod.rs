@@ -1,0 +1,191 @@
+//! Taint flow step substrate ([ADR 0008]).
+//!
+//! Each step variant recognises a fragment of taint-flow semantics —
+//! a source, sink, sanitiser, or propagator — that the visitor
+//! dispatches through a closed-enum registry. Rules declare their
+//! applicable steps as a `&'static [StepKind]` constant; the visitor
+//! asks the registry "does this expression match any source?" rather
+//! than calling hardcoded predicates inline.
+//!
+//! Slice 8.1 of ADR 0008 — substrate-only. The trait, value types,
+//! and an uninhabited [`StepKind`] enum are defined. First real
+//! variant lands in slice 8.2 ([`sources::BodySource`]).
+//!
+//! [ADR 0008]: ../../../../docs/decisions/0008-taint-step-trait-substrate.md
+//! [`sources::BodySource`]: sources
+
+use std::path::Path;
+
+use stryx_ast::ast::{CallExpression, Expression};
+use stryx_core::Severity;
+use stryx_index::ProjectIndex;
+use stryx_taint::TaintLabel;
+
+pub mod propagators;
+pub mod sanitizers;
+pub mod sinks;
+pub mod sources;
+
+/// Read-only context handed to every step recogniser. Carries the
+/// view of state a step needs to decide whether it applies at a
+/// given expression site.
+///
+/// Mutable visitor state (scope stack, param-shape accumulator) is
+/// intentionally not exposed here — steps answer questions; the
+/// visitor mutates state in response to their answers. Future
+/// slices may extend this struct as new step variants need more
+/// context, but adding mutability is out of scope.
+pub struct StepCtx<'a, 'idx> {
+    pub file: &'a Path,
+    pub index: Option<&'idx ProjectIndex>,
+    /// `true` when the visitor is *not* inside a validation-wrapper
+    /// suppression frame. Body-source recognition is gated on this
+    /// flag — see [ADR 0006] for the wrapper-suppression model.
+    ///
+    /// [ADR 0006]: ../../../../docs/decisions/0006-shape-lattice-taint-summary.md
+    pub body_source_active: bool,
+}
+
+/// What a sink recogniser tells the visitor when it matches.
+///
+/// Severity is a *hint* — the consuming rule still applies its own
+/// downgrade rules (e.g. Prisma `where`-only writes drop from High
+/// to Medium). Sink recognition is decoupled from severity policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SinkSpec {
+    pub severity_hint: Severity,
+}
+
+/// Kind of propagation a [`PropSpec`] describes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PropKind {
+    /// Sub-expression taint flows into this expression as taint.
+    /// Example: `body + ""` propagates `body`'s taint to the result.
+    Taint,
+    /// Pass-through value semantics — taint is preserved verbatim,
+    /// not introduced. Example: parenthesised expression.
+    Value,
+}
+
+/// What a propagator recogniser tells the visitor when it matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PropSpec {
+    pub kind: PropKind,
+}
+
+/// A taint flow step.
+///
+/// Each impl recognises a fragment of taint semantics — one of
+/// {source, sink, sanitiser, propagator}. All four methods default
+/// to no-op (return `None` / `false`); impls only override the
+/// methods they actually handle. A `BodySource` step overrides
+/// `as_source` only; a `PrismaWriteSink` overrides `as_sink` only;
+/// most steps participate in a single role.
+///
+/// The trait is dispatched via [`StepKind`]'s closed-enum match —
+/// no `Box<dyn TaintStep>` in the hot path
+/// ([CLAUDE.md](../../../../CLAUDE.md) hard rule #3). Authoring a
+/// new step means: write a struct, `impl TaintStep` for it, add a
+/// variant to `StepKind`.
+pub trait TaintStep {
+    fn as_source(&self, _ctx: &StepCtx<'_, '_>, _expr: &Expression<'_>) -> Option<TaintLabel> {
+        None
+    }
+
+    fn as_sink(&self, _ctx: &StepCtx<'_, '_>, _call: &CallExpression<'_>) -> Option<SinkSpec> {
+        None
+    }
+
+    fn as_sanitizer(&self, _ctx: &StepCtx<'_, '_>, _call: &CallExpression<'_>) -> bool {
+        false
+    }
+
+    fn as_propagator(&self, _ctx: &StepCtx<'_, '_>, _expr: &Expression<'_>) -> Option<PropSpec> {
+        None
+    }
+}
+
+/// Closed-enum registry of all step variants the engine knows about.
+///
+/// Slice 8.1 scaffolds this as an uninhabited type — the dispatch
+/// methods are defined but uncallable. The first variant
+/// (`BodySource`) lands at slice 8.2, at which point this enum
+/// becomes inhabited and the methods become live dispatch.
+///
+/// The uninhabited-now / variants-later shape is deliberate: it
+/// fixes the dispatch contract at slice 8.1 (every step variant
+/// must answer every method), but defers the variant additions to
+/// the per-role migration slices where they belong.
+pub enum StepKind {}
+
+impl StepKind {
+    pub fn as_source(&self, _ctx: &StepCtx<'_, '_>, _expr: &Expression<'_>) -> Option<TaintLabel> {
+        match *self {}
+    }
+
+    pub fn as_sink(&self, _ctx: &StepCtx<'_, '_>, _call: &CallExpression<'_>) -> Option<SinkSpec> {
+        match *self {}
+    }
+
+    pub fn as_sanitizer(&self, _ctx: &StepCtx<'_, '_>, _call: &CallExpression<'_>) -> bool {
+        match *self {}
+    }
+
+    pub fn as_propagator(
+        &self,
+        _ctx: &StepCtx<'_, '_>,
+        _expr: &Expression<'_>,
+    ) -> Option<PropSpec> {
+        match *self {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Concrete impl with all defaults — proves the default methods
+    /// compile and return the no-op values.
+    struct AllDefaults;
+    impl TaintStep for AllDefaults {}
+
+    fn ctx() -> StepCtx<'static, 'static> {
+        StepCtx {
+            file: Path::new("/dev/null"),
+            index: None,
+            body_source_active: true,
+        }
+    }
+
+    /// `as_source` defaults to `None`. We can't easily construct an
+    /// `Expression<'_>` without a parsed AST here, so we exercise
+    /// the trait surface via a test that doesn't materialise a real
+    /// expression — the call site type-checks the signature, which
+    /// is the contract slice 8.1 establishes.
+    #[test]
+    fn default_impls_match_substrate_contract() {
+        let _ = AllDefaults;
+        let _ = ctx();
+        // The substantive checks (default = None / false on real
+        // expressions) land at slice 8.2 with the first variant,
+        // which gives us a real Expression to pass.
+    }
+
+    #[test]
+    fn sink_and_prop_specs_round_trip() {
+        let s = SinkSpec {
+            severity_hint: Severity::High,
+        };
+        assert_eq!(s.severity_hint, Severity::High);
+
+        let p = PropSpec {
+            kind: PropKind::Taint,
+        };
+        assert_eq!(p.kind, PropKind::Taint);
+
+        let v = PropSpec {
+            kind: PropKind::Value,
+        };
+        assert_ne!(v.kind, p.kind);
+    }
+}

@@ -17,6 +17,7 @@
 pub mod flows;
 pub mod generic;
 pub mod registry;
+pub mod steps;
 
 use stryx_ast::ParsedFile;
 use stryx_core::{Finding, RuleId, Severity};
