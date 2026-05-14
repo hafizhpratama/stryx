@@ -18,6 +18,20 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-05-14
+
+Patch release. **All Critical-severity rules now have cross-file
+taint coverage** — SQL injection and command injection joined SSRF /
+redirect-open / unvalidated-body-to-db in the cross-file tier. Plus
+one precision fix surfaced by the v0.1.0 papermark OSS sweep.
+
+`ParamFlow` gained two new reach flags
+(`reaches_sql_sink_unsanitized`, `reaches_exec_sink_unsanitized`)
+and one precision flag (`fetch_sink_path_pinned_only`). Pre-v0.2.1
+cache entries deserialize cleanly via `#[serde(default)]` —
+backwards-compatible. No breaking changes to the public CLI or JSON
+output contract.
+
 ### Added
 
 - `flow/command-injection-via-exec` slice 2 — cross-file taint

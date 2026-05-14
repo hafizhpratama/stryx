@@ -41,7 +41,7 @@ cd stryx
 cargo install --path crates/stryx_cli
 ```
 
-Pre-built binaries — attached to the [v0.2.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.0)
+Pre-built binaries — attached to the [v0.2.1 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.1)
 across five targets (Linux x64/arm64, macOS x64/arm64, Windows x64).
 
 Cargo (`cargo install stryx-cli`), npm (`npx stryx scan`), and Homebrew
@@ -144,12 +144,13 @@ with `--no-llm` for fully local deterministic scans (the default).
 
 ## Status
 
-**v0.2.0 — second release.** Phase 2 Track A closed (cross-file
-slice 2 for the v0.1 experimental rules) and Track B
-over-delivered (4-of-4 new flow rules vs. ADR 0011's planned
-"pick 1-2"). 10 rules in the registry, plus the App Router
-`searchParams.X` body-source recogniser lifting coverage across
-every body-flow rule. APIs follow SemVer. See
+**v0.2.1 — patch release.** All Critical-severity rules now have
+cross-file taint coverage — `flow/sql-injection` and
+`flow/command-injection-via-exec` joined SSRF, redirect-open, and
+unvalidated-body-to-db in the cross-file tier. Plus one precision
+fix on SSRF host-pinning (env-var-prefix templates now correctly
+classified Medium path-injection). 10 rules in the registry, no
+new rules vs. v0.2.0. APIs follow SemVer. See
 [ADR 0011](docs/decisions/0011-v01-to-v02-transition.md) for
 the Phase 2 plan and the v0.1 retrospective.
 
@@ -159,19 +160,21 @@ the Phase 2 plan and the v0.1 retrospective.
   - `flow/unvalidated-body-to-db`
   - `flow/auth-bypass-via-wrapper`
   - `flow/secret-to-response`
-- ✅ Experimental cross-file rules (v0.2):
+- ✅ Experimental cross-file rules (v0.2 / v0.2.1):
   - `flow/ssrf-via-fetch` (slice 2 cross-file, three-level
-    chain convergence, URL-allow-list sanitisers)
+    chain convergence, URL-allow-list sanitisers, env-host
+    path-injection precision)
   - `flow/redirect-open` (slice 2 cross-file)
+  - `flow/sql-injection` (slice 2 cross-file — Critical;
+    Prisma `$queryRawUnsafe` / Drizzle `sql.raw` /
+    node-postgres raw query)
+  - `flow/command-injection-via-exec` (slice 2 cross-file —
+    Critical; Node.js `child_process` exec / spawn / execFile)
 - ✅ Experimental single-file rules (v0.2):
   - `flow/path-traversal`
   - `flow/prompt-injection` (OpenAI + Anthropic)
   - `flow/xss-via-dangerously-set-inner-html` (DOMPurify +
     sanitize-html sanitisers)
-  - `flow/sql-injection` (Critical — Prisma `$queryRawUnsafe`
-    / Drizzle `sql.raw` / node-postgres raw query)
-  - `flow/command-injection-via-exec` (Critical — Node.js
-    `child_process` exec / spawn / execFile)
 - ✅ App Router `searchParams.X` recognised as a body source
 - ✅ CLI binary (`cargo install --path crates/stryx_cli`)
 - ✅ Pre-built binaries on [GitHub Releases](https://github.com/hafizhpratama/stryx/releases)
