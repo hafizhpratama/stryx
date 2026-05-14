@@ -2,6 +2,25 @@
 
 How rules are structured in the Stryx codebase.
 
+## Implementation status (as of v0.2.1)
+
+📋 The richly-typed `Rule` trait sketch below — with
+`interests()`, `taint_signature()`, `scope()`, and per-node
+dispatch — is design intent. The actual shipped trait at v0.2.1
+is leaner: `meta()` + `extract()` + `run()` (see
+[`crates/stryx_rules/src/lib.rs`](../../crates/stryx_rules/src/lib.rs)).
+`RuleMeta` carries `id`, `default_severity`, and `description`;
+`extract()` contributes a per-file summary to the project index
+(default no-op); `run()` returns `Vec<Finding>`. Source / sink /
+sanitiser primitives moved into the `StepKind` + `TaintStep`
+substrate per [ADR 0008](../decisions/0008-taint-step-trait-substrate.md),
+not the trait surface.
+
+The sketch below remains useful as the planning shape the trait
+is evolving toward (per-node `interests` dispatch, formal
+`taint_signature()`, formal `RuleScope` enum) — when rule count
+makes the abstraction pay for itself.
+
 ## The `Rule` trait
 
 Every rule implements this trait, defined in `crates/stryx_rules/src/lib.rs`.
@@ -97,7 +116,7 @@ impl Rule for UnvalidatedBodyToDb {
 
     fn taint_signature(&self) -> Option<TaintSignature> {
         Some(TaintSignature::flow(
-            TaintLabel::UntrustedInput,
+            TaintLabel::UserInput,
             /* sink_id = */ "db.write",
         ))
     }
@@ -159,7 +178,7 @@ For a *single-file* rule (e.g., a pure-AST sanitizer detector), set
 We provide several visitor traits in `stryx_ast::visit`:
 
 - `Visit` — read-only AST walking
-- `VisitMut` — mutable, for future auto-fix work (not used in v0.1)
+- `VisitMut` — mutable, for future auto-fix work (not used at v0.2.1)
 - `VisitWithCtx` — visitor with implicit context threading
 
 Most rules use `Visit`. Implement only the methods for node types you

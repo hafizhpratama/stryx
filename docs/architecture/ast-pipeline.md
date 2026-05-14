@@ -287,8 +287,9 @@ process (configurable via `--max-skip-rate`).
   through `node_modules`. Function calls into installed packages are
   treated as opaque. Supply-chain analysis is a separate engine.
 - **Auto-fix** — We report; we don't rewrite. Auto-fix is v2.
-- **Incremental scans** — Every scan is full. Incremental scans (only
-  changed files) require LSP-style integration; on the roadmap, not v0.1.
+- **Incremental scans** — Every scan is full. Incremental scans
+  (only changed files) require LSP-style integration; on the
+  roadmap, not v0.2.1.
 
 Cross-file analysis itself is **done** by this pipeline as of v0.1
 (per [ADR 0003](../decisions/0003-cross-file-and-taint-as-core.md));

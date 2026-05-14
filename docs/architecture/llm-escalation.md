@@ -3,6 +3,22 @@
 When and how Stryx escalates from deterministic AST analysis to a Large
 Language Model for context-aware analysis.
 
+## Implementation status (as of v0.2.1)
+
+📋 This document is design intent. The vocabulary
+(`UncertainZone`, `LlmClient` trait, escalation flow, cache shape)
+exists in `stryx_core` / `stryx_llm`, but **no v0.2.1 rule actually
+emits `UncertainZone`s** and the `--no-llm` CLI flag / `[llm]`
+config block are not yet wired. Every shipped finding at v0.2.1
+comes from the deterministic Layer 2 path, so scans are already
+deterministic by construction.
+
+`flow/auth-bypass-via-wrapper` is the planned first consumer once
+the LLM client lands — its wrapper-intent classification is the
+canonical Layer 3 use case (see [ADR 0003](../decisions/0003-cross-file-and-taint-as-core.md)
+"LLM-as-precision-recovery"). Until then, treat the sections below
+as the design we're building toward.
+
 ## When it fires
 
 A Layer 3 escalation happens when:
