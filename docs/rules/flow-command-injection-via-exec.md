@@ -12,7 +12,7 @@
 | Rule ID | `flow/command-injection-via-exec` |
 | Status | experimental |
 | Severity | critical |
-| Frameworks | generic Node, nextjs >= 13 self-hosted (single-file slice 1) |
+| Frameworks | generic Node, nextjs >= 13 self-hosted (single-file + cross-file slice 2) |
 | Default | enabled |
 | Added in | v0.2 (Phase 2 of [ADR 0011](../decisions/0011-v01-to-v02-transition.md), Track B) |
 
@@ -139,7 +139,7 @@ shape.
 | Source labels | `UserInput` (body / query / headers / `searchParams`) |
 | Sink ids | `proc.exec` / `proc.execSync` / `proc.execFile` / `proc.execFileSync` / `proc.spawn` / `proc.spawnSync`. Bare-name and `cp.X` / `childProcess.X` / `child_process.X` member shapes. |
 | Sanitizers recognized | None for slice 1. The canonical safe path is `execFile(<literal binary>, [args])` with a fixed binary path — recognised by *absence* (a literal-string first argument carries no taint). |
-| Scope | `SingleFile` |
+| Scope | `SingleFile` + `CrossFile` |
 
 ## Detection logic
 
@@ -155,10 +155,16 @@ shape.
    runs the standard body-taint walk on it.
 3. If the argument is body-tainted, emit a Critical Finding at
    the call span.
-
-Slice 1 covers same-file flows. Slice 2 (deferred) extends to
-cross-file via the same `ExportedFunctionSummary` consumer used
-by the other body-flow rules.
+4. **Cross-file (slice 2).** The extract pass simulates each
+   exported function with one parameter pre-tainted and records
+   `ParamFlow::reaches_exec_sink_unsanitized` when the simulation
+   observes a `child_process` sink. The run pass walks call sites;
+   when a tainted argument flows into a reach-flagged parameter
+   slot of a callee resolved via the project index, a Critical
+   finding is emitted at the call site. Helpers that switch
+   internally to `execFile(<literal-binary>, [<args>])` (hardcoded
+   binary path, user input only in the argv array) drop the reach
+   flag and suppress the call-site finding.
 
 ## Known false positive zones
 
@@ -204,3 +210,4 @@ recogniser can't tell whether the call resolves to a
 | Version | Change |
 |---|---|
 | v0.2 | Initial single-file slice — body source → `child_process` `exec` / `execSync` / `execFile` / `execFileSync` / `spawn` / `spawnSync` sinks. Bare-ident and conventional-receiver member-call shapes. Severity Critical. No sanitiser recognition. |
+| v0.2.1 | Slice 2 — cross-file taint via `ExportedFunctionSummary::reaches_exec_sink_unsanitized`. Route handler → imported helper → `child_process` call chains now fire at the call site with Critical severity. Helper that switches to the safer `execFile(<literal-binary>, [<args>])` shape (hardcoded binary, argv array) suppresses the call-site finding. |

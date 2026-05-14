@@ -20,6 +20,17 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- `flow/command-injection-via-exec` slice 2 — cross-file taint
+  detection. The extract pass records
+  `ParamFlow::reaches_exec_sink_unsanitized` when a parameter
+  reaches a Node.js `child_process` `exec` / `execSync` / `execFile`
+  / `execFileSync` / `spawn` / `spawnSync` call. The run pass emits
+  a Critical finding at the call site when a tainted argument flows
+  into a reach-flagged parameter of a callee resolved via the
+  project index. Helpers that switch internally to
+  `execFile(<literal-binary>, [<args>])` (hardcoded binary, argv
+  array) suppress the call-site finding. Closes the
+  "all Critical-severity rules have cross-file" gap.
 - `flow/sql-injection` slice 2 — cross-file taint detection. The
   extract pass simulates each exported function with one parameter
   pre-tainted and records `ParamFlow::reaches_sql_sink_unsanitized`

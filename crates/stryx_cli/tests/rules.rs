@@ -1731,6 +1731,55 @@ fn command_injection_via_exec_good_fixture_silent() {
 }
 
 #[test]
+fn command_injection_via_exec_cross_file_bad_fires() {
+    // Slice 2 — the child_process call lives in `./lib.ts`, not in
+    // the route. The extract pass must summarise
+    // `convertVideo(input)` with `reaches_exec_sink_unsanitized =
+    // true` on param 0, and the run pass must emit a Critical
+    // finding on `route.ts` at the call site.
+    let dir = fixtures_root().join("flow-command-injection-via-exec/cross-file-bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/command-injection-via-exec")
+        .collect();
+    let route_path = dir.join("route.ts");
+    let cross_file_finding = findings
+        .iter()
+        .find(|f| f.span.file == route_path && f.message.contains("convertVideo"));
+    assert!(
+        cross_file_finding.is_some(),
+        "expected a cross-file command-injection finding on route.ts referencing convertVideo; got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(cross_file_finding.unwrap().severity, Severity::Critical);
+}
+
+#[test]
+fn command_injection_via_exec_cross_file_good_silent() {
+    // Same call shape as cross-file-bad, but the helper uses
+    // `execFile` with a hardcoded binary path and the input passed
+    // as an argv element. The simulator must not record any sink
+    // reach for the param, so the route's call-site finding stays
+    // silent.
+    let dir = fixtures_root().join("flow-command-injection-via-exec/cross-file-good");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/command-injection-via-exec")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "expected zero command-injection findings on cross-file-good/, got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn sql_injection_bad_fixture_fires() {
     let path = fixtures_root().join("flow-sql-injection/bad.ts");
     let findings: Vec<_> = scan_file(&path)
