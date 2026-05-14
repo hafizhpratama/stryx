@@ -19,10 +19,14 @@
     "ai",
     "taint-analysis"
   ],
+  "bin": {
+    "stryx": "bin/stryx.js"
+  },
   "files": [
     "index.js",
     "index.d.ts",
-    "stryx.*.node"
+    "stryx.*.node",
+    "bin/stryx.js"
   ],
   "napi": {
     "binaryName": "stryx",
