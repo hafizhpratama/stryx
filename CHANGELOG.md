@@ -18,6 +18,38 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Changed
+
+- Docs reorganisation: `CLAUDE.md` is now the single source of
+  truth for AI-agent context. `AGENTS.md` removed (was a 33-line
+  pointer to `CLAUDE.md`); `.github/copilot-instructions.md`
+  trimmed to a thin pointer to `CLAUDE.md` instead of duplicating
+  its content. `README.md` adds an explicit pointer for AI agents
+  (Claude Code, Cursor, Copilot, Codex, …).
+- Rule-doc consistency pass: all 10 rule docs in `docs/rules/`
+  now share the same 14-section template shape (the four newer
+  rule docs gained `Configuration` + `Suppressing this rule`
+  sections, and `Performance` was renamed to
+  `Performance characteristics` for parity).
+- `docs/rules/README.md` rewritten as the current v0.2.1 catalog:
+  three tiers (stable cross-file v0.1, experimental cross-file
+  v0.2/v0.2.1, experimental single-file v0.2, generic single-file)
+  + scope legend + StepKind / ParamFlow flag counts. Previously
+  listed planned-but-never-built rules.
+- Rule-count corrections: README, CLAUDE, ARCHITECTURE, and the
+  v0.2.0 CHANGELOG retrospective entry said "10 rules" but the
+  actual v0.2.0 tag carried 11 (path-traversal missed in the
+  prose). Corrected to 11.
+
+### Fixed
+
+- ADR 0011 status: `Proposed` → `Accepted`. Phase 2 closed at
+  v0.2.1, retrospective section added (Track A shipped + extended,
+  Track B over-delivered 4 of 4 vs "pick 1-2", Track C deferred
+  pending rule-of-three).
+- `ARCHITECTURE.md` and `CLAUDE.md` last-reviewed date bumped
+  2026-05-09 → 2026-05-14.
+
 ## [0.2.1] — 2026-05-14
 
 Patch release. **All Critical-severity rules now have cross-file

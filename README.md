@@ -199,6 +199,11 @@ the Phase 2 plan and the v0.1 retrospective.
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
 
+> **AI agents working in this repo** — Claude Code, Cursor, Copilot,
+> Codex, and others — read [`CLAUDE.md`](CLAUDE.md). It's the single
+> source of truth for project conventions, anti-patterns, and the
+> rule-authoring workflow.
+
 ## Contributing
 
 Stryx grows by community-contributed AI failure patterns. If you've
