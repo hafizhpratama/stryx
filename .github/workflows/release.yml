@@ -34,8 +34,12 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             archive: tar.gz
+          # macos-13 (Intel) was retired by GitHub in April 2026.
+          # x86_64-apple-darwin cross-compiles cleanly from macos-14
+          # (Apple Silicon) because macOS ships the x86 codegen
+          # backend by default.
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-14
             archive: tar.gz
           - target: aarch64-apple-darwin
             runner: macos-latest
@@ -54,6 +58,14 @@ jobs:
         with:
           toolchain: "1.93"
           targets: ${{ matrix.target }}
+
+      # `dtolnay/rust-toolchain@master` installs but does not always
+      # set a `rustup default`, so subprocess `cargo` invocations
+      # (e.g. napi-rs CLI's internal `cargo metadata` call from a
+      # cwd that loses workspace `rust-toolchain.toml` discovery)
+      # error out. Explicit default — belt-and-braces.
+      - name: Set rustup default
+        run: rustup default 1.93
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
@@ -109,8 +121,10 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
+          # macos-13 (Intel) retired April 2026; cross-compile from
+          # Apple Silicon instead.
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-14
           - target: aarch64-apple-darwin
             runner: macos-latest
           - target: x86_64-pc-windows-msvc
@@ -126,6 +140,13 @@ jobs:
         with:
           toolchain: "1.93"
           targets: ${{ matrix.target }}
+
+      # napi-rs CLI invokes `cargo metadata` from a cwd that can
+      # lose `rust-toolchain.toml` discovery, so we set the default
+      # explicitly. Without this, the build fails with
+      # "rustup could not choose a version of cargo to run".
+      - name: Set rustup default
+        run: rustup default 1.93
 
       - name: Setup Node
         uses: actions/setup-node@v4

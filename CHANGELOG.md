@@ -18,6 +18,31 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.2] — 2026-05-14
+
+Patch release. **CI fix only — no engine, rule, or public-API
+changes.** Cuts a new tag because the v0.2.1 release workflow
+failed to produce GitHub Release artifacts, blocking the npm
+publish path.
+
+### Fixed
+
+- `release.yml`: the `napi (aarch64-apple-darwin)` matrix entry
+  was failing with `Internal Error: cargo metadata exited with
+  code 1 / rustup could not choose a version of cargo to run`.
+  Root cause: napi-rs CLI shells out to `cargo metadata` from a
+  cwd that loses workspace `rust-toolchain.toml` discovery, and
+  `dtolnay/rust-toolchain@master` was no longer setting a
+  `rustup default`. Fix: explicit `rustup default 1.93` step
+  after every toolchain install.
+- `release.yml`: the `cli (x86_64-apple-darwin)` and
+  `napi (x86_64-apple-darwin)` matrix entries were stuck queued
+  indefinitely on `runs-on: macos-13` — GitHub retired the
+  macos-13 Intel runner pool in April 2026. Fix: cross-compile
+  `x86_64-apple-darwin` from `macos-14` (Apple Silicon) using
+  `--target x86_64-apple-darwin`. macOS ships the x86 codegen
+  backend by default so no extra setup is needed.
+
 ### Added
 
 - `npx stryx scan` works locally — the napi-rs package gained a
