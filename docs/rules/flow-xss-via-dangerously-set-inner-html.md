@@ -150,11 +150,36 @@ Future slices may emit UncertainZones when the `__html` value
 comes from a function call whose sanitiser-classification cannot
 be determined statically (custom renderers, dynamic config).
 
-## Performance
+## Performance characteristics
 
 - AST analysis: ~0.3ms per file (single-file slice 1; same shape
   as `flow/path-traversal`).
 - Layer 3 (when enabled): not used in slice 1.
+
+## Configuration
+
+```toml
+[rules."flow/xss-via-dangerously-set-inner-html"]
+severity = "high"
+```
+
+## Suppressing this rule
+
+Inline:
+```tsx
+{/* stryx-disable-next-line flow/xss-via-dangerously-set-inner-html -- reason */}
+```
+
+File-level:
+```ts
+// stryx-disable flow/xss-via-dangerously-set-inner-html
+```
+
+Project-level (`stryx.toml`):
+```toml
+[rules]
+disabled = ["flow/xss-via-dangerously-set-inner-html"]
+```
 
 ## See also
 

@@ -191,10 +191,38 @@ wrappers and other indirection patterns where the static
 recogniser can't tell whether the call resolves to a
 `child_process` API.
 
-## Performance
+## Performance characteristics
 
 - AST analysis: ~0.3ms per file (single-file slice 1; same shape
   as `flow/path-traversal` and `flow/sql-injection`).
+- Cross-file slice 2 adds one per-export per-param simulation
+  during the extract pass; reach-only contribution, no shape
+  walks.
+
+## Configuration
+
+```toml
+[rules."flow/command-injection-via-exec"]
+severity = "critical"
+```
+
+## Suppressing this rule
+
+Inline:
+```ts
+// stryx-disable-next-line flow/command-injection-via-exec -- reason
+```
+
+File-level:
+```ts
+// stryx-disable flow/command-injection-via-exec
+```
+
+Project-level (`stryx.toml`):
+```toml
+[rules]
+disabled = ["flow/command-injection-via-exec"]
+```
 
 ## See also
 

@@ -1,7 +1,8 @@
 # ADR 0011 — Phase 1 (v0.1) → Phase 2 (v0.2) transition plan
 
 - **Date**: 2026-05-11
-- **Status**: Proposed
+- **Status**: Accepted (Phase 2 closed at v0.2.1, 2026-05-14 —
+  see [Retrospective](#retrospective))
 - **Decider**: Hafizh Pratama
 - **Supersedes**: none
 - **Refines**: [ADR 0003](0003-cross-file-and-taint-as-core.md), [ADR 0008](0008-taint-step-trait-substrate.md)
@@ -253,3 +254,53 @@ Status snapshot derived from `git log --oneline` between
 `v0.0.1` tag and `fc908ec` (path-traversal commit). Real-world
 validation numbers from `/tmp/scan-*.json` artifacts produced
 during 2026-05-09 → 2026-05-11 OSS sweep.
+
+## Retrospective
+
+> Added 2026-05-14 at Phase 2 close-out.
+
+Phase 2 closed with **v0.2.0** (2026-05-11) and **v0.2.1**
+(2026-05-14). Outcomes vs. plan:
+
+**Track A — depth on existing rules.** Both planned slices
+shipped (`flow/ssrf-via-fetch` slice 2 + `flow/redirect-open`
+slice 2). v0.2.1 extended cross-file to the two Critical-
+severity rules `flow/sql-injection` and
+`flow/command-injection-via-exec` as well — beyond the original
+Track A scope.
+
+**Track B — coverage breadth.** Plan called for "pick 1-2" of
+the four Phase 2 rule candidates. **All four shipped**
+(`flow/prompt-injection`, `flow/xss-via-dangerously-set-inner-html`,
+`flow/sql-injection`, `flow/command-injection-via-exec`). The
+critical injection classes (SQL + command injection) shipped
+single-file in v0.2.0 and were promoted to cross-file in v0.2.1.
+
+**Track C — substrate features.** ADRs 0009 (guard-based
+barriers) and 0010 (external library summaries) remain in
+`Proposed` status. The decision was rule-of-three deferred — the
+existing ad-hoc guard patterns proved sufficient for v0.2's rule
+set; substrate consolidation was not the bottleneck for any
+Track A/B work.
+
+**Precision fixes from OSS sweep.** The v0.1.0 papermark sweep
+surfaced one FP (`revalidateLinkById` flagged as full SSRF when
+the host was env-pinned). The v0.2.1 SSRF host-pinning
+recogniser was added with single-file + cross-file propagation
+via `ParamFlow::fetch_sink_path_pinned_only`.
+
+**Registry size.** 7 rules at v0.1.0 → 11 rules at v0.2.1 (+4).
+
+**ParamFlow flags.** v0.1 carried one reach flag
+(`reaches_db_sink_unsanitized`). v0.2.1 carries five
+(db / fetch / redirect / sql / exec, plus `fetch_sink_path_pinned_only`
+for the precision tier split). All flags `#[serde(default)]` for
+cache-format compat.
+
+**StepKind growth.** 14 variants at v0.1 → 17 variants at v0.2.1
+(+3: `LlmPromptSink`, `SqlSink`, `ExecSink`). 6 trait methods ×
+17 variants = 102 dispatch sites.
+
+**Phase 3 entry.** Phase 3 (Hono / Express adapters, napi-rs npm
+distribution, GitHub Action, Homebrew formula) is the next plan;
+captured in `README.md` Status section and `CLAUDE.md` Roadmap.

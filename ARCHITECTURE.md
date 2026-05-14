@@ -109,7 +109,7 @@ stryx/
   `sources/`, `sinks/`, `sanitizers/`, and `flows/` (per ADR 0003).
   Each rule implements the `Rule` trait and may declare a
   `taint_signature()` and `scope()` (single-file or cross-file).
-  At v0.2.1, 10 rules ship in the registry; the `StepKind` substrate
+  At v0.2.1, 11 rules ship in the registry; the `StepKind` substrate
   (ADR 0008) carries 17 closed-enum variants × 6 trait methods.
 
 - **`stryx_llm`** owns: the `LlmClient` trait, prompt templates per rule,

@@ -191,11 +191,36 @@ slices may emit UncertainZones for `text → embedding → vectorstore →
 retrieved-context → prompt` chains, where the structural recogniser
 cannot tell whether the retrieved context is attacker-influenced.
 
-## Performance
+## Performance characteristics
 
 - AST analysis: ~0.3ms per file (single-file slice 1, similar to
   `flow/ssrf-via-fetch`).
 - Layer 3 (when enabled): not used in slice 1.
+
+## Configuration
+
+```toml
+[rules."flow/prompt-injection"]
+severity = "high"
+```
+
+## Suppressing this rule
+
+Inline:
+```ts
+// stryx-disable-next-line flow/prompt-injection -- reason
+```
+
+File-level:
+```ts
+// stryx-disable flow/prompt-injection
+```
+
+Project-level (`stryx.toml`):
+```toml
+[rules]
+disabled = ["flow/prompt-injection"]
+```
 
 ## See also
 

@@ -71,10 +71,10 @@ severity threshold are emitted, so it works as a CI gate.
 
 ## What Stryx catches
 
-Ten rules in the registry today — three stable cross-file flows,
-two cross-file flows promoted from experimental, four new
-experimental flows for the AI-coding-tool audience and the
-critical-severity injection classes, and one single-file generic.
+Eleven rules in the registry today — three stable cross-file
+flows, four cross-file flows for the AI-coding-tool audience
+(including both Critical-severity injection classes), three
+experimental single-file flows, and one single-file generic.
 See [`docs/rules/`](docs/rules/) for the full contracts.
 
 **Stable (v0.1):**
@@ -149,7 +149,7 @@ cross-file taint coverage — `flow/sql-injection` and
 `flow/command-injection-via-exec` joined SSRF, redirect-open, and
 unvalidated-body-to-db in the cross-file tier. Plus one precision
 fix on SSRF host-pinning (env-var-prefix templates now correctly
-classified Medium path-injection). 10 rules in the registry, no
+classified Medium path-injection). 11 rules in the registry, no
 new rules vs. v0.2.0. APIs follow SemVer. See
 [ADR 0011](docs/decisions/0011-v01-to-v02-transition.md) for
 the Phase 2 plan and the v0.1 retrospective.

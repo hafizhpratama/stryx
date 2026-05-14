@@ -176,10 +176,38 @@ Future slices may emit UncertainZones when the SQL argument is
 sourced from a function call whose return-type information would
 disambiguate the safety boundary.
 
-## Performance
+## Performance characteristics
 
 - AST analysis: ~0.3ms per file (single-file slice 1; same shape
   as `flow/path-traversal` and `flow/ssrf-via-fetch` slice 1).
+- Cross-file slice 2 adds one per-export per-param simulation
+  during the extract pass; reach-only contribution, no shape
+  walks.
+
+## Configuration
+
+```toml
+[rules."flow/sql-injection"]
+severity = "critical"
+```
+
+## Suppressing this rule
+
+Inline:
+```ts
+// stryx-disable-next-line flow/sql-injection -- reason
+```
+
+File-level:
+```ts
+// stryx-disable flow/sql-injection
+```
+
+Project-level (`stryx.toml`):
+```toml
+[rules]
+disabled = ["flow/sql-injection"]
+```
 
 ## See also
 

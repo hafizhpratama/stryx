@@ -317,7 +317,7 @@ Reflects [ADR 0003](docs/decisions/0003-cross-file-and-taint-as-core.md)
   Single-file slice 1 for path-traversal, prompt-injection, XSS.
   App Router `searchParams.X` body-source recognition. SSRF
   host-pinning precision (env-var-prefix templates → Medium
-  path-injection). 10 rules in the registry. See
+  path-injection). 11 rules in the registry. See
   [ADR 0011](docs/decisions/0011-v01-to-v02-transition.md) for the
   Phase 2 plan + retrospective.
 - **Phase 3** 🚧 in-progress — Hono and Express via source/sink
