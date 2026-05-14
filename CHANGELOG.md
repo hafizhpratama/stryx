@@ -18,6 +18,24 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-05-15
+
+Patch release. **CI fix only — no engine, rule, or public-API
+changes.** Cuts a new tag because the v0.2.3 release workflow
+failed on `cli (aarch64-apple-darwin)` (macos-15 runner): bare
+`cargo build` resolved to `rustup-init` (the installer) instead
+of the cargo shim. The napi build on the same runner succeeded
+because `napi build` invokes cargo as a subprocess via Node with
+a different PATH context.
+
+### Fixed
+
+- `release.yml`: the `Build CLI` step now uses `rustup run 1.93
+  cargo build` instead of bare `cargo build`. `rustup run`
+  bypasses PATH resolution and invokes the toolchain directly,
+  sidestepping the macos-15 runner's PATH ordering issue where
+  `cargo` resolves to `rustup-init`.
+
 ## [0.2.3] — 2026-05-14
 
 Patch release. **CI fix only — no engine, rule, or public-API

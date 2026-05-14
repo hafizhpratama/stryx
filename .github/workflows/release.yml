@@ -73,7 +73,12 @@ jobs:
           shared-key: release-${{ matrix.target }}
 
       - name: Build CLI (${{ matrix.target }})
-        run: cargo build --release --bin stryx --target ${{ matrix.target }}
+        # `rustup run 1.93 cargo` is more robust than naked `cargo`
+        # — on macos-15 the bare `cargo` binary occasionally resolves
+        # to rustup-init (the installer) instead of the cargo shim,
+        # failing with "unexpected argument 'build'". `rustup run`
+        # bypasses PATH and invokes the toolchain directly.
+        run: rustup run 1.93 cargo build --release --bin stryx --target ${{ matrix.target }}
 
       # Resolve binary name (Windows appends .exe). Output the
       # finalised archive path so the upload step is platform-agnostic.

@@ -41,7 +41,7 @@ cd stryx
 cargo install --path crates/stryx_cli
 ```
 
-Pre-built binaries — attached to the [v0.2.3 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.3)
+Pre-built binaries — attached to the [v0.2.4 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.4)
 across five targets (Linux x64/arm64, macOS x64/arm64, Windows x64).
 
 Cargo (`cargo install stryx-cli`), npm (`npx stryx scan`), and Homebrew
@@ -144,7 +144,7 @@ with `--no-llm` for fully local deterministic scans (the default).
 
 ## Status
 
-**v0.2.3 — patch release.** All Critical-severity rules now have
+**v0.2.4 — patch release.** All Critical-severity rules now have
 cross-file taint coverage — `flow/sql-injection` and
 `flow/command-injection-via-exec` joined SSRF, redirect-open, and
 unvalidated-body-to-db in the cross-file tier. Plus one precision
@@ -160,7 +160,7 @@ the Phase 2 plan and the v0.1 retrospective.
   - `flow/unvalidated-body-to-db`
   - `flow/auth-bypass-via-wrapper`
   - `flow/secret-to-response`
-- ✅ Experimental cross-file rules (v0.2 / v0.2.3):
+- ✅ Experimental cross-file rules (v0.2 / v0.2.4):
   - `flow/ssrf-via-fetch` (slice 2 cross-file, three-level
     chain convergence, URL-allow-list sanitisers, env-host
     path-injection precision)
