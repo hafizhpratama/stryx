@@ -73,9 +73,12 @@ A code construct that cleanses a `TaintLabel` from a value (e.g.,
 `crates/stryx_rules/src/sanitizers/`.
 
 ### TaintLabel
-A category of taint a value carries: `UntrustedInput`, `Secret`,
-`UserId`, `FilesystemRead`, `NetworkResponse`. Adding a label is an
-ADR-level change.
+A category of taint a value carries. At v0.2.1 the shipped labels
+are `UserInput` (request body / query / headers / `searchParams`),
+`AuthSubject` (verified session subject), `Secret`
+(`process.env.X` or credential-shaped string), `DbRow` (data read
+from a DB query), and `Any` (used by sanitisers that clear every
+label). Adding a label is an ADR-level change.
 
 ### TaintFlow
 A path from a Source through zero or more intermediate functions to a
@@ -84,11 +87,38 @@ that touched them. The taint engine emits one `TaintFlow` per traced
 flow; flow rules turn them into Findings.
 
 ### FunctionSummary
-A cached, content-keyed description of how a function transforms taint
-on its parameters: which labels it sanitizes, which sinks it reaches,
-which labels it preserves on the return value. Stored at
+A cached, content-keyed description of how a function transforms
+taint on its parameters: which labels it sanitises, which sinks it
+reaches, which labels it preserves on the return value. Stored at
 `~/.cache/stryx/summaries/` and survives across scans on the same
-machine.
+machine. The concrete v0.2 shape is `ExportedFunctionSummary`.
+
+### ExportedFunctionSummary
+The concrete v0.2.1 implementation of FunctionSummary. Produced by
+each rule's `extract` pass; carries one `ParamFlow` per formal
+parameter, plus `contains_auth_check` and `validates_request_body`
+flags read by `flow/auth-bypass-via-wrapper` and
+`flow/unvalidated-body-to-db`. Lives in
+[`crates/stryx_taint/src/lib.rs`](../crates/stryx_taint/src/lib.rs).
+
+### ParamFlow
+The per-parameter slot inside an `ExportedFunctionSummary`. Carries
+the five reach flags (`reaches_db_sink_unsanitized`,
+`reaches_fetch_sink_unsanitized`, `reaches_redirect_sink_unsanitized`,
+`reaches_sql_sink_unsanitized`, `reaches_exec_sink_unsanitized`) plus
+the SSRF precision flag `fetch_sink_path_pinned_only` and the
+shape-lattice fields (`tainted_offsets`, `param_shape`,
+`return_shape`, `propagates_to_return`) from
+[ADRs 0006 / 0007](decisions/0006-shape-lattice-taint-summary.md).
+All reach flags are `#[serde(default)]` for cache-format compat.
+
+### StepKind
+The closed-enum substrate ([ADR 0008](decisions/0008-taint-step-trait-substrate.md))
+that carries each rule's source / sink / sanitiser / propagator
+recognisers. Every rule's taint logic dispatches through `StepKind`
+via the six `TaintStep` trait methods (`as_source`, `as_call_source`,
+`as_member_source`, `as_sink`, `as_sanitizer`, `as_propagator`).
+At v0.2.1 there are 17 variants × 6 methods = 102 dispatch sites.
 
 ### ProjectIndex
 The project-level read-only data structure built once per scan

@@ -29,7 +29,7 @@ the small subset of zones the engine bailed on.
 | "Who calls function Y?" | Index | Find every route that uses `createUser` |
 | "What framework is this file?" | Index | Discriminate App Router vs Pages Router |
 | "Does this file import from `@/lib/db`?" | Index | Filter rule scope to DB-touching files |
-| "Does an `UntrustedInput` value flow into a DB write without zod?" | Taint | `flow/unvalidated-body-to-db` |
+| "Does an `UserInput` value flow into a DB write without zod?" | Taint | `flow/unvalidated-body-to-db` |
 | "Does a `Secret` value reach a response body?" | Taint | `flow/secret-to-response` |
 | "Does this wrapper actually verify auth?" | LLM | `flow/auth-bypass-via-wrapper` (with index for resolution, LLM for intent) |
 | "Is this dynamic-dispatch site a sanitizer?" | LLM | Taint engine bail-out recovery |
@@ -98,7 +98,7 @@ matching flows for you to shape into Findings.
 ```rust
 fn taint_signature(&self) -> Option<TaintSignature> {
     Some(TaintSignature::flow(
-        TaintLabel::UntrustedInput,
+        TaintLabel::UserInput,
         /* sink_id = */ "db.write",
     ))
 }
@@ -152,7 +152,7 @@ correctly.
 1. Index resolves `req.json()` to the global `Request` type
    → confirms the source matches `sources/http-request-body`
 
-2. Taint engine assigns label UntrustedInput to the result
+2. Taint engine assigns label UserInput to the result
 
 3. Index resolves `createUser(...)` to its definition in lib/users.ts
 

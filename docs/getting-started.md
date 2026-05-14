@@ -4,7 +4,7 @@ This guide gets you from zero to your first scan in 5 minutes.
 
 ## Install
 
-At v0.1.0 there are two install paths that work today, and three
+At v0.2.1 there are two install paths that work today, and three
 distribution channels that follow as soon as the npm namespace and
 Homebrew tap repo are set up.
 
@@ -21,15 +21,15 @@ Needs the Rust toolchain (1.93+). The `stryx` binary lands in
 
 ### Pre-built binaries — works today
 
-The [v0.1.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.1.0)
+The [v0.2.1 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.1)
 ships archives across five targets (Linux x64/arm64, macOS x64/arm64,
 Windows x64):
 
 ```bash
 # Linux x86_64 example — substitute target for your platform.
-curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.1.0-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.1-x86_64-unknown-linux-gnu.tar.gz \
   | tar xz
-./stryx-0.1.0-x86_64-unknown-linux-gnu/stryx scan
+./stryx-0.2.1-x86_64-unknown-linux-gnu/stryx scan
 ```
 
 Targets available:
@@ -62,22 +62,19 @@ file, and reports findings.
 Sample output:
 
 ```
-Stryx 0.1.0 — scanning ./
+high flow/unvalidated-body-to-db  app/api/users/route.ts:14:3
+         Untrusted request input flows into `createUser` (param `body`),
+         which makes a DB write without zod/valibot/yup along the path.
+         help: Validate the body with zod/valibot/yup at the entry
+               handler before passing it to lib/users.ts:createUser
 
-✗ flow: app/api/users/route.ts → lib/users.ts:4:3
-  [high] flow/unvalidated-body-to-db
-  Untrusted body reaches db.user.create unsanitized; flow crosses 2 files.
-  Cursor/Claude Code commonly scaffold helpers that skip validation.
-  → Validate the body with zod/valibot/yup at the entry handler before
-    passing it to lib/users.ts:createUser
-  Read more: https://stryx.dev/rules/flow-unvalidated-body-to-db
+critical flow/sql-injection  lib/search.ts:8:10
+         Untrusted request input reaches a raw-SQL call as the query
+         string without parameterisation (OWASP A03 / CWE-89).
+         help: Switch to `prisma.$queryRaw\`...\`` (tagged template),
+               which binds values instead of splicing.
 
-✗ lib/auth.ts:14:1
-  [critical] flow/secret-to-response
-  Found what appears to be a hardcoded API key reaching a response body.
-  → Move this to .env and reference via process.env
-
-Scanned 47 files in 0.3s. Found 2 issues (1 critical, 1 high).
+2 finding(s): 1 critical, 1 high, 0 medium, 0 low, 0 info
 ```
 
 The CLI exits with a non-zero status when findings are at or above the
@@ -112,7 +109,7 @@ model = "claude-haiku-4-5"        # cheap, fast, accurate enough
 deterministic_only = false        # set true for reproducible CI
 
 [output]
-format = "human"   # human | json | sarif | github
+format = "human"   # human | json (SARIF + GitHub annotations: roadmap)
 ```
 
 All settings can also be set via CLI flags. CLI flags win over the file:
@@ -138,9 +135,9 @@ Add to your `package.json`:
 Combined with [husky](https://typicode.github.io/husky/) or any
 git-hook tool, this catches issues before they leave your machine.
 
-### GitHub Actions CI
+### GitHub Actions CI (planned — Phase 3)
 
-`.github/workflows/stryx.yml`:
+Until the official action ships, run the scan as a step directly:
 
 ```yaml
 name: Stryx
@@ -151,12 +148,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: stryx/stryx-action@v1
-        with:
-          fail-on: high
+      - run: |
+          curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.1-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./stryx-0.2.1-x86_64-unknown-linux-gnu/stryx scan --fail-on=high
 ```
 
-Findings appear as inline PR comments via GitHub's annotation API.
+A dedicated `stryx/stryx-action@v1` with inline-annotation support
+is on the Phase 3 roadmap.
 
 ### Vercel pre-deploy hook
 
@@ -170,13 +168,15 @@ In `vercel.json`:
 
 If Stryx finds high-severity issues, Vercel won't deploy.
 
-### Pre-commit hook
+### Pre-commit hook (planned — Phase 3)
+
+The `npx stryx install-hook` subcommand is not shipped yet. Until
+it lands, wire the scan manually with [husky](https://typicode.github.io/husky/)
+or any git-hook tool:
 
 ```bash
-npx stryx install-hook
+echo 'stryx scan --fail-on=high' > .husky/pre-commit
 ```
-
-Installs a `pre-commit` hook that scans only the staged files.
 
 ## Reading findings
 
@@ -252,16 +252,24 @@ Override via `stryx.toml` or `--include` / `--exclude` flags.
 
 ## Updating Stryx
 
+Until the npm and Homebrew channels ship, update from source or
+re-download a pre-built binary from the latest GitHub Release:
+
 ```bash
-npm update -g stryx
-# or
-brew upgrade stryx
-# or
-cargo install stryx-cli --force
+# From source
+cd stryx && git pull && cargo install --path crates/stryx_cli --force
+
+# From release artifact
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.1-x86_64-unknown-linux-gnu.tar.gz | tar xz
 ```
 
-We follow SemVer strictly. `npm update` won't pick up MAJOR versions;
-review the [CHANGELOG](../CHANGELOG.md) before upgrading those.
+`npm update -g stryx`, `brew upgrade stryx`, and `cargo install
+stryx-cli --force` will work once the respective channels ship
+(Phase 3 roadmap).
+
+We follow SemVer strictly. Patch and minor releases keep the public
+CLI / JSON-output contracts; review the
+[CHANGELOG](../CHANGELOG.md) before upgrading across MAJOR.
 
 ## Next steps
 

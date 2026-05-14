@@ -6,29 +6,39 @@ reaches a dangerous sink unsanitized.
 > Foundational reference. Read [ADR 0003](../decisions/0003-cross-file-and-taint-as-core.md)
 > first for *why* taint analysis is v0.1 core.
 
-## Implementation status (as of v0.0.1)
+## Implementation status (as of v0.2.1)
 
 This document mixes shipped behaviour with design intent. The
 following are **not yet implemented** and are flagged inline with
 📋:
 
-- The `Source` / `Sink` / `Sanitizer` trait surface below — the
-  v0.1 reference rule (`flow/unvalidated-body-to-db`) is hand-rolled
-  with hardcoded matchers, not these traits. The traits will land
-  when rule #4 needs the abstraction.
+- The `Source` / `Sink` / `Sanitizer` trait surface below — by v0.2
+  it consolidated into the `TaintStep` trait substrate
+  ([ADR 0008](../decisions/0008-taint-step-trait-substrate.md))
+  carried by 17 `StepKind` closed-enum variants. The free trait
+  objects in this doc remain a teaching shape; real code dispatches
+  through `StepKind`.
 - On-disk SQLite summary cache at `~/.cache/stryx/summaries/` — not
-  in `scan()`. Phase 2.
+  in `scan()`. Phase 3.
 - SCC detection on the call graph — not implemented. The bounded
-  iteration cap (`MAX_ITER = 10`) is the current substitute; SCCs
-  will replace it in Phase 2.
+  iteration cap (`MAX_ITER = 10`) per
+  [ADR 0004](../decisions/0004-two-pass-fixpoint-with-iteration-cap.md)
+  is the current substitute.
 - `UncertainZone` emission and Layer 3 LLM escalation — vocabulary
-  exists in `stryx_core`; no rule emits zones yet.
+  exists in `stryx_core`; no v0.2.1 rule emits zones yet
+  (`flow/auth-bypass-via-wrapper` is the planned first consumer).
 
-What **is** built: the boolean `ParamFlow` summary lattice
-(`crates/stryx_taint/src/lib.rs`), the per-file extract pass +
-iterative project-index fixed-point in `crates/stryx_cli/src/lib.rs`,
-the cross-file `lookup_callee_summary` resolution path, and the three
-v0.1 flow rules.
+What **is** built at v0.2.1: `ParamFlow` with five reach flags
+(`reaches_db_sink_unsanitized`, `reaches_fetch_sink_unsanitized`,
+`reaches_redirect_sink_unsanitized`, `reaches_sql_sink_unsanitized`,
+`reaches_exec_sink_unsanitized`) plus the SSRF precision flag
+`fetch_sink_path_pinned_only`; the per-file extract pass + iterative
+project-index fixed-point; the cross-file `lookup_callee_summary`
+resolution path; the shape-lattice fields (`tainted_offsets`,
+`param_shape`, `return_shape`, `propagates_to_return`) per
+[ADRs 0006 / 0007](../decisions/0006-shape-lattice-taint-summary.md)
+in observation-only mode; and 11 rules across single-file and
+cross-file scope (see [`docs/rules/`](../rules/) for the catalog).
 
 ## What it is and why it exists
 
@@ -62,12 +72,13 @@ question. This is the LLM's primary architectural role.
 Three traits, one label set, one shared context:
 
 ```rust
+// As shipped at v0.2.1 — see crates/stryx_taint/src/lib.rs.
 pub enum TaintLabel {
-    UntrustedInput,    // request bodies, query params, headers, form data
-    Secret,            // env vars matching secret-shape, hardcoded credential strings
-    UserId,            // identifiers from session — sometimes a sink, sometimes a sanitizer
-    FilesystemRead,    // contents read from the filesystem at runtime
-    NetworkResponse,   // bodies of outbound fetches we control
+    UserInput,     // request body, query params, headers, form data, searchParams
+    AuthSubject,   // verified session subject (auth-bypass + scope rules)
+    Secret,        // env vars + hardcoded credential-shaped strings
+    DbRow,         // data read from a DB query
+    Any,           // sanitisers that clear every label simultaneously
 }
 
 pub trait Source: Send + Sync {
@@ -99,19 +110,24 @@ The `TaintContext` exposes:
 
 ## The label set
 
-The five labels are not arbitrary — each maps to a class of violation
-that has its own sink rules:
+The shipped labels at v0.2.1 are `UserInput`, `AuthSubject`,
+`Secret`, `DbRow`, and `Any`. Each maps to a class of violation
+with its own sink rules:
 
-| Label | Typical sources | Typical sinks | Typical sanitizers |
+| Label | Typical sources | Typical sinks | Typical sanitisers |
 |---|---|---|---|
-| `UntrustedInput` | `req.json()`, `req.body`, query params | DB writes, `exec`, dynamic SQL | zod, valibot, ajv, joi, yup |
-| `Secret` | `process.env.X`, hardcoded credential strings | response bodies, log calls, third-party fetches | redaction helpers, allow-listed env vars |
-| `UserId` | session helpers | DB queries that scope by user | auth checks (also a source — duality is intentional) |
-| `FilesystemRead` | `fs.readFile` | response bodies, eval | content-type checks, path allow-lists |
-| `NetworkResponse` | `fetch().json()` from untrusted URLs | DB writes, eval | schema validation |
+| `UserInput` | `req.json()` / `req.body` / `req.text()` / `searchParams.X` | DB writes (`flow/unvalidated-body-to-db`), raw SQL (`flow/sql-injection`), `child_process` (`flow/command-injection-via-exec`), `fetch` (`flow/ssrf-via-fetch`), redirect (`flow/redirect-open`), `fs.<m>` (`flow/path-traversal`), LLM prompts (`flow/prompt-injection`), `dangerouslySetInnerHTML` (`flow/xss-via-dangerously-set-inner-html`) | zod / valibot / ajv / joi / yup; DOMPurify / sanitize-html; URL host allow-list; class-validator DTOs (NestJS heuristic) |
+| `Secret` | `process.env.X`, hardcoded credential-shaped strings | response bodies (`flow/secret-to-response`) | redaction helpers, allow-listed env vars |
+| `AuthSubject` | session helpers, `getServerSession()` | DB queries that scope by subject | auth checks (also a source — duality is intentional; consumed by `flow/auth-bypass-via-wrapper`) |
+| `DbRow` | DB read results | response bodies (when row contains sensitive fields) | field-level redaction |
+| `Any` | — | — | used by sanitisers that clear every label simultaneously |
 
-Adding a new label is an ADR-level change. The label set is the engine's
-public contract; rules and configurations depend on stable names.
+Adding a new label is an ADR-level change. The label set is the
+engine's public contract; rules and configurations depend on
+stable names. `UserId`, `FilesystemRead`, and `NetworkResponse`
+labels from earlier drafts of this doc were never shipped —
+the equivalents are covered by `UserInput` plus rule-specific
+sink families.
 
 ## Propagation model
 
@@ -127,7 +143,7 @@ How taint moves through code:
 | `if (cond) { x = a } else { x = b }` | `x` gets the union of labels from both branches |
 | `tainted.foo` (static access) | result carries the labels |
 | `tainted[name]` (dynamic access) | engine bails to LLM (see below) |
-| `JSON.parse(tainted)` | preserves `UntrustedInput`; not a sanitizer |
+| `JSON.parse(tainted)` | preserves `UserInput`; not a sanitizer |
 | `String(tainted)` | preserves labels (coercion is not validation) |
 
 Propagation is **forward-only** within a function. We do not track
@@ -148,13 +164,13 @@ summary(f) = {
   // For each parameter, what labels does the return value carry
   // assuming that parameter has each possible label
   return_taint_for_param: [
-    p1: { UntrustedInput -> {UntrustedInput}, Secret -> {Secret}, ... },
+    p1: { UserInput -> {UserInput}, Secret -> {Secret}, ... },
     p2: { ... },
     ...
   ],
   // For each parameter, what sinks inside f does it reach unsanitized
   internal_sinks_for_param: [
-    p1: [ {sink_id: "db.create", label: UntrustedInput, span: ...}, ... ],
+    p1: [ {sink_id: "db.create", label: UserInput, span: ...}, ... ],
     p2: [ ... ],
     ...
   ],
@@ -269,7 +285,7 @@ encounters:
 
 Each bail-out emits an UncertainZone with `reason: "taint propagation halted at <kind>"`.
 Layer 3 receives the zone source, the labels involved, and a focused
-prompt: "Given this code region, does taint label `UntrustedInput`
+prompt: "Given this code region, does taint label `UserInput`
 reach sink `db.create` without an effective sanitizer?"
 
 ## LLM escalation interface
@@ -355,8 +371,19 @@ fixture exceeds 1.5s.
 
 ## Adding a new source / sink / sanitizer
 
-Each is a small file in `crates/stryx_rules/src/{sources,sinks,sanitizers}/`.
-The pattern, using `NextRequestBody` as a worked example:
+> 📋 The teaching-shape example below shows the v0.0.1 `Source`
+> trait. At v0.2.1 the substrate consolidated into `TaintStep` +
+> closed-enum `StepKind` per
+> [ADR 0008](../decisions/0008-taint-step-trait-substrate.md) so
+> rule visitors dispatch through one enum instead of trait-object
+> vectors. The real shipped shape for `BodySource` lives at
+> [`crates/stryx_rules/src/steps/sources/body.rs`](../../crates/stryx_rules/src/steps/sources/body.rs);
+> sinks at `crates/stryx_rules/src/steps/sinks/`; sanitisers at
+> `crates/stryx_rules/src/steps/sanitizers/`. Adding a step today
+> means adding a `StepKind` variant in `steps/mod.rs` and wiring
+> its `TaintStep` trait method dispatch.
+
+The pattern, in legacy `Source`-trait form:
 
 ```rust
 // crates/stryx_rules/src/sources/frameworks/nextjs.rs
@@ -384,7 +411,7 @@ impl Source for NextRequestBody {
             return None;
         }
 
-        Some(TaintLabel::UntrustedInput)
+        Some(TaintLabel::UserInput)
     }
 }
 ```
@@ -449,7 +476,7 @@ What happens when the engine encounters problems mid-scan:
 - **Generic functions.** `function f<T>(x: T): T` with `T = TaintedRequest`
   — current design doesn't propagate taint through generic instantiation.
   Reasonable for v0.1, revisit when type-aware analysis lands.
-- **TaintLabel arithmetic.** When a value carries both `UntrustedInput`
+- **TaintLabel arithmetic.** When a value carries both `UserInput`
   and `UserId`, which sinks fire? Current design: a sink registers
   interest per label; multiple labels mean multiple sink checks. Worth
   validating on real fixtures.
