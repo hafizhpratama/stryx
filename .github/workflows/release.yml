@@ -73,12 +73,14 @@ jobs:
           shared-key: release-${{ matrix.target }}
 
       - name: Build CLI (${{ matrix.target }})
-        # `rustup run 1.93 cargo` is more robust than naked `cargo`
-        # — on macos-15 the bare `cargo` binary occasionally resolves
-        # to rustup-init (the installer) instead of the cargo shim,
-        # failing with "unexpected argument 'build'". `rustup run`
-        # bypasses PATH and invokes the toolchain directly.
-        run: rustup run 1.93 cargo build --release --bin stryx --target ${{ matrix.target }}
+        # `RUSTUP_TOOLCHAIN` instructs rustup to use the named
+        # toolchain for any cargo invocation, without touching PATH.
+        # This is more robust than `rustup run cargo` (which doesn't
+        # propagate through subprocesses on Windows) and avoids the
+        # macos-15 issue where bare `cargo` resolves to `rustup-init`.
+        env:
+          RUSTUP_TOOLCHAIN: "1.93"
+        run: cargo build --release --bin stryx --target ${{ matrix.target }}
 
       # Resolve binary name (Windows appends .exe). Output the
       # finalised archive path so the upload step is platform-agnostic.
@@ -169,14 +171,14 @@ jobs:
         run: npm ci
 
       - name: Build napi (${{ matrix.target }})
-        # `rustup run 1.93 <cmd>` ensures the wrapped command and
-        # ALL its cargo subprocesses pick up the 1.93 toolchain via
-        # rustup, not via PATH. Without this, napi-rs CLI's
-        # internal `cargo metadata` call hits rustup-init on
-        # macos-15 the same way bare `cargo build` does in the CLI
-        # matrix entry.
+        # `RUSTUP_TOOLCHAIN` propagates to all cargo subprocesses
+        # spawned by `npx napi build` (most importantly the internal
+        # `cargo metadata` call), without touching PATH. Cross-
+        # platform — works on macOS / Linux / Windows.
+        env:
+          RUSTUP_TOOLCHAIN: "1.93"
         working-directory: crates/stryx_napi
-        run: rustup run 1.93 npx napi build --platform --release --target ${{ matrix.target }}
+        run: npx napi build --platform --release --target ${{ matrix.target }}
 
       # napi-rs names the artifact `stryx.<platform>.node` (e.g.
       # stryx.linux-x64-gnu.node). Both the .node and the generated
@@ -196,9 +198,9 @@ jobs:
     name: Attach to GitHub Release
     needs: [build-cli, build-napi]
     runs-on: ubuntu-latest
-    # Skip on workflow_dispatch — re-runs are usually for debugging
-    # a single platform, not for republishing release assets.
-    if: github.event_name == 'push'
+    # Runs on both `push` (tag-triggered release) and
+    # `workflow_dispatch` (manual re-run when a single matrix entry
+    # flaked). The upload step is idempotent (`--clobber`).
     permissions:
       contents: write
 
