@@ -4,7 +4,7 @@
 > session. Keep it accurate. Update it whenever architecture, conventions, or
 > commands change. If this file lies, the AI lies.
 >
-> Last reviewed: 2026-05-09
+> Last reviewed: 2026-05-14 (v0.2.1)
 
 ## What Stryx is
 
@@ -236,10 +236,11 @@ catches, in plain language, before writing any matching logic.
   Anthropic, OpenAI, local Ollama, and others can be swapped freely.
 - **Don't write rules that depend on full type inference yet.**
   Type-aware linting in oxc is alpha; deeper integration is Phase 4
-  per the roadmap. v0.1 rules use syntactic analysis, scope info from
-  `oxc_semantic`, the project semantic index (`stryx_index`), and the
-  taint engine (`stryx_taint`). When a rule genuinely needs type flow,
-  emit an UncertainZone for LLM escalation rather than guessing.
+  per the roadmap. v0.1-v0.2 rules use syntactic analysis, scope
+  info from `oxc_semantic`, the project semantic index
+  (`stryx_index`), and the taint engine (`stryx_taint`). When a rule
+  genuinely needs type flow, emit an UncertainZone for LLM
+  escalation rather than guessing.
 
 ## File map (where to look)
 
@@ -305,24 +306,33 @@ If you write a rule that exceeds these, profile it before merging.
 Reflects [ADR 0003](docs/decisions/0003-cross-file-and-taint-as-core.md)
 (cross-file taint as v0.1 core).
 
-- **Phase 1 (v0.1)** — TypeScript-only, Next.js-aware. Foundational
-  crates `stryx_index` (project semantic index) and `stryx_taint`
-  (inter-procedural taint engine). Three flow rules:
-  `flow/unvalidated-body-to-db`, `flow/auth-bypass-via-wrapper`,
-  `flow/secret-to-response`. CLI + GitHub Action.
-- **Phase 2** — Expand the taint engine (more sources/sinks/sanitizers).
-  Add single-file table-stakes rules and additional flow rules. LLM
-  escalation hardening. napi-rs npm distribution.
-- **Phase 3** — Hono and Express via source/sink adaptations, not
-  rule rewrites. Suppression-density meta-rule. WASM/crate plugin
-  model (decision pending).
-- **Phase 4** — Type-aware analysis via deeper `oxc_semantic` use.
-  Custom taint configs (project-specific sources/sinks via
-  `stryx.toml`). Framework version dimension on rules.
+- **Phase 1 (v0.1)** ✅ shipped — TypeScript-only, Next.js-aware.
+  Foundational crates `stryx_index` and `stryx_taint`. Three stable
+  cross-file flow rules: `flow/unvalidated-body-to-db`,
+  `flow/auth-bypass-via-wrapper`, `flow/secret-to-response`. CLI +
+  pre-built binaries.
+- **Phase 2 (v0.2, v0.2.1)** ✅ shipped — 7 new rules vs. v0.1.
+  Cross-file slice 2 for SSRF, redirect-open, SQL-injection, and
+  command-injection (all Critical-severity rules now cross-file).
+  Single-file slice 1 for path-traversal, prompt-injection, XSS.
+  App Router `searchParams.X` body-source recognition. SSRF
+  host-pinning precision (env-var-prefix templates → Medium
+  path-injection). 10 rules in the registry. See
+  [ADR 0011](docs/decisions/0011-v01-to-v02-transition.md) for the
+  Phase 2 plan + retrospective.
+- **Phase 3** 🚧 in-progress — Hono and Express via source/sink
+  adaptations (not rule rewrites). Suppression-density meta-rule.
+  napi-rs npm distribution. GitHub Action. Homebrew formula.
+  WASM/crate plugin model (decision pending).
+- **Phase 4** 📋 deferred — Type-aware analysis via deeper
+  `oxc_semantic` use. Custom taint configs (project-specific
+  sources/sinks via `stryx.toml`). Framework version dimension on
+  rules. Cross-file slice 2 for the remaining single-file rules
+  (prompt-injection, XSS) once OSS sweep surfaces TPs.
 
-Don't build later-phase features in Phase 1 code. Resist scope creep.
-Depth in the taint engine and the rule library matters more than
-framework count — depth before breadth.
+Don't build later-phase features in earlier-phase code. Resist
+scope creep. Depth in the taint engine and the rule library matters
+more than framework count — depth before breadth.
 
 ## When in doubt
 

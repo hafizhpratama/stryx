@@ -1,7 +1,7 @@
 # Stryx Architecture
 
 > Deep design reference. Read this before making structural changes.
-> Last reviewed: 2026-05-09
+> Last reviewed: 2026-05-14 (v0.2.1)
 
 ## Design goals
 
@@ -109,6 +109,8 @@ stryx/
   `sources/`, `sinks/`, `sanitizers/`, and `flows/` (per ADR 0003).
   Each rule implements the `Rule` trait and may declare a
   `taint_signature()` and `scope()` (single-file or cross-file).
+  At v0.2.1, 10 rules ship in the registry; the `StepKind` substrate
+  (ADR 0008) carries 17 closed-enum variants × 6 trait methods.
 
 - **`stryx_llm`** owns: the `LlmClient` trait, prompt templates per rule,
   retry logic, cost tracking. Pluggable: Anthropic, OpenAI, local Ollama.
@@ -145,7 +147,8 @@ We enforce this with a CI check:
 ```
 
 If we ever want to swap to `swc_ecma_parser` or `biome_js_parser`, we
-rewrite only the parser adapter. ~50 rules stay untouched.
+rewrite only the parser adapter. Every shipped rule (10 today,
+~50 long-term) stays untouched.
 
 ## Concurrency model
 
@@ -243,8 +246,9 @@ These are tempting but premature:
 - **Custom rule DSL**: rules in Rust until we have 30+ rules. The
   abstraction is justified by repetition, not anticipation.
 - **Full type-aware linting**: oxc's type-aware support is alpha;
-  deferred to Phase 4. v0.1 uses scope info from `oxc_semantic` plus
-  the project index; rules that need type flow emit UncertainZones.
+  deferred to Phase 4. v0.1-v0.2 use scope info from `oxc_semantic`
+  plus the project index; rules that need type flow emit
+  UncertainZones.
 - **Auto-fix**: we report issues; we don't rewrite code yet. Auto-fix is
   v2 once detection is mature.
 - **Cross-package taint propagation**: we do not propagate taint
