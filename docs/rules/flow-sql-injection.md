@@ -12,7 +12,7 @@
 | Rule ID | `flow/sql-injection` |
 | Status | experimental |
 | Severity | critical |
-| Frameworks | nextjs >= 13, generic Node (single-file slice 1) |
+| Frameworks | nextjs >= 13, generic Node (single-file + cross-file slice 2) |
 | Default | enabled |
 | Added in | v0.2 (Phase 2 of [ADR 0011](../decisions/0011-v01-to-v02-transition.md), Track B) |
 
@@ -123,7 +123,7 @@ path.
 | Source labels | `UserInput` (body / query / headers / `searchParams`) |
 | Sink ids | `sql.queryRawUnsafe` (Prisma `$queryRawUnsafe` / `$executeRawUnsafe`), `sql.raw` (Drizzle `sql.raw`), `sql.query` (node-postgres / mysql2 `pool.query` / `client.query` / `db.query` / `connection.query`) |
 | Sanitizers recognized | None for slice 1. The canonical safe path is the parameterised tagged-template (`prisma.$queryRaw\`\``, `sql\`\``) — those shapes are *not flagged* because the rule's sink-recogniser doesn't match them in the first place. Allow-listing identifiers via `Array.includes` / `Set.has` against a hardcoded list is a future sanitiser recognition target. |
-| Scope | `SingleFile` |
+| Scope | `SingleFile` + `CrossFile` |
 
 ## Detection logic
 
@@ -142,10 +142,15 @@ path.
    no finding.
 3. If the SQL string is body-tainted, emit a critical-severity
    Finding at the call span.
-
-Slice 1 covers same-file flows. Slice 2 (deferred) extends to
-cross-file via the same `ExportedFunctionSummary` consumer used
-by the other body-flow rules.
+4. **Cross-file (slice 2).** The extract pass simulates each
+   exported function with one parameter pre-tainted and records
+   `ParamFlow::reaches_sql_sink_unsanitized` when the simulation
+   observes a raw-SQL sink. The run pass walks call sites; when a
+   tainted argument flows into a reach-flagged parameter slot of a
+   callee resolved via the project index, a Critical finding is
+   emitted at the call site. Helpers that switch to the
+   parameterised tagged-template form internally drop the reach
+   flag and suppress the call-site finding.
 
 ## Known false positive zones
 
@@ -190,3 +195,4 @@ disambiguate the safety boundary.
 | Version | Change |
 |---|---|
 | v0.2 | Initial single-file slice — body source → Prisma `$queryRawUnsafe` / `$executeRawUnsafe`, Drizzle `sql.raw`, node-postgres / mysql2 `<conn>.query` sinks. Severity Critical. No sanitiser recognition. |
+| v0.2.1 | Slice 2 — cross-file taint via `ExportedFunctionSummary::reaches_sql_sink_unsanitized`. Route handler → imported helper → raw-SQL call chains now fire at the call site with Critical severity. Helper that switches to the parameterised tagged-template form (`prisma.$queryRaw`...``) suppresses the call-site finding. |

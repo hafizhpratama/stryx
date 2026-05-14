@@ -18,6 +18,30 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `flow/sql-injection` slice 2 — cross-file taint detection. The
+  extract pass simulates each exported function with one parameter
+  pre-tainted and records `ParamFlow::reaches_sql_sink_unsanitized`
+  when the simulation observes a raw-SQL sink (`$queryRawUnsafe`,
+  `$executeRawUnsafe`, `sql.raw`, `<conn>.query`). The run pass emits
+  a Critical finding at the call site when a tainted argument flows
+  into a reach-flagged parameter of a callee resolved via the project
+  index. Route handler → imported helper → raw-SQL chains now fire at
+  the call site; helpers that switch internally to the parameterised
+  tagged-template form (`prisma.$queryRaw`...``) suppress it.
+
+### Fixed
+
+- `flow/ssrf-via-fetch` — env-var-prefix host-pinned templates
+  (`fetch(\`${process.env.X}/...?id=${body.id}\`)`) downgrade from
+  High (full SSRF) to Medium (path-injection), matching the
+  literal-prefix shape. The recogniser now tracks operator-controlled
+  host bindings (including `??` / `||` fallback chains and via-binding
+  `const base = process.env.X`). Cross-file propagation via the new
+  `ParamFlow::fetch_sink_path_pinned_only` flag. Surfaced by the
+  v0.1.0 papermark OSS sweep.
+
 ## [0.2.0] — 2026-05-11
 
 Second release. Track A (cross-file slice 2 for SSRF +

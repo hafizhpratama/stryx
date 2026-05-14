@@ -561,6 +561,15 @@ pub struct ParamFlow {
     /// flag leave it `false` (serde default).
     #[serde(default)]
     pub reaches_redirect_sink_unsanitized: bool,
+    /// True iff there is a control-flow path from this parameter to a
+    /// raw-SQL escape-hatch call (Prisma `$queryRawUnsafe` /
+    /// `$executeRawUnsafe`, Drizzle `sql.raw`, node-postgres / mysql2
+    /// `<conn>.query(<sql>, ...)`) as the SQL-text argument. No
+    /// sanitiser short-circuits this — the only safe shape is the
+    /// parameterised tagged-template form. Populated by
+    /// `flow/sql-injection`'s slice 2 extract pass.
+    #[serde(default)]
+    pub reaches_sql_sink_unsanitized: bool,
     /// Which field/index offsets of this parameter flow to a sink, if
     /// the rule populating the summary records that detail. Empty list
     /// means either "no taint reaches a sink" or "the rule has not yet
@@ -669,6 +678,16 @@ impl ExportedFunctionSummary {
             .is_some_and(|p| p.reaches_redirect_sink_unsanitized)
     }
 
+    /// True if calling this function with a tainted value at parameter
+    /// position `idx` would result in that taint reaching a raw-SQL
+    /// escape-hatch call as the SQL-text argument — i.e. a cross-file
+    /// SQL injection.
+    pub fn taints_through_sql_param(&self, idx: usize) -> bool {
+        self.params
+            .get(idx)
+            .is_some_and(|p| p.reaches_sql_sink_unsanitized)
+    }
+
     /// Merge per-rule sink flags from `other` into `self`. Used when
     /// multiple rules' extract passes produce summaries for the same
     /// export name — each rule populates its own `reaches_*_sink_*`
@@ -703,6 +722,7 @@ impl ExportedFunctionSummary {
                 }
                 p.reaches_fetch_sink_unsanitized |= other_p.reaches_fetch_sink_unsanitized;
                 p.reaches_redirect_sink_unsanitized |= other_p.reaches_redirect_sink_unsanitized;
+                p.reaches_sql_sink_unsanitized |= other_p.reaches_sql_sink_unsanitized;
             }
         }
     }

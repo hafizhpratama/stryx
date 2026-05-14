@@ -1,4 +1,5 @@
-//! `flow/sql-injection` — slice 1 (single-file).
+//! `flow/sql-injection` — slice 1 (single-file) + slice 2
+//! (cross-file via ExportedFunctionSummary).
 //!
 //! Detects request-body-tainted values reaching a raw-SQL sink —
 //! Prisma's `$queryRawUnsafe` / `$executeRawUnsafe`, Drizzle's
@@ -10,25 +11,38 @@
 //! generate parameterised SQL and are safe by construction. The
 //! recogniser only matches the call-expression escape-hatch shapes.
 //!
+//! Slice 2 — cross-file. The route handler hands body data to an
+//! imported helper that does the raw-SQL call. The extract pass
+//! simulates each exported function with one parameter pre-tainted
+//! and records the result on
+//! `ParamFlow::reaches_sql_sink_unsanitized`; the run pass walks
+//! call sites in the handler, looks up the callee via the project
+//! index, and emits a finding when a tainted argument flows into a
+//! reach-flagged parameter slot.
+//!
 //! See `docs/rules/flow-sql-injection.md` for the rule's contract
 //! and the bad/good fixtures it pins.
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use stryx_ast::{
     Visit,
     ast::{
         Argument, ArrowFunctionExpression, BindingPattern, CallExpression, ChainElement,
-        Expression, Function, ObjectPropertyKind, PropertyKey, VariableDeclarator,
+        Declaration, ExportDefaultDeclarationKind, Expression, Function, FunctionBody,
+        ObjectPropertyKind, Program, PropertyKey, Statement, VariableDeclarator,
     },
     to_span,
 };
-use stryx_core::{Finding, Severity};
+use stryx_core::{Finding, Severity, Span};
+use stryx_index::FileSummary;
+use stryx_taint::{ExportedFunctionSummary, ParamFlow};
 
 use crate::steps::sinks::{SqlSink, is_sql_sink_call};
 use crate::steps::sources::BodySource;
 use crate::steps::{StepCtx, StepKind};
-use crate::{Rule, RuleContext, RuleMeta};
+use crate::{ExtractOutput, Rule, RuleContext, RuleMeta};
 
 const RULE_ID: &str = "flow/sql-injection";
 
@@ -57,12 +71,16 @@ impl Rule for SqlInjection {
         }
     }
 
+    fn extract<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> ExtractOutput {
+        Some(extract_summary(
+            ctx.file.path.clone(),
+            &ctx.file.program,
+            ctx.index,
+        ))
+    }
+
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
-        let mut visitor = SqlInjectionVisitor {
-            file: ctx.file.path.clone(),
-            scopes: vec![HashMap::new()],
-            findings: Vec::new(),
-        };
+        let mut visitor = SqlInjectionVisitor::new(ctx.file.path.clone(), ctx.index, true);
         for stmt in &ctx.file.program.body {
             visitor.visit_statement(stmt);
         }
@@ -70,18 +88,42 @@ impl Rule for SqlInjection {
     }
 }
 
-struct SqlInjectionVisitor {
-    file: std::path::PathBuf,
+struct SqlInjectionVisitor<'idx> {
+    file: PathBuf,
+    /// Stack of per-function scopes. Each scope maps binding name to `()`
+    /// when that binding holds body-tainted data.
     scopes: Vec<HashMap<String, ()>>,
+    /// Read-only project index. `Some` during the run pass; `None`
+    /// during per-param simulation.
+    index: Option<&'idx stryx_index::ProjectIndex>,
+    /// Honour `body_source_active` at the step level — true on the run
+    /// pass (body sources fire naturally), false during per-param
+    /// simulation (only the pre-tainted param contributes; ambient
+    /// `req.body` reads inside helpers must not spawn spurious sinks).
+    body_source_active: bool,
     findings: Vec<Finding>,
 }
 
-impl SqlInjectionVisitor {
-    fn step_ctx(&self) -> StepCtx<'_, 'static> {
+impl<'idx> SqlInjectionVisitor<'idx> {
+    fn new(
+        file: PathBuf,
+        index: Option<&'idx stryx_index::ProjectIndex>,
+        body_source_active: bool,
+    ) -> Self {
+        Self {
+            file,
+            scopes: vec![HashMap::new()],
+            index,
+            body_source_active,
+            findings: Vec::new(),
+        }
+    }
+
+    fn step_ctx(&self) -> StepCtx<'_, 'idx> {
         StepCtx {
             file: &self.file,
-            index: None,
-            body_source_active: true,
+            index: self.index,
+            body_source_active: self.body_source_active,
         }
     }
 
@@ -220,9 +262,70 @@ impl SqlInjectionVisitor {
             ),
         );
     }
+
+    /// Look up the callee through the project index — bare-ident
+    /// imports and same-file top-level functions. Returns the
+    /// ExportedFunctionSummary whose `params[i].reaches_sql_sink_unsanitized`
+    /// flag tells us whether passing tainted data at position `i`
+    /// would reach a raw-SQL sink inside the callee.
+    fn lookup_callee_summary(
+        &self,
+        callee: &Expression<'_>,
+    ) -> Option<&'idx ExportedFunctionSummary> {
+        let index = self.index?;
+        let Expression::Identifier(id) = callee else {
+            return None;
+        };
+        let name = id.name.as_str();
+        if let Some(s) = index.resolve_summary(&self.file, name) {
+            return Some(s);
+        }
+        let file = index.file(&self.file)?;
+        file.exports.get(name).or_else(|| file.locals.get(name))
+    }
+
+    /// Cross-file consumer — when a tainted argument is passed at a
+    /// call site whose callee summary records
+    /// `reaches_sql_sink_unsanitized` at that argument position,
+    /// emit a Critical-severity finding at the call site.
+    fn check_cross_file_call(&mut self, call: &CallExpression<'_>) {
+        let Some(summary) = self.lookup_callee_summary(&call.callee) else {
+            return;
+        };
+        let callee_label = callee_chain(&call.callee).unwrap_or_else(|| "<call>".to_string());
+        for (i, arg) in call.arguments.iter().enumerate() {
+            let Some(arg_expr) = argument_expr(arg) else {
+                continue;
+            };
+            if !self.expr_taint(arg_expr) {
+                continue;
+            }
+            if !summary.taints_through_sql_param(i) {
+                continue;
+            }
+            let param_name = summary
+                .params
+                .get(i)
+                .map(|p| p.name.as_str())
+                .unwrap_or("?");
+            self.findings.push(
+                Finding::ast(
+                    RULE_ID,
+                    Severity::Critical,
+                    format!(
+                        "Untrusted request input flows into `{callee_label}` (param `{param_name}`), which splices into a raw-SQL call inside the helper without parameterisation (OWASP A03 / CWE-89)."
+                    ),
+                    to_span(&self.file, call.span),
+                )
+                .with_help(
+                    "Switch the helper to the parameterised path (Prisma tagged `$queryRaw`, Drizzle `sql`...``, or node-postgres `query(text, [bind])`), or validate the value against a hardcoded allow-list before splicing.",
+                ),
+            );
+        }
+    }
 }
 
-impl<'a> Visit<'a> for SqlInjectionVisitor {
+impl<'a, 'idx> Visit<'a> for SqlInjectionVisitor<'idx> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: stryx_ast::ScopeFlags) {
         self.enter_fn();
         if let Some(body) = &func.body {
@@ -250,6 +353,10 @@ impl<'a> Visit<'a> for SqlInjectionVisitor {
 
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         self.check_sql_sink(call);
+        // Slice 2 — cross-file: index-bearing run pass only.
+        if self.index.is_some() {
+            self.check_cross_file_call(call);
+        }
         stryx_ast::walk::walk_call_expression(self, call);
     }
 }
@@ -280,5 +387,214 @@ fn collect_binding_names(pat: &BindingPattern<'_>, out: &mut Vec<String>) {
             }
         }
         BindingPattern::AssignmentPattern(a) => collect_binding_names(&a.left, out),
+    }
+}
+
+fn single_binding_name(pat: &BindingPattern<'_>) -> Option<String> {
+    if let BindingPattern::BindingIdentifier(id) = pat {
+        Some(id.name.to_string())
+    } else {
+        None
+    }
+}
+
+/// Pretty-print a callee expression for finding messages — bare
+/// idents only (member-expression callees aren't resolved cross-file
+/// yet). Returns `None` for shapes we don't format.
+fn callee_chain(expr: &Expression<'_>) -> Option<String> {
+    match expr {
+        Expression::Identifier(id) => Some(id.name.to_string()),
+        _ => None,
+    }
+}
+
+// ── Extract pass ───────────────────────────────────────────────────────────
+//
+// Walk top-level decls. For each function-like export (FunctionDeclaration,
+// `const x = (...)=>{}`, default-exported function/arrow), run a
+// per-parameter simulation that pre-taints one param and observes whether
+// the [`SqlInjectionVisitor`] records a sink finding. Whatever the
+// simulation observes lands on `ParamFlow::reaches_sql_sink_unsanitized`.
+//
+// Slice 2 deliberately does *not* populate `param_shape`, `return_shape`,
+// `tainted_offsets`, `propagates_to_return`, or class methods — those are
+// the db rule's territory (and merge_per_rule_flags keeps db's richer
+// fields on collision). Slice 2's contribution is reach-only.
+
+fn extract_summary(
+    file: PathBuf,
+    program: &Program<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
+) -> FileSummary {
+    let mut summary = FileSummary {
+        path: file.clone(),
+        ..Default::default()
+    };
+    for stmt in &program.body {
+        match stmt {
+            Statement::FunctionDeclaration(func) => {
+                let Some(name) = func.id.as_ref().map(|id| id.name.to_string()) else {
+                    continue;
+                };
+                if let Some(s) =
+                    simulate_function(&file, &name, &func.params, func.body.as_deref(), index)
+                {
+                    summary.locals.insert(name, s);
+                }
+            }
+            Statement::VariableDeclaration(var) => {
+                for declarator in &var.declarations {
+                    let Some(name) = single_binding_name(&declarator.id) else {
+                        continue;
+                    };
+                    let Some(init) = &declarator.init else {
+                        continue;
+                    };
+                    if let Some(s) = simulate_initialiser(&file, &name, init, index) {
+                        summary.locals.insert(name, s);
+                    }
+                }
+            }
+            Statement::ExportNamedDeclaration(decl) => {
+                let Some(declaration) = &decl.declaration else {
+                    continue;
+                };
+                match declaration {
+                    Declaration::FunctionDeclaration(func) => {
+                        let Some(name) = func.id.as_ref().map(|id| id.name.to_string()) else {
+                            continue;
+                        };
+                        if let Some(s) = simulate_function(
+                            &file,
+                            &name,
+                            &func.params,
+                            func.body.as_deref(),
+                            index,
+                        ) {
+                            summary.exports.insert(name, s);
+                        }
+                    }
+                    Declaration::VariableDeclaration(var) => {
+                        for declarator in &var.declarations {
+                            let Some(name) = single_binding_name(&declarator.id) else {
+                                continue;
+                            };
+                            let Some(init) = &declarator.init else {
+                                continue;
+                            };
+                            if let Some(s) = simulate_initialiser(&file, &name, init, index) {
+                                summary.exports.insert(name, s);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            Statement::ExportDefaultDeclaration(decl) => match &decl.declaration {
+                ExportDefaultDeclarationKind::FunctionDeclaration(func) => {
+                    if let Some(s) = simulate_function(
+                        &file,
+                        "default",
+                        &func.params,
+                        func.body.as_deref(),
+                        index,
+                    ) {
+                        summary.exports.insert("default".to_string(), s);
+                    }
+                }
+                ExportDefaultDeclarationKind::ArrowFunctionExpression(arrow) => {
+                    let s = simulate_arrow(&file, "default", &arrow.params, &arrow.body, index);
+                    summary.exports.insert("default".to_string(), s);
+                }
+                _ => {}
+            },
+            _ => {}
+        }
+    }
+    summary
+}
+
+fn simulate_initialiser(
+    file: &Path,
+    name: &str,
+    init: &Expression<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
+) -> Option<ExportedFunctionSummary> {
+    match init {
+        Expression::FunctionExpression(func) => {
+            simulate_function(file, name, &func.params, func.body.as_deref(), index)
+        }
+        Expression::ArrowFunctionExpression(arrow) => Some(simulate_arrow(
+            file,
+            name,
+            &arrow.params,
+            &arrow.body,
+            index,
+        )),
+        _ => None,
+    }
+}
+
+fn simulate_function(
+    file: &Path,
+    name: &str,
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    body: Option<&FunctionBody<'_>>,
+    index: Option<&stryx_index::ProjectIndex>,
+) -> Option<ExportedFunctionSummary> {
+    let body_stmts = body.map(|b| b.statements.as_slice()).unwrap_or(&[]);
+    Some(build_summary(file, name, params, body_stmts, index))
+}
+
+fn simulate_arrow(
+    file: &Path,
+    name: &str,
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    body: &FunctionBody<'_>,
+    index: Option<&stryx_index::ProjectIndex>,
+) -> ExportedFunctionSummary {
+    build_summary(file, name, params, &body.statements, index)
+}
+
+fn build_summary(
+    file: &Path,
+    name: &str,
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    body: &[Statement<'_>],
+    index: Option<&stryx_index::ProjectIndex>,
+) -> ExportedFunctionSummary {
+    let param_names: Vec<String> = params
+        .items
+        .iter()
+        .map(|p| single_binding_name(&p.pattern).unwrap_or_else(|| format!("_arg{}", p.span.start)))
+        .collect();
+
+    let mut params_out = Vec::with_capacity(param_names.len());
+    for pname in &param_names {
+        // One param pre-tainted, body-source recognition disabled.
+        // The visitor sees the previous round's index so already-known
+        // sink calls inside this callee contribute — chains converge
+        // through multi-level helpers (route → service → dao).
+        let mut visitor = SqlInjectionVisitor::new(file.to_path_buf(), index, false);
+        visitor.taint(pname.clone());
+        for stmt in body {
+            visitor.visit_statement(stmt);
+        }
+        let reaches = !visitor.findings.is_empty();
+        let sink_span = visitor.findings.first().map(|f| f.span.clone());
+        params_out.push(ParamFlow {
+            name: pname.clone(),
+            reaches_sql_sink_unsanitized: reaches,
+            sink_span,
+            ..Default::default()
+        });
+    }
+
+    ExportedFunctionSummary {
+        name: name.to_string(),
+        params: params_out,
+        span: Span::new(file.to_path_buf(), params.span.start, params.span.end),
+        contains_auth_check: false,
+        validates_request_body: false,
     }
 }

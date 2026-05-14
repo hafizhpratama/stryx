@@ -2725,6 +2725,7 @@ fn build_summary(
             reaches_fetch_sink_unsanitized: false,
             fetch_sink_path_pinned_only: false,
             reaches_redirect_sink_unsanitized: false,
+            reaches_sql_sink_unsanitized: false,
             propagates_to_return,
             sink_span,
             tainted_offsets,

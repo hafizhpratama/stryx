@@ -1766,6 +1766,54 @@ fn sql_injection_good_fixture_silent() {
 }
 
 #[test]
+fn sql_injection_cross_file_bad_fires() {
+    // Slice 2 — the raw-SQL sink lives in `./lib.ts`, not in the
+    // route. The extract pass must summarise `findUserBySlug(slug)`
+    // with `reaches_sql_sink_unsanitized = true` on param 0, and
+    // the run pass must emit a Critical finding on `route.ts` at
+    // the call site.
+    let dir = fixtures_root().join("flow-sql-injection/cross-file-bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/sql-injection")
+        .collect();
+    let route_path = dir.join("route.ts");
+    let cross_file_finding = findings
+        .iter()
+        .find(|f| f.span.file == route_path && f.message.contains("findUserBySlug"));
+    assert!(
+        cross_file_finding.is_some(),
+        "expected a cross-file SQL-injection finding on route.ts referencing findUserBySlug; got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+    assert_eq!(cross_file_finding.unwrap().severity, Severity::Critical);
+}
+
+#[test]
+fn sql_injection_cross_file_good_silent() {
+    // Same call shape as cross-file-bad, but the helper uses
+    // Prisma's parameterised tagged-template `$queryRaw`. The
+    // simulator must not record any sink reach for the param, so
+    // the route's call-site finding stays silent.
+    let dir = fixtures_root().join("flow-sql-injection/cross-file-good");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/sql-injection")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "expected zero SQL-injection findings on cross-file-good/, got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn xss_via_dangerously_set_inner_html_good_fixture_silent() {
     let path = fixtures_root().join("flow-xss-via-dangerously-set-inner-html/good.tsx");
     let findings: Vec<_> = scan_file(&path)
