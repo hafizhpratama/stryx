@@ -245,9 +245,14 @@ jobs:
       - name: Upload release assets
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # `GITHUB_REF_NAME` is the tag only on `on: push: tags`
+          # events. On workflow_dispatch it's the branch (here
+          # `ci/rust-pathfix`), so we fall back to the explicit
+          # `tag` input.
+          TARGET_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
           set -euo pipefail
-          tag="${GITHUB_REF_NAME}"
+          tag="${TARGET_TAG}"
           # Create the Release object if no prior step did. Earlier
           # versions of this workflow relied on someone clicking
           # "Draft a new release" in the web UI before the tag was
