@@ -72,15 +72,18 @@ jobs:
           cp .release-artifacts/stryx.*.node .
           ls -la stryx.*.node
 
-      # `napi prepublish` arranges the platform binaries into per-
+      # `napi pre-publish` arranges the platform binaries into per-
       # target subpackage directories under `npm/`, generates each
       # subpackage's package.json (with cpu / os / libc fields), and
       # rewrites the main package.json to add the matching
       # `optionalDependencies` block so `npm install stryx` picks
-      # only the right binary at install time.
-      - name: Run napi prepublish
+      # only the right binary at install time. `--gh-release` is
+      # opt-in at napi-rs CLI v3.6+; omitting it keeps the pre-
+      # publish step focused on staging files (the .node files
+      # already live in the crate root from the previous step).
+      - name: Run napi pre-publish
         working-directory: crates/stryx_napi
-        run: npx napi prepublish -t npm --skip-gh-release
+        run: npx napi pre-publish -t npm
 
       # Publish each platform subpackage first, then the main
       # package. Order matters: optionalDependencies must already

@@ -226,12 +226,17 @@ jobs:
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
-          # Wait briefly in case the tag-triggered release isn't
-          # visible yet (the manual `gh release create` step may
-          # have happened in a separate run).
-          for i in 1 2 3; do
-            if gh release view "$tag" >/dev/null 2>&1; then break; fi
-            echo "release $tag not yet visible, retry $i/3"
-            sleep 5
-          done
+          # Create the Release object if no prior step did. Earlier
+          # versions of this workflow relied on someone clicking
+          # "Draft a new release" in the web UI before the tag was
+          # pushed; v0.2.2 surfaced that bug — the workflow now
+          # creates the Release itself if missing so the path is
+          # self-sufficient.
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            echo "creating Release object for $tag"
+            gh release create "$tag" \
+              --title "Stryx ${tag}" \
+              --generate-notes \
+              --verify-tag
+          fi
           gh release upload "$tag" release/* --clobber
