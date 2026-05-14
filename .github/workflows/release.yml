@@ -53,19 +53,32 @@ jobs:
         with:
           ref: ${{ inputs.tag || github.ref }}
 
+      # Replaced dtolnay/rust-toolchain@master after multiple
+      # cargo-not-on-PATH failures on macos-15. setup-rust-toolchain
+      # explicitly prepends `$CARGO_HOME/bin` to GITHUB_PATH so
+      # subsequent steps see the right `cargo`/`rustc` shims.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.93"
-          targets: ${{ matrix.target }}
+          target: ${{ matrix.target }}
+          components: ""
+          cache: false  # we use Swatinem/rust-cache separately
 
-      # `dtolnay/rust-toolchain@master` installs but does not always
-      # set a `rustup default`, so subprocess `cargo` invocations
-      # (e.g. napi-rs CLI's internal `cargo metadata` call from a
-      # cwd that loses workspace `rust-toolchain.toml` discovery)
-      # error out. Explicit default — belt-and-braces.
-      - name: Set rustup default
-        run: rustup default 1.93
+      # Debug step — print which cargo is on PATH and which version.
+      # Keep this in place while CI is flaky; remove once we have
+      # three consecutive green runs across the matrix.
+      - name: Debug toolchain resolution
+        shell: bash
+        run: |
+          echo "PATH=$PATH"
+          echo "CARGO_HOME=${CARGO_HOME:-unset}"
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-unset}"
+          which -a cargo || true
+          which -a rustc || true
+          cargo --version || echo "cargo --version FAILED"
+          rustc --version || echo "rustc --version FAILED"
+          rustup show || true
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
@@ -73,13 +86,6 @@ jobs:
           shared-key: release-${{ matrix.target }}
 
       - name: Build CLI (${{ matrix.target }})
-        # `RUSTUP_TOOLCHAIN` instructs rustup to use the named
-        # toolchain for any cargo invocation, without touching PATH.
-        # This is more robust than `rustup run cargo` (which doesn't
-        # propagate through subprocesses on Windows) and avoids the
-        # macos-15 issue where bare `cargo` resolves to `rustup-init`.
-        env:
-          RUSTUP_TOOLCHAIN: "1.93"
         run: cargo build --release --bin stryx --target ${{ matrix.target }}
 
       # Resolve binary name (Windows appends .exe). Output the
@@ -143,17 +149,24 @@ jobs:
           ref: ${{ inputs.tag || github.ref }}
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.93"
-          targets: ${{ matrix.target }}
+          target: ${{ matrix.target }}
+          components: ""
+          cache: false  # we use Swatinem/rust-cache separately
 
-      # napi-rs CLI invokes `cargo metadata` from a cwd that can
-      # lose `rust-toolchain.toml` discovery, so we set the default
-      # explicitly. Without this, the build fails with
-      # "rustup could not choose a version of cargo to run".
-      - name: Set rustup default
-        run: rustup default 1.93
+      - name: Debug toolchain resolution
+        shell: bash
+        run: |
+          echo "PATH=$PATH"
+          echo "CARGO_HOME=${CARGO_HOME:-unset}"
+          echo "RUSTUP_HOME=${RUSTUP_HOME:-unset}"
+          which -a cargo || true
+          which -a rustc || true
+          cargo --version || echo "cargo --version FAILED"
+          rustc --version || echo "rustc --version FAILED"
+          rustup show || true
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -171,10 +184,6 @@ jobs:
         run: npm ci
 
       - name: Build napi (${{ matrix.target }})
-        # `RUSTUP_TOOLCHAIN` propagates to all cargo subprocesses
-        # spawned by `npx napi build` (most importantly the internal
-        # `cargo metadata` call), without touching PATH. Cross-
-        # platform — works on macOS / Linux / Windows.
         env:
           RUSTUP_TOOLCHAIN: "1.93"
         working-directory: crates/stryx_napi
