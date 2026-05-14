@@ -72,18 +72,33 @@ jobs:
           cp .release-artifacts/stryx.*.node .
           ls -la stryx.*.node
 
-      # `napi pre-publish` arranges the platform binaries into per-
-      # target subpackage directories under `npm/`, generates each
-      # subpackage's package.json (with cpu / os / libc fields), and
-      # rewrites the main package.json to add the matching
-      # `optionalDependencies` block so `npm install stryx` picks
-      # only the right binary at install time. `--gh-release` is
-      # opt-in at napi-rs CLI v3.6+; omitting it keeps the pre-
-      # publish step focused on staging files (the .node files
-      # already live in the crate root from the previous step).
-      - name: Run napi pre-publish
+      # napi-rs CLI v3 split the v2 monolithic `prepublish` into
+      # three smaller commands. We run them explicitly so the
+      # flow is auditable:
+      #
+      # 1. `create-npm-dirs` writes `npm/<platform>/package.json`
+      #    for each declared target (with cpu / os / libc fields).
+      # 2. `artifacts -d .` copies the `.node` files (which we
+      #    staged into the crate root from the GH Release in the
+      #    previous step) into the matching `npm/<platform>/` dirs.
+      # 3. `pre-publish` writes the `optionalDependencies` block on
+      #    the main package.json. `--skip-optional-publish` is
+      #    needed because the default behaviour is to run
+      #    `npm view <subpackage>@<version>` to verify each
+      #    optional dep was already published — but we publish the
+      #    subpackages later in this same workflow, so the check
+      #    would always 404 on first release.
+      - name: Create npm platform dirs
         working-directory: crates/stryx_napi
-        run: npx napi pre-publish -t npm
+        run: npx napi create-npm-dirs
+
+      - name: Copy .node files into platform dirs
+        working-directory: crates/stryx_napi
+        run: npx napi artifacts -d .
+
+      - name: Patch main package.json with optionalDependencies
+        working-directory: crates/stryx_napi
+        run: npx napi pre-publish -t npm --skip-optional-publish
 
       # Publish each platform subpackage first, then the main
       # package. Order matters: optionalDependencies must already
