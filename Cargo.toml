@@ -14,7 +14,7 @@ members = [
 ]
 
 [workspace.package]
-version      = "0.2.4"
+version      = "0.2.5"
 edition      = "2024"
 rust-version = "1.93"
 license      = "Apache-2.0"
@@ -65,15 +65,15 @@ regex         = "1"
 criterion     = { version = "0.8", features = ["html_reports"] }
 
 # Workspace-internal deps
-stryx_core      = { path = "crates/stryx_core",      version = "0.2.4" }
-stryx_ast       = { path = "crates/stryx_ast",       version = "0.2.4" }
-stryx_cache     = { path = "crates/stryx_cache",     version = "0.2.4" }
-stryx_index     = { path = "crates/stryx_index",     version = "0.2.4" }
-stryx_taint     = { path = "crates/stryx_taint",     version = "0.2.4" }
-stryx_rules     = { path = "crates/stryx_rules",     version = "0.2.4" }
-stryx_llm       = { path = "crates/stryx_llm",       version = "0.2.4" }
-stryx_reporter  = { path = "crates/stryx_reporter",  version = "0.2.4" }
-stryx_cli       = { path = "crates/stryx_cli",       version = "0.2.4" }
+stryx_core      = { path = "crates/stryx_core",      version = "0.2.5" }
+stryx_ast       = { path = "crates/stryx_ast",       version = "0.2.5" }
+stryx_cache     = { path = "crates/stryx_cache",     version = "0.2.5" }
+stryx_index     = { path = "crates/stryx_index",     version = "0.2.5" }
+stryx_taint     = { path = "crates/stryx_taint",     version = "0.2.5" }
+stryx_rules     = { path = "crates/stryx_rules",     version = "0.2.5" }
+stryx_llm       = { path = "crates/stryx_llm",       version = "0.2.5" }
+stryx_reporter  = { path = "crates/stryx_reporter",  version = "0.2.5" }
+stryx_cli       = { path = "crates/stryx_cli",       version = "0.2.5" }
 
 [profile.release]
 lto = "thin"

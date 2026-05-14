@@ -169,8 +169,14 @@ jobs:
         run: npm ci
 
       - name: Build napi (${{ matrix.target }})
+        # `rustup run 1.93 <cmd>` ensures the wrapped command and
+        # ALL its cargo subprocesses pick up the 1.93 toolchain via
+        # rustup, not via PATH. Without this, napi-rs CLI's
+        # internal `cargo metadata` call hits rustup-init on
+        # macos-15 the same way bare `cargo build` does in the CLI
+        # matrix entry.
         working-directory: crates/stryx_napi
-        run: npx napi build --platform --release --target ${{ matrix.target }}
+        run: rustup run 1.93 npx napi build --platform --release --target ${{ matrix.target }}
 
       # napi-rs names the artifact `stryx.<platform>.node` (e.g.
       # stryx.linux-x64-gnu.node). Both the .node and the generated

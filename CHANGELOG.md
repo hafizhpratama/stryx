@@ -18,6 +18,24 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-05-15
+
+Patch release. **CI fix only — no engine, rule, or public-API
+changes.** Same shape as v0.2.4 but applied to the napi build
+matrix entry too: v0.2.4 fixed `cli (aarch64-apple-darwin)`
+(bare `cargo build` → `rustup run 1.93 cargo build`), but
+v0.2.4's release.yml then failed on `napi (aarch64-apple-darwin)`
+because `napi build` spawns a subprocess `cargo metadata` that
+suffered the same macos-15 PATH discovery bug.
+
+### Fixed
+
+- `release.yml`: `Build napi` step now wraps the napi-rs invocation
+  with `rustup run 1.93`. The wrapper ensures all `cargo`
+  subprocesses spawned by `npx napi build` (most importantly the
+  internal `cargo metadata` call) resolve to the 1.93 toolchain
+  via rustup, not via PATH.
+
 ## [0.2.4] — 2026-05-15
 
 Patch release. **CI fix only — no engine, rule, or public-API
