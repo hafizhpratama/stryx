@@ -1,0 +1,130 @@
+name: Publish to npm
+
+# Manual-only. Once the maintainer has:
+#   1. Created the npm account and reserved `stryx` (or chosen a
+#      different name in crates/stryx_napi/package.json)
+#   2. Generated an automation token at npmjs.com
+#   3. Added it as the `NPM_TOKEN` secret in this repo's settings
+# ...they can run this workflow against an existing `v*` tag whose
+# Release.yml run has already attached the prebuilt `.node` files.
+#
+# Why not auto-fire on tag push? Three reasons:
+#   - First publish needs human confirmation (the npm namespace is
+#     permanent once claimed)
+#   - The prebuilt-binary download path here pulls from the GitHub
+#     Release attached by release.yml, which must complete first
+#   - Tag-push automation should fail-closed on missing secrets;
+#     this design fails-open by simply never running
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to publish (e.g. v0.2.1)"
+        required: true
+        type: string
+      dry_run:
+        description: "Run `npm publish --dry-run` only (recommended for first try)"
+        required: false
+        default: true
+        type: boolean
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish ${{ inputs.tag }} to npm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install napi-rs CLI
+        working-directory: crates/stryx_napi
+        run: npm ci
+
+      # Download every `stryx.*.node` file from the GitHub Release
+      # attached by release.yml. `gh release download` resolves the
+      # tag and pulls the asset list; we filter to .node files only.
+      - name: Download prebuilt .node binaries from GitHub Release
+        working-directory: crates/stryx_napi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p .release-artifacts
+          gh release download "${{ inputs.tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern 'stryx.*.node' \
+            --dir .release-artifacts
+          ls -la .release-artifacts/
+          # napi-rs prepublish looks for the .node files at the crate
+          # root, alongside index.js / index.d.ts.
+          cp .release-artifacts/stryx.*.node .
+          ls -la stryx.*.node
+
+      # `napi prepublish` arranges the platform binaries into per-
+      # target subpackage directories under `npm/`, generates each
+      # subpackage's package.json (with cpu / os / libc fields), and
+      # rewrites the main package.json to add the matching
+      # `optionalDependencies` block so `npm install stryx` picks
+      # only the right binary at install time.
+      - name: Run napi prepublish
+        working-directory: crates/stryx_napi
+        run: npx napi prepublish -t npm --skip-gh-release
+
+      # Publish each platform subpackage first, then the main
+      # package. Order matters: optionalDependencies must already
+      # exist on the registry when the main package's tarball lands.
+      - name: Publish platform subpackages
+        if: ${{ !inputs.dry_run }}
+        working-directory: crates/stryx_napi/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          set -euo pipefail
+          for d in */; do
+            echo "publishing $d"
+            (cd "$d" && npm publish --access public)
+          done
+
+      - name: Publish main package
+        if: ${{ !inputs.dry_run }}
+        working-directory: crates/stryx_napi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public
+
+      # Dry-run path — useful for the first execution to confirm
+      # the prepublish output and the file list before touching npm.
+      - name: Dry-run main package
+        if: ${{ inputs.dry_run }}
+        working-directory: crates/stryx_napi
+        run: |
+          set -euo pipefail
+          echo "=== npm/ subpackages that would be published ==="
+          for d in npm/*/; do
+            echo
+            echo "--- $d ---"
+            (cd "$d" && npm publish --dry-run --access public 2>&1 | tail -40)
+          done
+          echo
+          echo "=== main package dry-run ==="
+          npm publish --dry-run --access public 2>&1 | tail -60
+
+      - name: Summary
+        run: |
+          if [[ "${{ inputs.dry_run }}" == "true" ]]; then
+            echo "::notice::Dry run complete — no packages published. Re-run with dry_run=false to actually publish."
+          else
+            echo "::notice::Published ${{ inputs.tag }} to npm (main package + platform subpackages)."
+          fi

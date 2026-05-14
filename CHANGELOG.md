@@ -18,6 +18,22 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- `npx stryx scan` works locally — the napi-rs package gained a
+  `bin/stryx.js` CLI shim that wraps the napi `scan()` function,
+  parses `--format` / `--fail-on` / path args, prints findings in
+  the same human / JSON formats as the Rust CLI, and sets the exit
+  code from the maximum severity. Wires the `bin` field in
+  `crates/stryx_napi/package.json`.
+- `.github/workflows/npm-publish.yml` (draft, `workflow_dispatch`
+  only) — manual-trigger workflow that pulls the prebuilt `.node`
+  binaries from a tag's GitHub Release, runs
+  `napi prepublish -t npm` to arrange platform subpackages with
+  the optional-dependencies trick, and publishes to npm. Defaults
+  to dry-run; a maintainer flips `dry_run=false` once `NPM_TOKEN`
+  is set in repo secrets and the first-publish output looks right.
+
 ### Changed
 
 - Docs reorganisation: `CLAUDE.md` is now the single source of
