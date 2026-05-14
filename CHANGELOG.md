@@ -18,6 +18,24 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-05-14
+
+Patch release. **CI fix only — no engine, rule, or public-API
+changes.** Cuts a new tag because the v0.2.2 npm-publish dry-run
+surfaced a packaging bug: the main package tarball was bundling
+all 5 platform `.node` binaries (7.3 MB) instead of relying on
+the `optionalDependencies` subpackages to deliver them.
+
+### Fixed
+
+- `crates/stryx_napi/package.json` `files` field no longer
+  includes the `stryx.*.node` glob. The main npm package now
+  ships only `index.js` (the napi loader that picks the right
+  subpackage), `index.d.ts`, and `bin/stryx.js` (~20 KB total).
+  Each end user downloads exactly one platform `.node` (~1.5 MB)
+  via the matching `stryx-<platform>` optional dependency instead
+  of all five.
+
 ## [0.2.2] — 2026-05-14
 
 Patch release. **CI fix only — no engine, rule, or public-API
