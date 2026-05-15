@@ -28,7 +28,13 @@ fn scan_file(path: &Path) -> Vec<Finding> {
         file: &parsed,
         index: None,
     };
-    registry.rules().iter().flat_map(|r| r.run(&ctx)).collect()
+    let raw: Vec<Finding> = registry.rules().iter().flat_map(|r| r.run(&ctx)).collect();
+    // Apply the same post-rule suppression filter the CLI binary
+    // does; otherwise `// stryx-disable-next-line` markers in
+    // fixtures would never take effect under `scan_file`.
+    let mut sources = std::collections::HashMap::new();
+    sources.insert(path.to_path_buf(), source);
+    stryx_cli::filter_suppressed(raw, &sources)
 }
 
 /// Run the engine's two-pass pipeline over a fixture directory and collect
@@ -110,7 +116,8 @@ fn scan_dir(dir: &Path) -> Vec<Finding> {
             findings.extend(rule.run(&ctx));
         }
     }
-    findings
+    // Apply the same post-rule suppression filter the CLI does.
+    stryx_cli::filter_suppressed(findings, &sources)
 }
 
 /// Variant of `scan_dir` that returns the converged index instead of
@@ -1872,6 +1879,43 @@ fn xss_via_dangerously_set_inner_html_good_fixture_silent() {
     assert!(
         findings.is_empty(),
         "good.tsx covers hardcoded / env / DOMPurify / sanitize-html / body-but-not-html — expected zero XSS findings, got {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn suppress_inline_drops_matching_rule_only() {
+    // inline.ts has two `exec(...)` calls that would normally fire
+    // `flow/command-injection-via-exec`. Case 1 is preceded by a
+    // matching suppression marker and should NOT fire. Case 2 is
+    // preceded by a marker for a different rule id and SHOULD fire.
+    let path = fixtures_root().join("suppress-comments/inline.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/command-injection-via-exec")
+        .collect();
+    assert_eq!(
+        findings.len(),
+        1,
+        "expected exactly one command-injection finding (case 2 only); got {}: {:?}",
+        findings.len(),
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn suppress_file_level_drops_all_findings_for_rule() {
+    // file-level.ts has a `// stryx-disable
+    // flow/command-injection-via-exec` at the top. Both `exec(...)`
+    // calls inside the file should be silenced.
+    let path = fixtures_root().join("suppress-comments/file-level.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/command-injection-via-exec")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "file-level disable should silence every command-injection finding in the file; got: {:?}",
         findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
     );
 }

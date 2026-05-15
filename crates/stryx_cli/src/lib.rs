@@ -16,6 +16,9 @@ use stryx_core::Finding;
 use stryx_index::{PathAlias, ProjectIndex};
 use stryx_rules::{RuleContext, RuleRegistry, builtin_rules};
 
+mod suppress;
+pub use suppress::filter_suppressed;
+
 /// Output of a scan. `findings` is the merged set of all rule
 /// findings across the file tree; `sources` is the captured file
 /// content keyed by absolute path so callers (CLI, JSON reporter,
@@ -126,6 +129,12 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
         .iter()
         .map(|entry| (entry.key().clone(), entry.value().clone()))
         .collect();
+
+    // Pass 3 — drop findings whose source line is covered by a
+    // `// stryx-disable-next-line <rule-id>` or `// stryx-disable
+    // <rule-id>` comment. Centralized here so each rule visitor
+    // stays ignorant of suppression-comment shape.
+    let findings = filter_suppressed(findings, &sources_out);
 
     Ok(ScanResult {
         findings,
