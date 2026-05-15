@@ -18,6 +18,58 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.14] — 2026-05-15
+
+Patch release. **Destructuring projection** — `const { a, b } =
+body` now binds `a` and `b` at body's actual sub-Cells instead of
+whole-value tainting them. Compounds with v0.2.13's per-field
+sanitisation: validated fields stay clean through destructuring.
+
+### Added
+
+- `Cell::project_at(offset)` — project a Cell at a single offset.
+  Returns the explicit shape entry when present; otherwise
+  synthesises a Cell that inherits the root xtaint.
+- `Cell::project_path(path)` — project along a multi-segment
+  path, walking `project_at` one offset at a time.
+- `FlowVisitor::lookup_projected(name, path)` — look up the named
+  binding's Cell, projected at `path`. Used by destructuring.
+- `FlowVisitor::try_apply_destructuring_projection(pat, init)` —
+  when the init is an Identifier-rooted access chain and the
+  pattern is an `ObjectPattern`, bind each destructured field to
+  the source Cell projected at its offset.
+
+### Changed
+
+- `handle_var_decl` calls `try_apply_destructuring_projection`
+  before falling back to the existing whole-value taint loop.
+  When projection applies, each binding gets its precise
+  sub-Cell; clean fields stay clean, tainted fields stay
+  tainted. Skips nested destructuring (`{ user: { id } } = body`)
+  and rest patterns — those fall through to the existing
+  whole-value path.
+
+### Precision example
+
+```ts
+const body = await req.json();
+IdSchema.parse(body.id); // body.id Clean
+const { id } = body; // id binds Clean (was: tainted before v0.2.14)
+prisma.user.findFirst({ where: { id } }); // no fire ✓
+
+const { id: vId, name } = body;
+prisma.user.create({
+  data: { id: vId, name }, // body.name still tainted → fires
+});
+```
+
+### Audit gaps remaining
+
+- **Assignment handling in non-flagship rules**: only
+  `flow/unvalidated-body-to-db` propagates taint through bare
+  reassignments / per-field state. The other 10 rules don't
+  track reassignment at all. Targeted for v0.2.15.
+
 ## [0.2.13] — 2026-05-15
 
 Patch release. **First user-visible precision win from the shape

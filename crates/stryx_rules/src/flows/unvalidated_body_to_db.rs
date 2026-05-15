@@ -347,6 +347,68 @@ impl<'idx> FlowVisitor<'idx> {
         }
     }
 
+    /// Look up the most-recent Cell stored under `name`, projected
+    /// at `path`. Returns `None` if the name isn't in any scope.
+    /// v0.2.14: used by destructuring projection to find the source
+    /// Cell for `const { a } = body` patterns.
+    fn lookup_projected(&self, name: &str, path: &[Offset]) -> Option<Cell> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(cell) = scope.get(name) {
+                return Some(cell.project_path(path));
+            }
+        }
+        None
+    }
+
+    /// Try to apply destructuring projection: when init is a simple
+    /// identifier-rooted access (`body`, `body.user`, etc.) and the
+    /// declarator's pattern is an `ObjectPattern`, bind each
+    /// destructured field to the source Cell projected at that
+    /// field's offset. Returns `true` if the projection was
+    /// applied (caller should skip the default whole-value
+    /// tainting). v0.2.14.
+    fn try_apply_destructuring_projection(
+        &mut self,
+        pat: &BindingPattern<'_>,
+        init: &Expression<'_>,
+    ) -> bool {
+        let BindingPattern::ObjectPattern(op) = pat else {
+            return false;
+        };
+        let Some((root, root_path)) = static_member_root_and_path(init) else {
+            return false;
+        };
+        let Some(source_cell) = self.lookup_projected(root, &root_path) else {
+            return false;
+        };
+        for prop in &op.properties {
+            // Skip nested destructuring / rest / non-static keys —
+            // fall back to whole-value tainting via the caller's
+            // existing path for those rarer cases.
+            let PropertyKey::StaticIdentifier(field_id) = &prop.key else {
+                return false;
+            };
+            let BindingPattern::BindingIdentifier(local_id) = &prop.value else {
+                return false;
+            };
+            let field_offset = Offset::Field(field_id.name.to_string());
+            let projected = source_cell.project_at(&field_offset);
+            // Only insert if the projection carries actual taint —
+            // otherwise the existing default-clean semantics are
+            // preserved (no key in scope = untainted).
+            if projected.tainted_at(&[]) {
+                if let Some(scope) = self.scopes.last_mut() {
+                    scope.insert(local_id.name.to_string(), projected);
+                }
+            } else if let Some(scope) = self.scopes.last_mut() {
+                // Defensively clear any prior taint on this name
+                // (the destructuring rebinds it).
+                scope.remove(local_id.name.as_str());
+            }
+        }
+        true
+    }
+
     /// Field-level taint check — consult the stored `Cell`'s shape
     /// lattice at the given access path. ADR 0012: the live visitor
     /// promotion from flat key-existence to per-offset lookup.
@@ -886,6 +948,16 @@ impl<'idx> FlowVisitor<'idx> {
             let tainted = self.expr_taint(init);
             self.scan_for_sinks(init);
             if !tainted {
+                continue;
+            }
+            // v0.2.14: destructuring projection. When the init is an
+            // identifier-rooted access chain and the pattern is an
+            // ObjectPattern, bind each destructured field to the
+            // source Cell projected at its offset. This preserves
+            // per-field cleanliness that v0.2.13 carved via
+            // `parse(body.x)` — `const { x, y } = body` now binds
+            // `x` clean and `y` tainted, not both tainted.
+            if self.try_apply_destructuring_projection(&declarator.id, init) {
                 continue;
             }
             // Slice 3.5 of ADR 0007 — try to compute a precise return

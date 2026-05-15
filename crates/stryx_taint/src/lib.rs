@@ -423,6 +423,39 @@ impl Cell {
         matches!(&self.xtaint, Xtaint::Tainted(_))
     }
 
+    /// Project this Cell at a single offset, returning the Cell
+    /// that an access through `offset` would observe. If the shape
+    /// has an explicit entry, that entry is returned (preserving
+    /// its tracked sub-structure); otherwise we synthesise a Cell
+    /// inheriting only the root xtaint (a tainted parent makes the
+    /// projected field whole-value tainted; a clean parent makes
+    /// it bot). v0.2.14: backs destructuring projection so
+    /// `const { a } = body` binds `a` to `body.a`'s actual sub-Cell
+    /// rather than whole-value tainting it.
+    pub fn project_at(&self, offset: &Offset) -> Cell {
+        if let Shape::Obj(map) = &self.shape
+            && let Some(sub) = map.get(offset)
+        {
+            return sub.clone();
+        }
+        match &self.xtaint {
+            Xtaint::Tainted(labels) => Cell::tainted(labels.clone()),
+            Xtaint::Clean | Xtaint::None => Cell::bot(),
+        }
+    }
+
+    /// Project this Cell along a multi-segment access path. Empty
+    /// path returns `self.clone()`. Otherwise walks the offsets in
+    /// order, descending into shape entries when present and falling
+    /// back to ancestor xtaint inheritance otherwise. v0.2.14.
+    pub fn project_path(&self, path: &[Offset]) -> Cell {
+        let mut cur = self.clone();
+        for off in path {
+            cur = cur.project_at(off);
+        }
+        cur
+    }
+
     /// Mark the access path `path` as `Clean` inside this Cell.
     /// v0.2.13: the write-side counterpart to `tainted_at` — when
     /// the visitor sees `Schema.parse(body.x)`, it calls
@@ -1520,6 +1553,33 @@ mod tests {
         assert!(nested.tainted_at(&[Offset::Field("a".into())]));
         assert!(!nested.tainted_at(&[Offset::Field("a".into()), Offset::Field("missing".into())]));
         assert!(!nested.tainted_at(&[Offset::Field("missing".into())]));
+    }
+
+    #[test]
+    fn project_at_returns_explicit_shape_entry_then_inherits() {
+        // Whole-value tainted cell: every projection is tainted.
+        let whole = Cell::tainted(vec![TaintLabel::UserInput]);
+        let projected = whole.project_at(&Offset::Field("anything".into()));
+        assert!(matches!(projected.xtaint, Xtaint::Tainted(_)));
+        // Project at deep path also tainted (inheritance through
+        // each level).
+        let deep = whole.project_path(&[Offset::Field("a".into()), Offset::Field("b".into())]);
+        assert!(matches!(deep.xtaint, Xtaint::Tainted(_)));
+
+        // Carved-clean cell: the explicit field is Clean, others
+        // inherit from root.
+        let mut body = Cell::tainted(vec![TaintLabel::UserInput]);
+        body.mark_clean_at(&[Offset::Field("safe".into())]);
+        let safe = body.project_at(&Offset::Field("safe".into()));
+        assert!(matches!(safe.xtaint, Xtaint::Clean));
+        let other = body.project_at(&Offset::Field("other".into()));
+        assert!(matches!(other.xtaint, Xtaint::Tainted(_)));
+
+        // Clean root: projections inherit Bot (no taint).
+        let clean = Cell::clean();
+        let p = clean.project_at(&Offset::Field("x".into()));
+        assert!(matches!(p.xtaint, Xtaint::None));
+        assert!(!p.tainted_at(&[]));
     }
 
     #[test]

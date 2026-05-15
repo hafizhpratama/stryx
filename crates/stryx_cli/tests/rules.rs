@@ -1884,6 +1884,30 @@ fn xss_via_dangerously_set_inner_html_good_fixture_silent() {
 }
 
 #[test]
+fn unvalidated_body_to_db_destructuring_projection_only_unvalidated_fires() {
+    // v0.2.14 precision win — destructured fields inherit their
+    // projected Cell from the source. The fixture has 3 cases:
+    //   CASE 1: parse(body.id); { id } = body; use id    → no fire
+    //   CASE 2: parse(body.id); { id, name } = body; use both → fires on name
+    //   CASE 3: { email } = body; use email              → fires (no sanitisation)
+    let path = fixtures_root().join("flow-unvalidated-body-to-db/destructuring-projection.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert_eq!(
+        findings.len(),
+        2,
+        "expected 2 findings (CASE 2 + CASE 3 controls); got {}: {:?}",
+        findings.len(),
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn unvalidated_body_to_db_per_field_sanitisation_only_control_fires() {
     // v0.2.13 precision win. The fixture has 3 cases:
     //   CASE 1: parse(body.id); use body.id only            → no fire
