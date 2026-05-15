@@ -26,11 +26,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Swapped from dtolnay/rust-toolchain@master in v0.2.8 — that
+      # action doesn't reliably prepend $CARGO_HOME/bin to GITHUB_PATH
+      # on macos-15, so naked `cargo` resolves to `rustup-init` and
+      # fails with "unexpected argument 'test' found". The
+      # actions-rust-lang action handles PATH correctly cross-platform.
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: "1.93"
           components: clippy, rustfmt
+          cache: false  # we use Swatinem/rust-cache separately
 
       - name: Cache cargo registry + build
         uses: Swatinem/rust-cache@v2
