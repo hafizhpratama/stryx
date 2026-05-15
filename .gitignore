@@ -36,6 +36,9 @@ crates/stryx_napi/npm/**/*.node
 .vscode/
 !.vscode/extensions.json
 !.vscode/settings.shared.json
+
+# Claude Code session-local files (scheduled_tasks.lock, etc.)
+.claude/
 *.swp
 *.swo
 *~
