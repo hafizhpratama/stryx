@@ -6,7 +6,7 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
 authors      = { workspace = true }
-description  = "Output formatters for Stryx (human, JSON, SARIF — JSON + human in v0.0.1)."
+description  = "Output formatters for the Stryx static analyzer. Human-readable and JSON finder reports; SARIF and GitHub annotations planned."
 
 [dependencies]
 stryx_core = { workspace = true }

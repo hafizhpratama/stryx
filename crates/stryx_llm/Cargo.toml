@@ -6,7 +6,7 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
 authors      = { workspace = true }
-description  = "LLM escalation client for Stryx. v0.0.1 ships with a NullLlmClient only."
+description  = "LLM escalation client trait for the Stryx static analyzer. Provider-pluggable (Anthropic / OpenAI / Ollama); content-hash cached. Layer 3 of Stryx's 3-layer pipeline."
 
 [dependencies]
 stryx_core  = { workspace = true }

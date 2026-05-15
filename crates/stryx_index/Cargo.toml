@@ -6,7 +6,7 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
 authors      = { workspace = true }
-description  = "Project-level semantic index for Stryx (cross-file lookups). Stub for v0.0.1."
+description  = "Project-level semantic index for the Stryx static analyzer. Cross-file symbol resolution, import graph, framework hints; tsconfig path-alias aware."
 
 [dependencies]
 stryx_core  = { workspace = true }

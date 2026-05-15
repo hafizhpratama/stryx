@@ -6,7 +6,7 @@ rust-version = { workspace = true }
 license      = { workspace = true }
 repository   = { workspace = true }
 authors      = { workspace = true }
-description  = "Inter-procedural taint engine for Stryx. Stub for v0.0.1."
+description  = "Inter-procedural taint engine for the Stryx static analyzer. Cell/Shape lattice + per-rule ExportedFunctionSummary with content-keyed caching."
 
 [dependencies]
 stryx_core = { workspace = true }
