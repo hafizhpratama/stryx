@@ -109,18 +109,42 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          set -euo pipefail
+          set -uo pipefail
+          # Don't `set -e` — we want to continue past
+          # already-published subpackages (a normal state after a
+          # partial publish) and surface only real errors at the end.
+          failed=()
           for d in */; do
+            name=$(node -p "require('./$d/package.json').name")
+            version=$(node -p "require('./$d/package.json').version")
+            if npm view "${name}@${version}" version >/dev/null 2>&1; then
+              echo "skip $d — ${name}@${version} already published"
+              continue
+            fi
             echo "publishing $d"
-            (cd "$d" && npm publish --access public)
+            if ! (cd "$d" && npm publish --access public); then
+              failed+=("$d")
+            fi
           done
+          if [[ ${#failed[@]} -gt 0 ]]; then
+            echo "::error::subpackages failed to publish: ${failed[*]}"
+            exit 1
+          fi
 
       - name: Publish main package
         if: ${{ !inputs.dry_run }}
         working-directory: crates/stryx_napi
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-        run: npm publish --access public
+        run: |
+          set -uo pipefail
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          if npm view "${name}@${version}" version >/dev/null 2>&1; then
+            echo "skip — ${name}@${version} already published"
+            exit 0
+          fi
+          npm publish --access public
 
       # Dry-run path — useful for the first execution to confirm
       # the prepublish output and the file list before touching npm.
