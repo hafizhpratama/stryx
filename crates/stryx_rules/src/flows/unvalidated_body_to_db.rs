@@ -333,6 +333,20 @@ impl<'idx> FlowVisitor<'idx> {
             .any(|scope| scope.contains_key(name))
     }
 
+    /// v0.2.13: mark the access path on the named binding as
+    /// `Clean` in the live visitor scope. Called when a sanitiser
+    /// runs on a body-field access (`Schema.parse(body.x)`); after
+    /// this, subsequent reads of `body.x` report clean even though
+    /// `body` as a whole stays tainted.
+    fn mark_clean_at(&mut self, name: &str, path: &[Offset]) {
+        for scope in self.scopes.iter_mut().rev() {
+            if let Some(cell) = scope.get_mut(name) {
+                cell.mark_clean_at(path);
+                return;
+            }
+        }
+    }
+
     /// Field-level taint check — consult the stored `Cell`'s shape
     /// lattice at the given access path. ADR 0012: the live visitor
     /// promotion from flat key-existence to per-offset lookup.
@@ -978,6 +992,25 @@ impl<'idx> FlowVisitor<'idx> {
                 // Registry-dispatched (ADR 0008); all sanitiser checks in
                 // this file route through `registry_as_sanitizer`.
                 if self.registry_as_sanitizer(call) {
+                    // v0.2.13: per-field sanitisation write-through.
+                    // When the first arg is a body-field access path
+                    // (`Schema.parse(body.x)`), mark `body.x` as
+                    // Clean in `body`'s Cell. The whole-value case
+                    // (path empty, just `Schema.parse(body)`) is
+                    // already handled by the return-clean semantics
+                    // below — the sanitiser's *return* is clean, so
+                    // any binding from `const v = parse(body)` is
+                    // clean; this carve-out is for the
+                    // sometimes-seen pattern where the user invokes
+                    // the sanitiser as a side-effecting validator
+                    // (`parse(body.email)`) and then references
+                    // `body.email` directly downstream.
+                    if let Some(first_arg) = call.arguments.first().and_then(argument_expr)
+                        && let Some((root, path)) = static_member_root_and_path(first_arg)
+                        && !path.is_empty()
+                    {
+                        self.mark_clean_at(root, &path);
+                    }
                     // Still walk arguments to record any nested sinks/taint.
                     for arg in &call.arguments {
                         if let Some(e) = argument_expr(arg) {
@@ -1623,6 +1656,15 @@ impl<'idx> FlowVisitor<'idx> {
                     .is_some()
                 {
                     return true;
+                }
+                // ADR 0012 / v0.2.13: prefer the path-aware lookup
+                // when the chain reduces to an Identifier root.
+                // Without this the read-only sink-check path uses
+                // flat `is_tainted` and reports tainted for
+                // sanitised fields like `body.x` after
+                // `parse(body.x)`.
+                if let Some((root, path)) = static_member_root_and_path(expr) {
+                    return self.is_tainted_at(root, &path);
                 }
                 self.expr_is_tainted_readonly(&m.object)
             }

@@ -18,6 +18,70 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.13] — 2026-05-15
+
+Patch release. **First user-visible precision win from the shape
+lattice work** — per-field sanitisation write-through. When
+`Schema.parse(body.x)` runs, `body.x` is now treated as clean for
+the rest of the scope, while `body.y` (and every unobserved field)
+stays tainted. Closes a class of false positives where the user
+validated one field of the body but the visitor still flagged it.
+
+### Added
+
+- `Cell::mark_clean_at(path)` in `stryx_taint` — write-side
+  counterpart to `tainted_at`. Materialises `Obj` shape as needed;
+  intermediate cells inherit the ancestor xtaint so sibling fields
+  at every level continue to reflect whole-value taint.
+- `FlowVisitor::mark_clean_at(name, path)` in
+  `flow/unvalidated-body-to-db` — looks up the named binding's
+  `Cell` and calls `Cell::mark_clean_at`. Invoked from the
+  sanitiser-detection path of `expr_taint`.
+
+### Changed
+
+- `Cell::tainted_at` semantics: shape entries now **override** the
+  ancestor `Tainted` xtaint (previously, `Tainted` short-circuited
+  before consulting the shape). Cells with `Tainted` root + `Obj`
+  shape that carves a Clean sub-cell now correctly report clean
+  on the carved path while still reporting tainted on unobserved
+  fields. Existing fixtures byte-identical because pre-v0.2.13
+  Cells were `Tainted+Bot` (no shape entries).
+- `flow/unvalidated-body-to-db`'s `expr_is_tainted_readonly`
+  member-expression arm now consults `is_tainted_at` when the
+  access chain reduces to an Identifier root. Without this, the
+  sink-check path would still report `body.x` tainted after a
+  successful `parse(body.x)`. Symmetric to the `expr_taint` change
+  in v0.2.12.
+
+### Precision example
+
+```ts
+const body = await req.json();
+IdSchema.parse(body.id);             // body.id now Clean
+// CASE A — only the validated field is used:
+prisma.user.findFirst({ where: { id: body.id } });  // no fire ✓
+// CASE B — the validated field plus an unvalidated one:
+prisma.user.create({
+  data: { id: body.id, name: body.name },  // fires on body.name ✓
+});
+// CASE C — deep-path sanitisation:
+z.string().email().parse(body.user.email);
+prisma.user.create({ data: { email: body.user.email } });  // no fire ✓
+```
+
+Pre-v0.2.13: all three would fire on `body.x` taint. After:
+only CASE B's `body.name` fires.
+
+### Audit gaps remaining
+
+- **Destructuring field projection**: `const { a, b } = body`
+  currently taints `a` and `b` whole-value; should project at
+  `body`'s offsets. Targeted for v0.2.14.
+- **Assignment handling in non-flagship rules**. The 10
+  non-flagship rules don't track reassignment. Targeted for
+  v0.2.15.
+
 ## [0.2.12] — 2026-05-15
 
 Patch release. **Infrastructure slice — closes the audit's #3

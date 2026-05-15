@@ -1884,6 +1884,29 @@ fn xss_via_dangerously_set_inner_html_good_fixture_silent() {
 }
 
 #[test]
+fn unvalidated_body_to_db_per_field_sanitisation_only_control_fires() {
+    // v0.2.13 precision win. The fixture has 3 cases:
+    //   CASE 1: parse(body.id); use body.id only            → no fire
+    //   CASE 2: parse(body.id); use body.id AND body.name   → fires on body.name
+    //   CASE 3: parse(body.user.email); use body.user.email → no fire (deep path)
+    let path = fixtures_root().join("flow-unvalidated-body-to-db/per-field-sanitisation.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert_eq!(
+        findings.len(),
+        1,
+        "expected exactly 1 finding (CASE 2 control); got {}: {:?}",
+        findings.len(),
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn unvalidated_body_to_db_higher_order_all_cases_fire() {
     // Audit fix #2 (v0.2.11). Higher-order callback patterns —
     // `.then(body => …)`, `.map(item => …)`, `.forEach(item => …)`,

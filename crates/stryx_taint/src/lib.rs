@@ -379,58 +379,85 @@ impl Cell {
     }
 
     /// True iff the access path `path` resolves to a tainted leaf,
-    /// or to a sub-cell that itself reaches a tainted leaf. ADR 0012:
-    /// the entry point that lets the *live* visitor consult the
-    /// shape lattice when checking `body.x.y` instead of the flat
-    /// "is `body` in any scope" key-existence test.
+    /// or to a sub-cell that itself reaches a tainted leaf. ADR 0012
+    /// promotion + v0.2.13 refinement: shape entries override the
+    /// ancestor xtaint, so `Tainted+Obj{x: Clean}` reports
+    /// `tainted_at(&[Field("x")]) == false` even though the root
+    /// is tainted. This is the lattice-level mechanism behind
+    /// per-field sanitisation write-through.
     ///
     /// Semantics:
     ///
-    /// - Empty `path` → "is the whole value tainted or does it reach
-    ///   a tainted leaf anywhere?". Equivalent to `has_tainted_leaf`.
-    /// - Each [`Offset`] in `path` narrows the lookup one level. A
-    ///   `Field("x")` step descends into `Shape::Obj`'s entry for
-    ///   `Field("x")`; if the entry is absent, we conservatively
-    ///   inherit the *current* cell's xtaint (a tainted parent makes
-    ///   every unfollowed field tainted too — the standard
-    ///   over-approximation for unobserved-but-reachable subtree).
-    /// - When the current cell is `Tainted` we short-circuit `true`
-    ///   without consuming the rest of the path — the whole value is
-    ///   tainted, so every projection of it is also tainted.
-    /// - When the current cell is `Clean`, the path is clean by
-    ///   invariant 2 (Clean shadows sub-structure).
-    /// - `Shape::Arg(_)` is opaque — return whatever the current
-    ///   xtaint says.
+    /// - **Empty path** → whole-cell query. `Tainted` → true;
+    ///   `Clean` → false; `None` → `has_tainted_leaf()` (does any
+    ///   descendant reach a tainted leaf).
+    /// - **Non-empty path** → field-projection query. If the shape
+    ///   is `Obj` and the path's first offset is in the map, descend
+    ///   into the sub-cell. **Shape entries override ancestor
+    ///   xtaint** — a Clean sub-cell under a Tainted root correctly
+    ///   reports clean for its path.
+    /// - **Non-empty path, no shape entry** → fall back to the root
+    ///   xtaint as the answer for the unobserved path: `Tainted`
+    ///   inherits to every unobserved field (whole-value taint);
+    ///   `None`/`Clean` produce false (untracked or carved-clean).
     pub fn tainted_at(&self, path: &[Offset]) -> bool {
-        // A `Tainted` ancestor taints every descendant. A `Clean`
-        // ancestor cleanses every descendant. Both shortcut.
-        match &self.xtaint {
-            Xtaint::Tainted(_) => return true,
-            Xtaint::Clean => return false,
-            Xtaint::None => {}
+        if path.is_empty() {
+            return match &self.xtaint {
+                Xtaint::Tainted(_) => true,
+                Xtaint::Clean => false,
+                Xtaint::None => self.has_tainted_leaf(),
+            };
         }
-        let Some((head, rest)) = path.split_first() else {
-            // Empty path past the xtaint check → no taint on this
-            // cell directly, but a tainted descendant counts as
-            // "the whole value reaches a tainted leaf."
-            return self.has_tainted_leaf();
+        // Non-empty path: shape entries OVERRIDE root xtaint. This
+        // is the v0.2.13 change — pre-v0.2.13 we short-circuited on
+        // Tainted root before consulting the shape, which made
+        // carved-clean fields under a tainted root invisible.
+        if let Shape::Obj(map) = &self.shape
+            && let Some(sub) = map.get(&path[0])
+        {
+            return sub.tainted_at(&path[1..]);
+        }
+        // No shape entry for this path. Inherit from the root xtaint
+        // — Tainted root means unobserved fields are tainted by
+        // whole-value taint; None / Clean produce false.
+        matches!(&self.xtaint, Xtaint::Tainted(_))
+    }
+
+    /// Mark the access path `path` as `Clean` inside this Cell.
+    /// v0.2.13: the write-side counterpart to `tainted_at` — when
+    /// the visitor sees `Schema.parse(body.x)`, it calls
+    /// `body_cell.mark_clean_at(&[Field("x")])` so subsequent reads
+    /// of `body.x` report clean even though `body` as a whole stays
+    /// tainted. Materialises an `Obj` shape if one isn't already in
+    /// place; the root xtaint is preserved.
+    pub fn mark_clean_at(&mut self, path: &[Offset]) {
+        if path.is_empty() {
+            // Whole-cell sanitisation: per invariant 2, Clean cells
+            // have Bot shape (Clean shadows sub-structure).
+            self.xtaint = Xtaint::Clean;
+            self.shape = Shape::Bot;
+            return;
+        }
+        // Materialise (or replace) an Obj shape. Newly-created
+        // intermediate cells inherit the ancestor xtaint so sibling
+        // fields at every level continue to reflect "whole-value
+        // tainted, just this specific sub-path was carved clean"
+        // — the precision-preserving over-approximation. Existing
+        // entries (already-tracked shape under this cell) are
+        // preserved.
+        let inherited = self.xtaint.clone();
+        let mut map = match std::mem::replace(&mut self.shape, Shape::Bot) {
+            Shape::Obj(m) => m,
+            _ => std::collections::BTreeMap::new(),
         };
-        match &self.shape {
-            Shape::Obj(map) => {
-                if let Some(sub) = map.get(head) {
-                    return sub.tainted_at(rest);
-                }
-                // Unobserved field — conservatively inherit. Since
-                // we already shortcut on `Tainted`, `None+Bot`
-                // unobserved is clean; `None+Obj` with other taint
-                // elsewhere is still clean *for this specific path*.
-                false
-            }
-            // Bot / Arg — no sub-structure observed; conservatively
-            // clean for non-observed paths (we already shortcut on
-            // ancestor taint).
-            Shape::Bot | Shape::Arg(_) => false,
-        }
+        let entry = map.entry(path[0].clone()).or_insert_with(|| Cell {
+            xtaint: inherited,
+            shape: Shape::Bot,
+        });
+        entry.mark_clean_at(&path[1..]);
+        self.shape = Shape::Obj(map);
+        // Root xtaint preserved — the cell is still tainted as a
+        // whole; just the specific path is carved clean.
     }
 
     /// Top-level field/index offsets that are themselves tainted or
@@ -1493,6 +1520,61 @@ mod tests {
         assert!(nested.tainted_at(&[Offset::Field("a".into())]));
         assert!(!nested.tainted_at(&[Offset::Field("a".into()), Offset::Field("missing".into())]));
         assert!(!nested.tainted_at(&[Offset::Field("missing".into())]));
+    }
+
+    #[test]
+    fn mark_clean_at_carves_sub_field_under_tainted_root() {
+        // Whole-value tainted cell — the v0.2.12 starting state of
+        // every `body` binding.
+        let mut body = Cell::tainted(vec![TaintLabel::UserInput]);
+        // tainted_at on any projection is true at this point.
+        assert!(body.tainted_at(&[]));
+        assert!(body.tainted_at(&[Offset::Field("x".into())]));
+        assert!(body.tainted_at(&[Offset::Field("y".into())]));
+
+        // Sanitise `body.x` — mimics what the visitor does when it
+        // sees `Schema.parse(body.x)`.
+        body.mark_clean_at(&[Offset::Field("x".into())]);
+
+        // body.x is now clean per shape override.
+        assert!(!body.tainted_at(&[Offset::Field("x".into())]));
+        // body.y still tainted (inherits from root xtaint, no
+        // explicit shape entry).
+        assert!(body.tainted_at(&[Offset::Field("y".into())]));
+        // Root is still tainted (carved clean is per-path, not
+        // whole-value).
+        assert!(body.tainted_at(&[]));
+        // Deeper path under the carved-clean field is clean too.
+        assert!(!body.tainted_at(&[Offset::Field("x".into()), Offset::Field("deep".into()),]));
+    }
+
+    #[test]
+    fn mark_clean_at_empty_path_makes_whole_clean() {
+        let mut cell = Cell::tainted(vec![TaintLabel::UserInput]);
+        cell.mark_clean_at(&[]);
+        assert!(!cell.tainted_at(&[]));
+        assert!(!cell.tainted_at(&[Offset::Field("anything".into())]));
+        // Invariant 2: Clean cells have Bot shape.
+        assert_eq!(cell.shape, Shape::Bot);
+    }
+
+    #[test]
+    fn mark_clean_at_nested_path_creates_intermediate_objs() {
+        let mut cell = Cell::tainted(vec![TaintLabel::UserInput]);
+        cell.mark_clean_at(&[
+            Offset::Field("a".into()),
+            Offset::Field("b".into()),
+            Offset::Field("c".into()),
+        ]);
+        // The deep path is clean.
+        assert!(!cell.tainted_at(&[
+            Offset::Field("a".into()),
+            Offset::Field("b".into()),
+            Offset::Field("c".into()),
+        ]));
+        // Sibling at any level inherits from root xtaint = Tainted.
+        assert!(cell.tainted_at(&[Offset::Field("a".into()), Offset::Field("sibling".into())]));
+        assert!(cell.tainted_at(&[Offset::Field("other".into())]));
     }
 
     #[test]
