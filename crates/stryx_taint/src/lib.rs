@@ -378,6 +378,61 @@ impl Cell {
         self.count_tainted_leaves() > 0
     }
 
+    /// True iff the access path `path` resolves to a tainted leaf,
+    /// or to a sub-cell that itself reaches a tainted leaf. ADR 0012:
+    /// the entry point that lets the *live* visitor consult the
+    /// shape lattice when checking `body.x.y` instead of the flat
+    /// "is `body` in any scope" key-existence test.
+    ///
+    /// Semantics:
+    ///
+    /// - Empty `path` → "is the whole value tainted or does it reach
+    ///   a tainted leaf anywhere?". Equivalent to `has_tainted_leaf`.
+    /// - Each [`Offset`] in `path` narrows the lookup one level. A
+    ///   `Field("x")` step descends into `Shape::Obj`'s entry for
+    ///   `Field("x")`; if the entry is absent, we conservatively
+    ///   inherit the *current* cell's xtaint (a tainted parent makes
+    ///   every unfollowed field tainted too — the standard
+    ///   over-approximation for unobserved-but-reachable subtree).
+    /// - When the current cell is `Tainted` we short-circuit `true`
+    ///   without consuming the rest of the path — the whole value is
+    ///   tainted, so every projection of it is also tainted.
+    /// - When the current cell is `Clean`, the path is clean by
+    ///   invariant 2 (Clean shadows sub-structure).
+    /// - `Shape::Arg(_)` is opaque — return whatever the current
+    ///   xtaint says.
+    pub fn tainted_at(&self, path: &[Offset]) -> bool {
+        // A `Tainted` ancestor taints every descendant. A `Clean`
+        // ancestor cleanses every descendant. Both shortcut.
+        match &self.xtaint {
+            Xtaint::Tainted(_) => return true,
+            Xtaint::Clean => return false,
+            Xtaint::None => {}
+        }
+        let Some((head, rest)) = path.split_first() else {
+            // Empty path past the xtaint check → no taint on this
+            // cell directly, but a tainted descendant counts as
+            // "the whole value reaches a tainted leaf."
+            return self.has_tainted_leaf();
+        };
+        match &self.shape {
+            Shape::Obj(map) => {
+                if let Some(sub) = map.get(head) {
+                    return sub.tainted_at(rest);
+                }
+                // Unobserved field — conservatively inherit. Since
+                // we already shortcut on `Tainted`, `None+Bot`
+                // unobserved is clean; `None+Obj` with other taint
+                // elsewhere is still clean *for this specific path*.
+                false
+            }
+            // Bot / Arg — no sub-structure observed; conservatively
+            // clean for non-observed paths (we already shortcut on
+            // ancestor taint).
+            Shape::Bot | Shape::Arg(_) => false,
+        }
+    }
+
     /// Top-level field/index offsets that are themselves tainted or
     /// have a Tainted descendant. Returns the same set Phase 1's
     /// `top_offsets_seen` recorded directly: when the visitor saw
@@ -1387,6 +1442,58 @@ mod tests {
     }
 
     // ── derivation methods (slice 2.5 of ADR 0006) ──────────────────────
+
+    #[test]
+    fn tainted_at_handles_root_and_field_paths() {
+        // Whole-value Tainted: every projection is tainted, regardless
+        // of depth.
+        let whole = Cell::tainted(vec![TaintLabel::UserInput]);
+        assert!(whole.tainted_at(&[]));
+        assert!(whole.tainted_at(&[Offset::Field("anything".into())]));
+        assert!(whole.tainted_at(&[
+            Offset::Field("a".into()),
+            Offset::Field("b".into()),
+            Offset::Field("c".into()),
+        ]));
+
+        // Clean cell: every projection is clean.
+        let clean = Cell::clean();
+        assert!(!clean.tainted_at(&[]));
+        assert!(!clean.tainted_at(&[Offset::Field("anything".into())]));
+
+        // Object with a tainted field and a clean field: paths
+        // diverge.
+        let mixed = obj(vec![
+            (
+                Offset::Field("dirty".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            ),
+            (Offset::Field("clean".into()), Cell::clean()),
+        ]);
+        // Root projection: cell reaches a tainted leaf via `.dirty`,
+        // so the whole-value query is true.
+        assert!(mixed.tainted_at(&[]));
+        // Specific field projections.
+        assert!(mixed.tainted_at(&[Offset::Field("dirty".into())]));
+        assert!(!mixed.tainted_at(&[Offset::Field("clean".into())]));
+        // Unobserved field on a non-Tainted parent: conservatively
+        // clean (the parent's xtaint is None, so we don't blanket-
+        // taint missing keys).
+        assert!(!mixed.tainted_at(&[Offset::Field("missing".into())]));
+
+        // Deeper path: tainted descendant under a field.
+        let nested = obj(vec![(
+            Offset::Field("a".into()),
+            obj(vec![(
+                Offset::Field("b".into()),
+                Cell::tainted(vec![TaintLabel::UserInput]),
+            )]),
+        )]);
+        assert!(nested.tainted_at(&[Offset::Field("a".into()), Offset::Field("b".into())]));
+        assert!(nested.tainted_at(&[Offset::Field("a".into())]));
+        assert!(!nested.tainted_at(&[Offset::Field("a".into()), Offset::Field("missing".into())]));
+        assert!(!nested.tainted_at(&[Offset::Field("missing".into())]));
+    }
 
     #[test]
     fn has_tainted_leaf_matches_count_predicate() {

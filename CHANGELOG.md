@@ -18,6 +18,61 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.12] — 2026-05-15
+
+Patch release. **Infrastructure slice — closes the audit's #3
+gap.** The shape lattice (`Cell` / `Shape` / `Xtaint`) is now
+load-bearing in the live visitor.
+
+This is deliberately a behaviour-unchanged slice: findings on every
+existing fixture are byte-identical to v0.2.11. The user-visible
+win lands in v0.2.13, when per-field sanitisation starts writing
+`Clean` cells into specific offsets — at that point the precision
+improvements compound on the foundation laid here.
+
+See [ADR 0012](docs/decisions/0012-live-shape-lattice.md) for the
+full design rationale + slicing plan.
+
+### Added
+
+- `Cell::tainted_at(path: &[Offset]) -> bool` in `stryx_taint`:
+  walk a `Cell`'s shape along a field-access path and return
+  whether the resolved leaf (or any descendant) is tainted.
+  Whole-value `Tainted` short-circuits to `true`; whole-value
+  `Clean` short-circuits to `false`; `None+Bot` per-path is
+  conservatively `false`.
+- `FlowVisitor::is_tainted_at(name, path)` in
+  `flow/unvalidated-body-to-db`: consult the per-binding `Cell`
+  via `Cell::tainted_at`. The existing `is_tainted(name)` remains
+  as the whole-value entry point for sites without an access
+  path (cross-file param flow, sink-arg whole-value checks).
+- `static_member_root_and_path` free helper: decompose
+  `body.x.y` into `("body", [Field("x"), Field("y")])`. Returns
+  `None` for non-pure chains (e.g. `(x = body).y`) so the
+  existing recursive `expr_taint` path observes any side
+  effects.
+
+### Changed
+
+- `expr_taint`'s `StaticMemberExpression` arm now uses
+  `is_tainted_at` when the access chain reduces to an identifier
+  root. Behaviour-equivalent in v0.2.12 (every stored `Cell` is
+  still `Cell::tainted` whole-value), but the API is now wired
+  for v0.2.13's per-field sanitisation.
+
+### Known gaps (still planned for v0.2.13+)
+
+- **Per-field sanitisation write-through.** When `parse(body.x)`
+  sanitises just one field, the visitor should mark
+  `body`'s `Cell` Clean at `Offset::Field("x")` instead of
+  leaving the whole binding tainted. Targeted for v0.2.13.
+- **Destructuring field projection.** `const { a, b } = body`
+  currently taints `a` and `b` whole-value; should project at
+  `body`'s offsets. Targeted for v0.2.14.
+- **Assignment handling in non-flagship rules**. The 10
+  non-flagship rules don't track reassignment. Targeted for
+  v0.2.15.
+
 ## [0.2.11] — 2026-05-15
 
 Patch release. **Real soundness fix — closes the audit's #2 gap.**

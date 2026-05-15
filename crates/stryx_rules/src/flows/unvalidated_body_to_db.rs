@@ -333,6 +333,30 @@ impl<'idx> FlowVisitor<'idx> {
             .any(|scope| scope.contains_key(name))
     }
 
+    /// Field-level taint check — consult the stored `Cell`'s shape
+    /// lattice at the given access path. ADR 0012: the live visitor
+    /// promotion from flat key-existence to per-offset lookup.
+    ///
+    /// An empty `path` is semantically equivalent to `is_tainted(name)`
+    /// for whole-value-tainted bindings — both report `true`. For
+    /// bindings that carry a non-trivial `Cell` shape, `path = &[]`
+    /// returns "does this binding reach a tainted leaf anywhere?",
+    /// which is what every existing call site implicitly wanted.
+    ///
+    /// For v0.2.12 the visitor still writes whole-value `Cell::tainted`
+    /// into every binding it taints, so this function returns the same
+    /// answer as `is_tainted` on shipping fixtures. The shape lookup
+    /// becomes load-bearing once per-field sanitisation lands in
+    /// v0.2.13+.
+    fn is_tainted_at(&self, name: &str, path: &[Offset]) -> bool {
+        for scope in self.scopes.iter().rev() {
+            if let Some(cell) = scope.get(name) {
+                return cell.tainted_at(path);
+            }
+        }
+        false
+    }
+
     /// Look up the tracked shape of a tainted local. Returns `None` if
     /// the name isn't tainted in any active scope. Slice 2.5+ ground
     /// truth: callers that need to consume the local's shape (e.g.
@@ -1034,6 +1058,19 @@ impl<'idx> FlowVisitor<'idx> {
                 let registry_source = self.registry_as_source(expr);
                 if registry_source.is_some() {
                     return true;
+                }
+                // ADR 0012: when the access chain reduces to an
+                // identifier root (`body.x.y` and friends), consult
+                // the shape lattice at the resolved access path.
+                // Falls back to the recursive read for non-pure
+                // chains (e.g. `(x = body).y` where the receiver
+                // has side effects we still want `expr_taint` to
+                // observe). For v0.2.12 the lattice answer equals
+                // the flat lookup — the precision win lands in
+                // v0.2.13 when per-field sanitisation writes
+                // Clean cells into specific offsets.
+                if let Some((root, path)) = static_member_root_and_path(expr) {
+                    return self.is_tainted_at(root, &path);
                 }
                 self.expr_taint(&m.object)
             }
@@ -2384,6 +2421,30 @@ fn collect_binding_names(pat: &BindingPattern<'_>) -> Vec<String> {
     let mut out = Vec::new();
     walk_binding_pattern(pat, &mut out);
     out
+}
+
+/// Decompose `body.x.y.z` into `("body", [Field("x"), Field("y"),
+/// Field("z")])` — the root identifier plus the field-access path
+/// from root to leaf. Returns `None` if the chain contains anything
+/// other than `StaticMemberExpression` on an `Identifier` root (so
+/// `body.x[idx]` or `(x = body).y` fall through to the recursive
+/// taint walk, which observes their side effects). ADR 0012.
+fn static_member_root_and_path<'a>(expr: &'a Expression<'_>) -> Option<(&'a str, Vec<Offset>)> {
+    let mut path: Vec<Offset> = Vec::new();
+    let mut cursor = expr;
+    loop {
+        match cursor {
+            Expression::StaticMemberExpression(m) => {
+                path.push(Offset::Field(m.property.name.to_string()));
+                cursor = &m.object;
+            }
+            Expression::Identifier(id) => {
+                path.reverse();
+                return Some((id.name.as_str(), path));
+            }
+            _ => return None,
+        }
+    }
 }
 
 /// Collect every named binding from the FIRST parameter of a
