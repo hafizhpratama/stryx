@@ -4,7 +4,7 @@ This guide gets you from zero to your first scan in 5 minutes.
 
 ## Install
 
-At v0.2.8 there are two install paths that work today, and three
+At v0.2.9 there are two install paths that work today, and three
 distribution channels that follow as soon as the npm namespace and
 Homebrew tap repo are set up.
 
@@ -21,15 +21,15 @@ Needs the Rust toolchain (1.93+). The `stryx` binary lands in
 
 ### Pre-built binaries — works today
 
-The [v0.2.8 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.8)
+The [v0.2.9 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.9)
 ships archives across five targets (Linux x64/arm64, macOS x64/arm64,
 Windows x64):
 
 ```bash
 # Linux x86_64 example — substitute target for your platform.
-curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.8-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.9-x86_64-unknown-linux-gnu.tar.gz \
   | tar xz
-./stryx-0.2.8-x86_64-unknown-linux-gnu/stryx scan
+./stryx-0.2.9-x86_64-unknown-linux-gnu/stryx scan
 ```
 
 Targets available:
@@ -158,8 +158,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.8-x86_64-unknown-linux-gnu.tar.gz | tar xz
-          ./stryx-0.2.8-x86_64-unknown-linux-gnu/stryx scan --fail-on=high
+          curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.9-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./stryx-0.2.9-x86_64-unknown-linux-gnu/stryx scan --fail-on=high
 ```
 
 A dedicated `stryx/stryx-action@v1` with inline-annotation support
@@ -269,7 +269,7 @@ re-download a pre-built binary from the latest GitHub Release:
 cd stryx && git pull && cargo install --path crates/stryx_cli --force
 
 # From release artifact
-curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.8-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.9-x86_64-unknown-linux-gnu.tar.gz | tar xz
 ```
 
 `npm update -g stryx`, `brew upgrade stryx`, and `cargo install

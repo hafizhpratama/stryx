@@ -18,6 +18,55 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.9] — 2026-05-15
+
+Patch release. **First real user-facing feature improvement of the
+v0.2.x cycle** — suppression comments now actually work. Plus a CI
+correctness fix that landed earlier.
+
+A post-publish technical audit confirmed the substrate is sound but
+identified three larger soundness gaps (branch-merge,
+higher-order callbacks, shape-lattice wiring into the live visitor)
+that will be tackled in subsequent v0.2.x patches.
+
+### Added
+
+- **Suppression comments now work.** `// stryx-disable-next-line
+  <rule-id>` and `// stryx-disable <rule-id>` were documented in
+  four places (rule docs, FAQ, getting-started, npm README) but
+  unimplemented in any source file — a docs-vs-code lying gap. New
+  centralised post-rule filter (`crates/stryx_cli/src/suppress.rs`)
+  recognises `//`, `/* … */`, and JSX `{/* … */}` comment shapes;
+  supports line-level and file-level suppression; accepts multiple
+  rule IDs per marker; ignores trailing `-- <reason>` prose. Only
+  fully-qualified IDs (`flow/sql-injection`) are accepted — short
+  names like `sql-injection` are rejected so the common typo
+  doesn't silently fail to suppress.
+
+### Fixed
+
+- `ci.yml`: swap `dtolnay/rust-toolchain@master` →
+  `actions-rust-lang/setup-rust-toolchain@v1` to fix the
+  `cargo test` → `rustup-init` PATH bug on macos-15 runners
+  (same fix release.yml got earlier in the v0.2.x cycle). CI
+  badge on the npm package page now shows green on every push.
+
+### Known gaps (from the audit, planned for v0.2.10+)
+
+- **Branch-merge unsoundness**: `let x = body; if (cond) { x =
+  "safe"; }; db.create({ data: x });` produces a false negative
+  because the visitor walks `if`/`else` sequentially with no
+  scope save+union at the join point. Single highest-leverage
+  soundness fix; targeted for v0.2.10.
+- **Higher-order callbacks**: `<tainted>.then(fn)`,
+  `<tainted>.map(fn)`, `Promise.all([<tainted>...])` don't pre-taint
+  the callback's parameter. Targeted for v0.2.11.
+- **Shape lattice not load-bearing**: `Cell`/`Shape` substrate is
+  in `stryx_taint` and used for summary export, but the visitor's
+  live `is_tainted()` is still flat `HashMap::contains_key` — no
+  per-field offset consultation. Field-level precision lands in
+  v0.2.12.
+
 ## [0.2.8] — 2026-05-15
 
 Patch release. The v0.2.7 main npm package shipped without a
