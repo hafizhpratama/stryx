@@ -4,7 +4,7 @@ This guide gets you from zero to your first scan in 5 minutes.
 
 ## Install
 
-At v0.2.5 there are two install paths that work today, and three
+At v0.2.6 there are two install paths that work today, and three
 distribution channels that follow as soon as the npm namespace and
 Homebrew tap repo are set up.
 
@@ -21,15 +21,15 @@ Needs the Rust toolchain (1.93+). The `stryx` binary lands in
 
 ### Pre-built binaries — works today
 
-The [v0.2.5 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.5)
+The [v0.2.6 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.6)
 ships archives across five targets (Linux x64/arm64, macOS x64/arm64,
 Windows x64):
 
 ```bash
 # Linux x86_64 example — substitute target for your platform.
-curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.5-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.6-x86_64-unknown-linux-gnu.tar.gz \
   | tar xz
-./stryx-0.2.5-x86_64-unknown-linux-gnu/stryx scan
+./stryx-0.2.6-x86_64-unknown-linux-gnu/stryx scan
 ```
 
 Targets available:
@@ -39,11 +39,20 @@ Targets available:
 - `aarch64-apple-darwin`
 - `x86_64-pc-windows-msvc` (zip archive)
 
+### npm
+
+```bash
+npm install -g @hafizhpratama/stryx
+# or one-off
+npx @hafizhpratama/stryx scan
+```
+
+Lives under the scoped namespace `@hafizhpratama/` because npm's
+auto-similarity check rejects the bare name `stryx` as too close
+to an existing package. The scoped name is the canonical install.
+
 ### Coming soon
 
-- **npm** (`npm install -g stryx` / `npx stryx scan`) — once the
-  npm namespace is settled. Pre-built `.node` binaries already
-  ship with each GitHub Release.
 - **Homebrew** (`brew install stryx/tap/stryx`) — once the Homebrew
   tap repo is set up.
 - **Cargo** (`cargo install stryx-cli`) — once published to
@@ -149,8 +158,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: |
-          curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.5-x86_64-unknown-linux-gnu.tar.gz | tar xz
-          ./stryx-0.2.5-x86_64-unknown-linux-gnu/stryx scan --fail-on=high
+          curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.6-x86_64-unknown-linux-gnu.tar.gz | tar xz
+          ./stryx-0.2.6-x86_64-unknown-linux-gnu/stryx scan --fail-on=high
 ```
 
 A dedicated `stryx/stryx-action@v1` with inline-annotation support
@@ -260,7 +269,7 @@ re-download a pre-built binary from the latest GitHub Release:
 cd stryx && git pull && cargo install --path crates/stryx_cli --force
 
 # From release artifact
-curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.5-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.6-x86_64-unknown-linux-gnu.tar.gz | tar xz
 ```
 
 `npm update -g stryx`, `brew upgrade stryx`, and `cargo install

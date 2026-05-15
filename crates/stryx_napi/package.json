@@ -1,6 +1,6 @@
 {
-  "name": "stryx",
-  "version": "0.2.5",
+  "name": "@hafizhpratama/stryx",
+  "version": "0.2.6",
   "description": "Sees what your AI missed — across files. Static analyzer for AI-generated TypeScript.",
   "main": "index.js",
   "types": "index.d.ts",

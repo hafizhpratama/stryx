@@ -18,6 +18,36 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.6] — 2026-05-15
+
+Patch release. **Distribution change: npm package moves to scoped
+namespace `@hafizhpratama/stryx`.** No engine, rule, or public-API
+changes.
+
+### Changed
+
+- npm package name `stryx` → `@hafizhpratama/stryx`. New install:
+  `npm install @hafizhpratama/stryx` and `npx @hafizhpratama/stryx
+  scan`. Platform subpackages also become scoped
+  (`@hafizhpratama/stryx-darwin-arm64`, etc.).
+- The unscoped subpackages from the partial v0.2.5 publish
+  (`stryx-darwin-arm64@0.2.5`, `stryx-darwin-x64@0.2.5`,
+  `stryx-linux-arm64-gnu@0.2.5`, `stryx-linux-x64-gnu@0.2.5`)
+  remain on npm as orphans and should not be used. They predated
+  the namespace switch.
+
+### Why scoped
+
+The unscoped path hit two of npm's automated gates that we
+couldn't bypass without contacting npm support:
+- `stryx-win32-x64-msvc` was blocked with "Package name triggered
+  spam detection" (the `*-win32-*` suffix pattern is on npm's
+  spam-block list).
+- `stryx` itself was rejected as "too similar to existing package
+  `stres`" by npm's name-collision heuristic.
+Scoped packages bypass both checks because the scope is uniquely
+owned. Examples: `@anthropic-ai/sdk`, `@vercel/*`, `@napi-rs/*`.
+
 ## [0.2.5] — 2026-05-15
 
 Patch release. **CI fix only — no engine, rule, or public-API
