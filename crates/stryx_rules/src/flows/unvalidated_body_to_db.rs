@@ -275,6 +275,57 @@ impl<'idx> FlowVisitor<'idx> {
         self.restore_top_scope(merged);
     }
 
+    /// True iff the expression is tainted, treating receiver-taint-
+    /// preserving array/string methods as transparent. So
+    /// `<tainted>.filter(p)`, `<tainted>.map(f)`, `<tainted>.slice(0,
+    /// 5)` all evaluate as tainted. Closes CASE 4 of the v0.2.11
+    /// fixture — chained `.filter(...).forEach(...)` patterns.
+    /// Read-only: used inside higher-order-callback detection where
+    /// we don't want double-mutation of scope state.
+    fn receiver_taint_through_chain(&self, expr: &Expression<'_>) -> bool {
+        if let Expression::CallExpression(call) = expr
+            && let Some(MemberExpression::StaticMemberExpression(sm)) =
+                call.callee.as_member_expression()
+            && is_taint_preserving_array_method(sm.property.name.as_str())
+        {
+            return self.receiver_taint_through_chain(&sm.object);
+        }
+        self.expr_is_tainted_readonly(expr)
+    }
+
+    /// Walk a higher-order callback's body with its first parameter
+    /// pre-tainted. Audit fix #2 (v0.2.11): patterns like
+    /// `<tainted>.then(body => sink(body))`, `<tainted-array>.map(item
+    /// => sink(item))`, `forEach`, `filter`, `flatMap`, `find` were
+    /// previously silent FNs because the flagship's custom statement
+    /// walk never recursed into the callback body. Accepts both
+    /// arrow and function expressions; destructured params taint
+    /// every named binding.
+    fn walk_higher_order_callback(&mut self, callback: &Expression<'_>) {
+        let (params, body_stmts): (Vec<String>, &[Statement<'_>]) = match callback {
+            Expression::ArrowFunctionExpression(arrow) => {
+                let names = collect_first_param_binding_names(&arrow.params);
+                (names, &arrow.body.statements)
+            }
+            Expression::FunctionExpression(func) => {
+                let names = collect_first_param_binding_names(&func.params);
+                let body = func
+                    .body
+                    .as_ref()
+                    .map(|b| b.statements.as_slice())
+                    .unwrap_or(&[]);
+                (names, body)
+            }
+            _ => return,
+        };
+        self.enter_fn();
+        for name in params {
+            self.taint(name);
+        }
+        self.handle_function_body(body_stmts);
+        self.exit_fn();
+    }
+
     fn is_tainted(&self, name: &str) -> bool {
         self.scopes
             .iter()
@@ -933,6 +984,29 @@ impl<'idx> FlowVisitor<'idx> {
                 if self.registry_as_source(expr).is_some() {
                     return true;
                 }
+                // Higher-order callback pre-tainting (audit fix #2,
+                // v0.2.11). When the call is `<receiver>.method(cb)`
+                // and method is a higher-order iterator/promise
+                // method, and the receiver is tainted, walk the
+                // callback body with its first param pre-tainted.
+                // Catches patterns like:
+                //   req.json().then(body => sink(body))
+                //   tainted.map(item => sink(item))
+                //   tainted.forEach(item => sink(item))
+                // The receiver-taint check uses readonly-expr-taint
+                // to avoid double-mutating scope state during the
+                // detection phase. The standard arg-propagation
+                // loop below still runs so the call's return-taint
+                // is computed correctly.
+                if let Some(MemberExpression::StaticMemberExpression(sm)) =
+                    call.callee.as_member_expression()
+                    && is_higher_order_method(sm.property.name.as_str())
+                    && self.receiver_taint_through_chain(&sm.object)
+                    && let Some(cb) = call.arguments.first().and_then(argument_expr)
+                {
+                    self.walk_higher_order_callback(cb);
+                }
+
                 // For any other call, taint propagates if a tainted
                 // argument flows into a parameter the callee actually
                 // returns. When the callee has no known summary
@@ -2310,6 +2384,71 @@ fn collect_binding_names(pat: &BindingPattern<'_>) -> Vec<String> {
     let mut out = Vec::new();
     walk_binding_pattern(pat, &mut out);
     out
+}
+
+/// Collect every named binding from the FIRST parameter of a
+/// callable's formal-parameter list. Used by higher-order callback
+/// pre-tainting — when we walk `<tainted>.map(item => …)`, the
+/// callback's first param is the element and gets tainted; for
+/// destructured params (`({id, name}) => …`) every named binding
+/// becomes tainted. Returns empty for parameter-less callables.
+fn collect_first_param_binding_names(params: &stryx_ast::ast::FormalParameters<'_>) -> Vec<String> {
+    params
+        .items
+        .first()
+        .map(|p| collect_binding_names(&p.pattern))
+        .unwrap_or_default()
+}
+
+/// Array methods that produce a result whose taint equals the
+/// receiver's taint. So `tainted.filter(p).forEach(f)` should still
+/// see the forEach's receiver as tainted. The list is the
+/// non-mutating / shape-preserving Array prototype methods plus
+/// `map` (whose result is built from receiver elements; conservatively
+/// tainted from the receiver).
+fn is_taint_preserving_array_method(name: &str) -> bool {
+    matches!(
+        name,
+        "filter"
+            | "map"
+            | "slice"
+            | "concat"
+            | "flat"
+            | "flatMap"
+            | "sort"
+            | "reverse"
+            | "fill"
+            | "copyWithin"
+            | "with"
+            | "toSorted"
+            | "toReversed"
+            | "toSpliced"
+    )
+}
+
+/// Methods whose callback's first parameter inherits taint from the
+/// receiver. Covers the JavaScript prototype iterators (Array,
+/// Map, Set, Iterator) and Promise's `.then` / `.catch` / `.finally`.
+/// `reduce` / `reduceRight` are intentionally excluded — their first
+/// param is the accumulator, not the element, so naive pre-tainting
+/// would over-approximate; treat reduce as a future precision slice.
+fn is_higher_order_method(name: &str) -> bool {
+    matches!(
+        name,
+        "then"
+            | "catch"
+            | "finally"
+            | "map"
+            | "forEach"
+            | "filter"
+            | "flatMap"
+            | "find"
+            | "findIndex"
+            | "findLast"
+            | "findLastIndex"
+            | "some"
+            | "every"
+    )
 }
 
 // ── Slice 2: per-file summary extraction ────────────────────────────────

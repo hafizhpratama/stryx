@@ -1884,6 +1884,31 @@ fn xss_via_dangerously_set_inner_html_good_fixture_silent() {
 }
 
 #[test]
+fn unvalidated_body_to_db_higher_order_all_cases_fire() {
+    // Audit fix #2 (v0.2.11). Higher-order callback patterns —
+    // `.then(body => …)`, `.map(item => …)`, `.forEach(item => …)`,
+    // and chained `.filter(p).forEach(item => …)` — previously
+    // missed because the flagship's custom statement-walk never
+    // recursed into callback bodies and the callback param was
+    // never pre-tainted. All 4 should fire after v0.2.11.
+    let path = fixtures_root().join("flow-unvalidated-body-to-db/higher-order-bad.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert_eq!(
+        findings.len(),
+        4,
+        "expected all 4 higher-order cases to fire; got {}: {:?}",
+        findings.len(),
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn unvalidated_body_to_db_branch_merge_all_cases_fire() {
     // Audit fix #1 (v0.2.10): the visitor previously walked
     // if/else sequentially and missed cases where one branch left

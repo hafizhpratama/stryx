@@ -18,6 +18,59 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.11] — 2026-05-15
+
+Patch release. **Real soundness fix — closes the audit's #2 gap.**
+Higher-order callback patterns (`.then`, `.map`, `.forEach`,
+`.filter` and friends) now propagate taint into the callback's
+first parameter, so the body of the callback can see body-tainted
+flows that the previous visitor missed entirely.
+
+### Fixed
+
+- **`flow/unvalidated-body-to-db`: higher-order callback
+  pre-tainting.** Before v0.2.11, the flagship's custom statement
+  walk never recursed into callback bodies and the callback's
+  first parameter was a clean binding, so all of these silently
+  passed:
+
+  ```ts
+  req.json().then((body) => prisma.user.create({ data: body }));
+  (await req.json()).map((item) => prisma.user.create({ data: item }));
+  (await req.json()).forEach((item) => { prisma.user.create({ data: item }); });
+  (await req.json()).filter((r) => r.active).forEach((r) => prisma.user.create({ data: r }));
+  ```
+
+  New helpers on the `FlowVisitor`:
+  - `walk_higher_order_callback` — enters a callback's scope,
+    pre-taints its first parameter from the receiver's taint, then
+    walks the body via `handle_function_body`.
+  - `receiver_taint_through_chain` — recognises that
+    `<tainted>.filter(p)`, `.map(f)`, `.slice(...)`, etc. produce
+    a tainted result, so chained patterns
+    (`filter(...).forEach(...)`) work end-to-end.
+  - `is_higher_order_method` table covering `then` / `catch` /
+    `finally` for Promises and `map` / `forEach` / `filter` /
+    `flatMap` / `find` / `findIndex` / `findLast` / `findLastIndex` /
+    `some` / `every` for iterators.
+  - `is_taint_preserving_array_method` table covering
+    non-mutating / shape-preserving Array methods.
+
+  `reduce` and `reduceRight` are intentionally excluded — their
+  first parameter is the accumulator, not the element; naive
+  pre-tainting would over-approximate. Targeted as a future
+  precision slice.
+
+### Known gaps (still planned for v0.2.12+)
+
+- **Shape lattice not load-bearing in the live visitor.** Field-
+  level precision (`body.safeField` vs `body.unsafeField`) is
+  still flat. Targeted for v0.2.12.
+- **Assignment handling in non-flagship rules.** Only
+  `flow/unvalidated-body-to-db` propagates taint through bare
+  reassignments. The other 10 rules don't track reassignment
+  at all. Targeted for v0.2.13.
+
 ## [0.2.10] — 2026-05-15
 
 Patch release. **Real soundness fix — closes the audit's #1 gap.**
