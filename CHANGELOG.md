@@ -18,6 +18,53 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.10] — 2026-05-15
+
+Patch release. **Real soundness fix — closes the audit's #1 gap.**
+The single most common false-negative pattern in AI-generated code
+now fires correctly.
+
+### Fixed
+
+- **`flow/unvalidated-body-to-db`: branch-merge soundness.** The
+  visitor walked `if`/`else` sequentially with no scope save+union
+  at the join point, so this pattern (and the symmetric inverse)
+  silently passed:
+
+  ```ts
+  let payload = body;             // payload tainted
+  if (cond) { payload = clean; }  // consequent untaints
+  prisma.user.create({ data: payload });  // missed!
+  ```
+
+  Three flavours of the bug are exercised by the new
+  `tests/fixtures/flow-unvalidated-body-to-db/branch-merge-bad.ts`
+  fixture (CASE 1: consequent untaints, no else; CASE 2: alternate
+  taints; CASE 3: consequent taints, alternate untaints). All three
+  now fire — previously only CASE 2 fired through last-branch-wins
+  luck. New `snapshot_top_scope` / `restore_top_scope` /
+  `merge_branch_snapshots` helpers on the FlowVisitor save the
+  pre-branch state, walk each branch from the entry baseline, and
+  union the post-branch states at the join. Branches that
+  unconditionally return/throw are excluded from the join state
+  (their post-state is unreachable).
+
+### Known gaps (still planned for v0.2.11+)
+
+- **Higher-order callbacks** (`.then(fn)` / `.map(fn)` /
+  `Promise.all([<tainted>...])`): the callback's parameter is not
+  pre-tainted from the caller's tainted value. Targeted for
+  v0.2.11.
+- **Shape lattice not load-bearing in the live visitor**: field-
+  level precision (`body.safeField` vs `body.unsafeField`) is
+  still flat. Targeted for v0.2.12.
+- **Assignment handling in non-flagship rules**: only
+  `flow/unvalidated-body-to-db` propagates taint through bare
+  reassignments (`x = body.y`); the other 10 rules don't track
+  reassignment at all. This is a separate (pre-existing) gap
+  uncovered while building the v0.2.10 fixture. Targeted for
+  v0.2.13.
+
 ## [0.2.9] — 2026-05-15
 
 Patch release. **First real user-facing feature improvement of the

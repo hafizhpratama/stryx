@@ -244,6 +244,37 @@ impl<'idx> FlowVisitor<'idx> {
         self.scopes.last_mut()
     }
 
+    /// Clone the current top scope. Used by `handle_statement`'s
+    /// IfStatement arm to save the pre-branch state before walking
+    /// the consequent, so the alternate can be walked from a clean
+    /// baseline rather than inheriting the consequent's mutations.
+    fn snapshot_top_scope(&self) -> std::collections::HashMap<String, Cell> {
+        self.scopes.last().cloned().unwrap_or_default()
+    }
+
+    fn restore_top_scope(&mut self, snapshot: std::collections::HashMap<String, Cell>) {
+        if let Some(top) = self.scopes.last_mut() {
+            *top = snapshot;
+        }
+    }
+
+    /// Union two post-branch snapshots into a sound over-approximation
+    /// of the join state. A binding is tainted post-if iff it was
+    /// tainted in *either* branch (path-insensitive lattice). When
+    /// the same key appears in both, prefer the consequent's `Cell`
+    /// — both are sound; consistent ordering avoids non-determinism.
+    fn merge_branch_snapshots(
+        &mut self,
+        consequent: std::collections::HashMap<String, Cell>,
+        alternate: std::collections::HashMap<String, Cell>,
+    ) {
+        let mut merged = consequent;
+        for (k, v) in alternate {
+            merged.entry(k).or_insert(v);
+        }
+        self.restore_top_scope(merged);
+    }
+
     fn is_tainted(&self, name: &str) -> bool {
         self.scopes
             .iter()
@@ -564,11 +595,52 @@ impl<'idx> FlowVisitor<'idx> {
                 }
             }
             Statement::IfStatement(is) => {
+                // Walk the test first — assignments in the test
+                // expression (`if ((x = body.foo))`) should mutate
+                // state before either branch sees it.
                 let _ = self.expr_taint(&is.test);
+
+                // Audit fix #1 (v0.2.10): path-insensitive branch
+                // merge. Save scope on entry, walk consequent, save
+                // its post-state, restore entry, walk alternate, then
+                // union the two post-states at the join. Without
+                // this, `let x = body; if (cond) { x = "safe"; };
+                // sink(x);` falsely reported x as untainted because
+                // the consequent's untainting leaked past the if.
+                //
+                // When a branch unconditionally returns/throws, its
+                // post-state is unreachable at the join — only the
+                // other branch contributes. `branch_returns` already
+                // checks this for the existing allow-list narrowing
+                // below; we reuse it here.
+                let entry = self.snapshot_top_scope();
                 self.handle_statement(&is.consequent);
-                if let Some(alt) = &is.alternate {
+                let after_consequent = self.snapshot_top_scope();
+                let consequent_returns = branch_returns(&is.consequent);
+
+                self.restore_top_scope(entry);
+                let alternate_returns = if let Some(alt) = &is.alternate {
                     self.handle_statement(alt);
+                    branch_returns(alt)
+                } else {
+                    false
+                };
+                let after_alternate = self.snapshot_top_scope();
+
+                // Compute the join state.
+                match (consequent_returns, alternate_returns) {
+                    (true, false) => self.restore_top_scope(after_alternate),
+                    (false, true) => self.restore_top_scope(after_consequent),
+                    (false, false) => {
+                        self.merge_branch_snapshots(after_consequent, after_alternate);
+                    }
+                    (true, true) => {
+                        // Both branches return — post-if is
+                        // unreachable. Keep the (unused) entry state
+                        // as the conservative answer.
+                    }
                 }
+
                 // Allow-list narrowing: an early-return guard of the
                 // shape `if (...!ARR.includes(x)...) return ...` proves
                 // that `x` is one of ARR's elements past this point.

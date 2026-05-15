@@ -1884,6 +1884,31 @@ fn xss_via_dangerously_set_inner_html_good_fixture_silent() {
 }
 
 #[test]
+fn unvalidated_body_to_db_branch_merge_all_cases_fire() {
+    // Audit fix #1 (v0.2.10): the visitor previously walked
+    // if/else sequentially and missed cases where one branch left
+    // a binding tainted. All three cases below — taint preserved
+    // in the no-if path; taint reintroduced in the alternate;
+    // taint introduced in the consequent but cleared in the
+    // alternate — should now fire.
+    let path = fixtures_root().join("flow-unvalidated-body-to-db/branch-merge-bad.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert_eq!(
+        findings.len(),
+        3,
+        "expected all 3 branch-merge cases to fire; got {}: {:?}",
+        findings.len(),
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn suppress_inline_drops_matching_rule_only() {
     // inline.ts has two `exec(...)` calls that would normally fire
     // `flow/command-injection-via-exec`. Case 1 is preceded by a
