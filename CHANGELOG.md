@@ -18,6 +18,20 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.8] — 2026-05-15
+
+Patch release. The v0.2.7 main npm package shipped without a
+README, so the npm page complained "This package does not have a
+README." Adds an npm-audience README (`crates/stryx_napi/README.md`)
+and includes it in the published `files` array.
+
+### Added
+
+- `crates/stryx_napi/README.md` — npm-audience README covering
+  install, quick start, flags, rule highlights, suppression
+  syntax. Listed in `package.json` `files`. Becomes visible on
+  npmjs.com/@hafizhpratama/stryx and in `npm view`.
+
 ## [0.2.7] — 2026-05-15
 
 Patch release. **The v0.2.6 main npm package shipped broken
