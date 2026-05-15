@@ -18,6 +18,23 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.7] — 2026-05-15
+
+Patch release. **The v0.2.6 main npm package shipped broken
+(missing `index.js`/`index.d.ts` in the tarball, so
+`npx @hafizhpratama/stryx` crashed with `Cannot find module
+'../index.js'`).** Subpackages were fine. This release fixes the
+publish workflow and republishes a working main package. Use
+`@hafizhpratama/stryx@0.2.7` or later.
+
+### Fixed
+
+- `npm-publish.yml`: now downloads `index.js` and `index.d.ts`
+  from the GitHub Release in addition to the `.node` binaries.
+  Earlier the `gh release download --pattern 'stryx.*.node'` glob
+  missed the JS loader + TS declarations even though release.yml
+  uploaded them.
+
 ## [0.2.6] — 2026-05-15
 
 Patch release. **Distribution change: npm package moves to scoped

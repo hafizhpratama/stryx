@@ -65,12 +65,19 @@ jobs:
           gh release download "${{ inputs.tag }}" \
             --repo "${{ github.repository }}" \
             --pattern 'stryx.*.node' \
+            --pattern 'index.js' \
+            --pattern 'index.d.ts' \
             --dir .release-artifacts
           ls -la .release-artifacts/
-          # napi-rs prepublish looks for the .node files at the crate
-          # root, alongside index.js / index.d.ts.
+          # napi-rs prepublish looks for these files at the crate
+          # root. The `.node` files are platform-specific; index.js
+          # is the napi-generated loader that picks the right
+          # subpackage at runtime; index.d.ts is the TypeScript
+          # declarations. All three were uploaded by release.yml.
           cp .release-artifacts/stryx.*.node .
-          ls -la stryx.*.node
+          cp .release-artifacts/index.js .
+          cp .release-artifacts/index.d.ts .
+          ls -la stryx.*.node index.js index.d.ts
 
       # napi-rs CLI v3 split the v2 monolithic `prepublish` into
       # three smaller commands. We run them explicitly so the
