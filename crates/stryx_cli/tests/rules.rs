@@ -1870,6 +1870,30 @@ fn sql_injection_cross_file_good_silent() {
 }
 
 #[test]
+fn sql_injection_assignment_bad_fires() {
+    // v0.2.15 — bare reassignment propagation. `let q = "lit"; q = q +
+    // body.id; sink(q)` must mark `q` tainted at the reassignment so
+    // the downstream sink fires. Same for `q = template-with-body`
+    // followed by `let r = q; sink(r)`.
+    let path = fixtures_root().join("flow-sql-injection/assignment-bad.ts");
+    let findings: Vec<_> = scan_file(&path)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/sql-injection")
+        .collect();
+    assert_eq!(
+        findings.len(),
+        2,
+        "assignment-bad.ts has 2 reassignment cases; got {}: {:?}",
+        findings.len(),
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
+    );
+    for f in &findings {
+        assert_eq!(f.severity, Severity::Critical);
+        assert_eq!(f.span.file, path);
+    }
+}
+
+#[test]
 fn xss_via_dangerously_set_inner_html_good_fixture_silent() {
     let path = fixtures_root().join("flow-xss-via-dangerously-set-inner-html/good.tsx");
     let findings: Vec<_> = scan_file(&path)

@@ -18,6 +18,54 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.2.15] — 2026-05-15
+
+Patch release. **Assignment handling in non-flagship rules** —
+bare reassignments (`q = q + body.id`, `q = body.something`) now
+propagate taint in seven rules that previously only watched
+variable initialisers. Closes a class of silent false negatives
+where the route handler reassigns into a SQL/shell/path string
+mid-function.
+
+### Fixed
+
+- `flow/sql-injection`, `flow/path-traversal`,
+  `flow/command-injection-via-exec`, `flow/ssrf-via-fetch`,
+  `flow/redirect-open`, `flow/prompt-injection`,
+  `flow/xss-via-dangerously-set-inner-html`: added
+  `visit_assignment_expression` that mirrors the flagship rule's
+  behaviour. Tainted RHS taints the LHS binding; clean RHS clears
+  prior taint. Only handles bare identifier targets — member /
+  pattern targets fall through to the existing walk.
+- Same seven rules: `expr_taint` now recognises
+  `AssignmentExpression` as evaluating to its RHS. Covers
+  assignment-as-expression shapes — `foo(q = body)`,
+  `if (q = body) {...}`, `q = (r = body)` — that previously
+  returned `false` and missed downstream sinks.
+
+### Added
+
+- `tests/fixtures/flow-sql-injection/assignment-bad.ts` pins two
+  reassignment shapes (`let q = "lit"; q = q + body.id; sink(q)`
+  and `q = template; let r = q; sink(r)`) that were silent FNs
+  before this release.
+
+### Precision example
+
+```ts
+// CASE 1 — fires after v0.2.15 (was silent before)
+let q = "SELECT * FROM users WHERE id = '";
+q = q + body.id; // reassignment now taints q
+q = q + "'";
+return prisma.$queryRawUnsafe(q); // Critical finding ✓
+
+// CASE 2 — chained reassignment also fires
+let q;
+q = `SELECT * FROM users WHERE name = '${body.name}'`;
+let r = q; // r inherits q's taint
+return prisma.$queryRawUnsafe(r); // Critical finding ✓
+```
+
 ## [0.2.14] — 2026-05-15
 
 Patch release. **Destructuring projection** — `const { a, b } =

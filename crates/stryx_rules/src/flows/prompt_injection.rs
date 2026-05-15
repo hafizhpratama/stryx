@@ -27,9 +27,9 @@ use std::collections::HashMap;
 use stryx_ast::{
     Visit,
     ast::{
-        Argument, ArrowFunctionExpression, BindingPattern, CallExpression, ChainElement,
-        Expression, Function, ObjectExpression, ObjectPropertyKind, PropertyKey,
-        VariableDeclarator,
+        Argument, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
+        CallExpression, ChainElement, Expression, Function, ObjectExpression, ObjectPropertyKind,
+        PropertyKey, VariableDeclarator,
     },
     to_span,
 };
@@ -192,6 +192,7 @@ impl PromptInjectionVisitor {
                 ChainElement::PrivateFieldExpression(m) => self.expr_taint(&m.object),
                 ChainElement::TSNonNullExpression(t) => self.expr_taint(&t.expression),
             },
+            Expression::AssignmentExpression(a) => self.expr_taint(&a.right),
             _ => false,
         }
     }
@@ -342,6 +343,18 @@ impl<'a> Visit<'a> for PromptInjectionVisitor {
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         self.check_llm_sink(call);
         stryx_ast::walk::walk_call_expression(self, call);
+    }
+
+    fn visit_assignment_expression(&mut self, a: &AssignmentExpression<'a>) {
+        let rhs_tainted = self.expr_taint(&a.right);
+        if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+            if rhs_tainted {
+                self.taint(id.name.to_string());
+            } else if let Some(scope) = self.scopes.last_mut() {
+                scope.remove(id.name.as_str());
+            }
+        }
+        self.visit_expression(&a.right);
     }
 }
 

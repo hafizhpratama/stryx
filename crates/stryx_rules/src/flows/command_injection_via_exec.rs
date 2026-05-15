@@ -27,9 +27,10 @@ use std::path::{Path, PathBuf};
 use stryx_ast::{
     Visit,
     ast::{
-        Argument, ArrowFunctionExpression, BindingPattern, CallExpression, ChainElement,
-        Declaration, ExportDefaultDeclarationKind, Expression, Function, FunctionBody,
-        ObjectPropertyKind, Program, PropertyKey, Statement, VariableDeclarator,
+        Argument, ArrowFunctionExpression, AssignmentExpression, AssignmentTarget, BindingPattern,
+        CallExpression, ChainElement, Declaration, ExportDefaultDeclarationKind, Expression,
+        Function, FunctionBody, ObjectPropertyKind, Program, PropertyKey, Statement,
+        VariableDeclarator,
     },
     to_span,
 };
@@ -220,6 +221,7 @@ impl<'idx> CommandInjectionVisitor<'idx> {
                 ChainElement::PrivateFieldExpression(m) => self.expr_taint(&m.object),
                 ChainElement::TSNonNullExpression(t) => self.expr_taint(&t.expression),
             },
+            Expression::AssignmentExpression(a) => self.expr_taint(&a.right),
             _ => false,
         }
     }
@@ -359,6 +361,18 @@ impl<'a, 'idx> Visit<'a> for CommandInjectionVisitor<'idx> {
             self.check_cross_file_call(call);
         }
         stryx_ast::walk::walk_call_expression(self, call);
+    }
+
+    fn visit_assignment_expression(&mut self, a: &AssignmentExpression<'a>) {
+        let rhs_tainted = self.expr_taint(&a.right);
+        if let AssignmentTarget::AssignmentTargetIdentifier(id) = &a.left {
+            if rhs_tainted {
+                self.taint(id.name.to_string());
+            } else if let Some(scope) = self.scopes.last_mut() {
+                scope.remove(id.name.as_str());
+            }
+        }
+        self.visit_expression(&a.right);
     }
 }
 
