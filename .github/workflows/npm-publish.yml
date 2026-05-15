@@ -100,9 +100,29 @@ jobs:
         working-directory: crates/stryx_napi
         run: npx napi pre-publish -t npm --skip-optional-publish
 
-      # Publish each platform subpackage first, then the main
-      # package. Order matters: optionalDependencies must already
-      # exist on the registry when the main package's tarball lands.
+      # TEMPORARY for v0.2.5: npm's spam filter blocks the
+      # `stryx-win32-x64-msvc` package name. Drop the Windows
+      # subpackage entry from optionalDependencies + delete the
+      # npm/win32-x64-msvc/ dir so the publish loop skips it.
+      # Tracking issue: rename Windows subpackage in v0.2.6.
+      - name: Strip blocked Windows subpackage
+        working-directory: crates/stryx_napi
+        run: |
+          set -euo pipefail
+          node -e "
+            const fs = require('fs');
+            const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+            if (pkg.optionalDependencies) {
+              delete pkg.optionalDependencies['stryx-win32-x64-msvc'];
+            }
+            fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2) + '\n');
+          "
+          rm -rf npm/win32-x64-msvc
+          echo "remaining optional deps:"
+          node -p "Object.keys(require('./package.json').optionalDependencies || {})"
+          echo "remaining npm/ subdirs:"
+          ls npm/
+
       - name: Publish platform subpackages
         if: ${{ !inputs.dry_run }}
         working-directory: crates/stryx_napi/npm
@@ -110,9 +130,6 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
           set -uo pipefail
-          # Don't `set -e` — we want to continue past
-          # already-published subpackages (a normal state after a
-          # partial publish) and surface only real errors at the end.
           failed=()
           for d in */; do
             name=$(node -p "require('./$d/package.json').name")
