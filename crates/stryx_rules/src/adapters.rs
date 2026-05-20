@@ -399,7 +399,7 @@ impl AdapterRegistry {
     /// - Runtime: `node`, `bun`
     /// - Framework: `express`, `hono`, `nestjs`, `next-backend`
     /// - Data layer: `prisma`, `drizzle`, `pg`
-    /// - Validation: `zod`, `class-validator`
+    /// - Validation: `zod`, `valibot`, `joi`, `yup`, `class-validator`
     /// - Auth: `better-auth`
     /// - LLM SDK: `openai`
     pub fn builtin() -> Self {
@@ -418,6 +418,10 @@ impl AdapterRegistry {
             crate::adapters_drizzle::DrizzleAdapter;
         static PG: crate::adapters_pg::PgAdapter = crate::adapters_pg::PgAdapter;
         static ZOD: crate::adapters_zod::ZodAdapter = crate::adapters_zod::ZodAdapter;
+        static VALIBOT: crate::adapters_valibot::ValibotAdapter =
+            crate::adapters_valibot::ValibotAdapter;
+        static JOI: crate::adapters_joi::JoiAdapter = crate::adapters_joi::JoiAdapter;
+        static YUP: crate::adapters_yup::YupAdapter = crate::adapters_yup::YupAdapter;
         static CLASS_VALIDATOR: crate::adapters_class_validator::ClassValidatorAdapter =
             crate::adapters_class_validator::ClassValidatorAdapter;
         static BETTER_AUTH: crate::adapters_better_auth::BetterAuthAdapter =
@@ -436,6 +440,9 @@ impl AdapterRegistry {
                 &DRIZZLE,
                 &PG,
                 &ZOD,
+                &VALIBOT,
+                &JOI,
+                &YUP,
                 &CLASS_VALIDATOR,
                 &BETTER_AUTH,
                 &OPENAI,
@@ -686,12 +693,12 @@ mod tests {
     use std::path::PathBuf;
     use stryx_index::profile::{Detected, Evidence, EvidenceKind, FrameworkHint, ProjectProfile};
 
-    /// `builtin()` currently registers 13 adapters across six
+    /// `builtin()` currently registers 16 adapters across six
     /// dimensions. This pin updates as new built-in adapters land.
     #[test]
     fn builtin_registry_contains_expected_adapters() {
         let reg = AdapterRegistry::builtin();
-        assert_eq!(reg.all().len(), 13);
+        assert_eq!(reg.all().len(), 16);
         let ids: Vec<&str> = reg.all().iter().map(|a| a.id().0).collect();
         assert!(ids.contains(&"runtime/node"));
         assert!(ids.contains(&"runtime/bun"));
@@ -703,6 +710,9 @@ mod tests {
         assert!(ids.contains(&"data/drizzle"));
         assert!(ids.contains(&"data/pg"));
         assert!(ids.contains(&"validation/zod"));
+        assert!(ids.contains(&"validation/valibot"));
+        assert!(ids.contains(&"validation/joi"));
+        assert!(ids.contains(&"validation/yup"));
         assert!(ids.contains(&"validation/class-validator"));
         assert!(ids.contains(&"auth/better-auth"));
         assert!(ids.contains(&"llm/openai"));
