@@ -48,6 +48,11 @@ pub struct ReportSummary {
     pub medium: usize,
     pub low: usize,
     pub info: usize,
+    /// 0–100 health score. 100 means no findings. Per-severity deductions
+    /// are then bounded by a per-severity cap so a single Critical can
+    /// never look "mostly healthy". Field is additive — placed after the
+    /// existing counts so positional JSON readers see counts first.
+    pub score: u32,
 }
 
 impl ReportSummary {
@@ -59,6 +64,7 @@ impl ReportSummary {
             medium: 0,
             low: 0,
             info: 0,
+            score: 100,
         };
         for f in findings {
             match f.severity {
@@ -69,8 +75,34 @@ impl ReportSummary {
                 Severity::Info => s.info += 1,
             }
         }
+        s.score = compute_score(s.critical, s.high, s.medium, s.low);
         s
     }
+}
+
+/// Compute the 0–100 health score from severity counts.
+///
+/// Deductions apply at the highest-severity tier present (Critical -10,
+/// High -5, Medium -2, Low -1, Info 0), clamp at 0, then take the MIN
+/// with the lowest applicable severity cap. Cap selection picks the
+/// LOWEST applicable cap: one Critical + ten High caps at 49 (Critical),
+/// not 74 (High) — so the deduction count for the High findings does
+/// not override the stricter Critical ceiling.
+fn compute_score(critical: usize, high: usize, medium: usize, low: usize) -> u32 {
+    let (per_finding, cap, count): (usize, usize, usize) = if critical > 0 {
+        (10, 49, critical)
+    } else if high > 0 {
+        (5, 74, high)
+    } else if medium > 0 {
+        (2, 89, medium)
+    } else if low > 0 {
+        (1, 99, low)
+    } else {
+        return 100;
+    };
+    let deduction = per_finding.saturating_mul(count);
+    let deducted = 100usize.saturating_sub(deduction);
+    deducted.min(cap) as u32
 }
 
 /// Controls beyond format selection — verbosity, scan metadata used in
@@ -160,8 +192,14 @@ fn write_human<W: Write>(
     let summary = ReportSummary::from_findings(findings);
     writeln!(
         out,
-        "\n{} finding(s): {} critical, {} high, {} medium, {} low, {} info",
-        summary.total, summary.critical, summary.high, summary.medium, summary.low, summary.info,
+        "\n{} finding(s): {} critical, {} high, {} medium, {} low, {} info (score: {}/100)",
+        summary.total,
+        summary.critical,
+        summary.high,
+        summary.medium,
+        summary.low,
+        summary.info,
+        summary.score,
     )?;
     write_footer(out, options)?;
     Ok(())
@@ -329,5 +367,80 @@ fn deployment_label(d: DeploymentHint) -> &'static str {
         DeploymentHint::Netlify => "netlify",
         DeploymentHint::FlyIo => "fly.io",
         DeploymentHint::Docker => "docker",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use stryx_core::Span;
+
+    fn mk(severity: Severity) -> Finding {
+        Finding {
+            rule_id: "test/rule".to_string(),
+            severity,
+            message: "test".to_string(),
+            span: Span::new(std::path::PathBuf::from("t.ts"), 0, 1),
+            source: stryx_core::FindingSource::Ast,
+            confidence: stryx_core::Confidence::CERTAIN,
+            help: None,
+        }
+    }
+
+    fn repeat(severity: Severity, n: usize) -> Vec<Finding> {
+        (0..n).map(|_| mk(severity)).collect()
+    }
+
+    #[test]
+    fn score_is_100_when_no_findings() {
+        let s = ReportSummary::from_findings(&[]);
+        assert_eq!(s.score, 100);
+    }
+
+    #[test]
+    fn score_one_low_is_99() {
+        let s = ReportSummary::from_findings(&repeat(Severity::Low, 1));
+        assert_eq!(s.score, 99);
+    }
+
+    #[test]
+    fn score_one_medium_is_89_cap() {
+        // Deduct -2 ⇒ 98, but Medium cap ⇒ min(98, 89) = 89.
+        let s = ReportSummary::from_findings(&repeat(Severity::Medium, 1));
+        assert_eq!(s.score, 89);
+    }
+
+    #[test]
+    fn score_one_high_is_74_cap() {
+        // Deduct -5 ⇒ 95, but High cap ⇒ min(95, 74) = 74.
+        let s = ReportSummary::from_findings(&repeat(Severity::High, 1));
+        assert_eq!(s.score, 74);
+    }
+
+    #[test]
+    fn score_one_critical_is_49_cap() {
+        // Deduct -10 ⇒ 90, but Critical cap ⇒ min(90, 49) = 49.
+        let s = ReportSummary::from_findings(&repeat(Severity::Critical, 1));
+        assert_eq!(s.score, 49);
+    }
+
+    #[test]
+    fn score_critical_cap_wins_over_high_cap() {
+        // Cap-selection picks the LOWEST applicable cap: Critical (49),
+        // not High (74). Deductions tier on the highest severity, so
+        // only the 1 Critical's -10 counts ⇒ 90, then min(90, 49) = 49.
+        // The presence of the 10 High findings does not relax the cap.
+        let mut findings = repeat(Severity::Critical, 1);
+        findings.extend(repeat(Severity::High, 10));
+        let s = ReportSummary::from_findings(&findings);
+        assert_eq!(s.score, 49);
+    }
+
+    #[test]
+    fn score_clamps_at_zero_for_many_lows() {
+        // 200 Low ⇒ -200 ⇒ saturate at 0, then Low cap is 99 so
+        // min(0, 99) = 0. Must not underflow.
+        let s = ReportSummary::from_findings(&repeat(Severity::Low, 200));
+        assert_eq!(s.score, 0);
     }
 }

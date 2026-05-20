@@ -2,8 +2,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use stryx_cli::{ScanOptions, scan_with_options};
+use stryx_cli::{ScanOptions, ScanResult, scan_with_options};
+
 use stryx_core::Severity;
 use stryx_reporter::{ReportFormat, ReportOptions, write_report};
 use stryx_rules::builtin_rules;
@@ -151,6 +153,10 @@ fn cmd_scan(
     };
     let result = scan_with_options(path, &options)?;
 
+    if std::env::var("STRYX_DEBUG_DUMP").as_deref() == Ok("1") {
+        maybe_write_debug_dump(&result);
+    }
+
     if result.findings.is_empty() && result.sources.is_empty() {
         eprintln!(
             "stryx: no TypeScript/JavaScript files found at {}",
@@ -181,6 +187,46 @@ fn cmd_scan(
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Side-effect-only diagnostic dump triggered by `STRYX_DEBUG_DUMP=1`.
+///
+/// Serializes the same JSON the reporter would emit for `--format=json`
+/// into `/tmp/stryx-report-<unix-ts>.json`. We deliberately reuse the
+/// reporter's JSON writer so the dump tracks the public schema exactly —
+/// no second source of truth. Failures (disk full, /tmp not writable on
+/// odd platforms) degrade to a `tracing::warn!` so a misconfigured /tmp
+/// can never break a scan.
+fn maybe_write_debug_dump(result: &ScanResult) {
+    let ts = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let path = format!("/tmp/stryx-report-{ts}.json");
+
+    let mut buf = std::io::Cursor::new(Vec::<u8>::new());
+    if let Err(err) = write_report(
+        &mut buf,
+        &result.findings,
+        |p| result.sources.get(p).cloned(),
+        Some(&result.profile),
+        ReportFormat::Json,
+        ReportOptions {
+            verbose: true,
+            file_count: result.file_count,
+            elapsed_ms: result.elapsed_ms,
+        },
+    ) {
+        tracing::warn!(error = %err, "stryx: failed to serialize debug dump");
+        return;
+    }
+
+    if let Err(err) = std::fs::write(&path, buf.into_inner()) {
+        tracing::warn!(error = %err, path = %path, "stryx: failed to write debug dump");
+        return;
+    }
+
+    eprintln!("stryx: wrote diagnostics to {path}");
 }
 
 fn parse_severity(s: &str) -> Option<Severity> {
