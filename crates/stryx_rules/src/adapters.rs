@@ -397,16 +397,18 @@ impl AdapterRegistry {
     /// as they ship. Currently:
     ///
     /// - Runtime: `node`, `bun`
-    /// - Framework: `express`, `hono`, `nestjs`, `next-backend`
+    /// - Framework: `express`, `fastify`, `hono`, `nestjs`, `next-backend`
     /// - Data layer: `prisma`, `drizzle`, `pg`
     /// - Validation: `zod`, `valibot`, `joi`, `yup`, `class-validator`
-    /// - Auth: `better-auth`
-    /// - LLM SDK: `openai`
+    /// - Auth: `better-auth`, `auth-js`
+    /// - LLM SDK: `openai`, `anthropic`
     pub fn builtin() -> Self {
         static NODE: crate::adapters_node::NodeAdapter = crate::adapters_node::NodeAdapter;
         static BUN: crate::adapters_bun::BunAdapter = crate::adapters_bun::BunAdapter;
         static EXPRESS: crate::adapters_express::ExpressAdapter =
             crate::adapters_express::ExpressAdapter;
+        static FASTIFY: crate::adapters_fastify::FastifyAdapter =
+            crate::adapters_fastify::FastifyAdapter;
         static HONO: crate::adapters_hono::HonoAdapter = crate::adapters_hono::HonoAdapter;
         static NESTJS: crate::adapters_nestjs::NestJsAdapter =
             crate::adapters_nestjs::NestJsAdapter;
@@ -426,13 +428,18 @@ impl AdapterRegistry {
             crate::adapters_class_validator::ClassValidatorAdapter;
         static BETTER_AUTH: crate::adapters_better_auth::BetterAuthAdapter =
             crate::adapters_better_auth::BetterAuthAdapter;
+        static AUTH_JS: crate::adapters_auth_js::AuthJsAdapter =
+            crate::adapters_auth_js::AuthJsAdapter;
         static OPENAI: crate::adapters_openai::OpenAiAdapter =
             crate::adapters_openai::OpenAiAdapter;
+        static ANTHROPIC: crate::adapters_anthropic::AnthropicAdapter =
+            crate::adapters_anthropic::AnthropicAdapter;
         Self {
             adapters: vec![
                 &NODE,
                 &BUN,
                 &EXPRESS,
+                &FASTIFY,
                 &HONO,
                 &NESTJS,
                 &NEXT_BACKEND,
@@ -445,7 +452,9 @@ impl AdapterRegistry {
                 &YUP,
                 &CLASS_VALIDATOR,
                 &BETTER_AUTH,
+                &AUTH_JS,
                 &OPENAI,
+                &ANTHROPIC,
             ],
         }
     }
@@ -693,16 +702,17 @@ mod tests {
     use std::path::PathBuf;
     use stryx_index::profile::{Detected, Evidence, EvidenceKind, FrameworkHint, ProjectProfile};
 
-    /// `builtin()` currently registers 16 adapters across six
+    /// `builtin()` currently registers 19 adapters across six
     /// dimensions. This pin updates as new built-in adapters land.
     #[test]
     fn builtin_registry_contains_expected_adapters() {
         let reg = AdapterRegistry::builtin();
-        assert_eq!(reg.all().len(), 16);
+        assert_eq!(reg.all().len(), 19);
         let ids: Vec<&str> = reg.all().iter().map(|a| a.id().0).collect();
         assert!(ids.contains(&"runtime/node"));
         assert!(ids.contains(&"runtime/bun"));
         assert!(ids.contains(&"framework/express"));
+        assert!(ids.contains(&"framework/fastify"));
         assert!(ids.contains(&"framework/hono"));
         assert!(ids.contains(&"framework/nestjs"));
         assert!(ids.contains(&"framework/next-backend"));
@@ -715,7 +725,9 @@ mod tests {
         assert!(ids.contains(&"validation/yup"));
         assert!(ids.contains(&"validation/class-validator"));
         assert!(ids.contains(&"auth/better-auth"));
+        assert!(ids.contains(&"auth/auth-js"));
         assert!(ids.contains(&"llm/openai"));
+        assert!(ids.contains(&"llm/anthropic"));
     }
 
     #[test]
