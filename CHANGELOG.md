@@ -18,6 +18,88 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-05-20
+
+**Stack-aware scanning, Phase 1.** First minor bump of the v0.3.x
+cycle ships the `ProjectProfile` skeleton: Stryx now detects the
+TypeScript backend stack from `package.json`, lockfiles, and a small
+set of config files (`bunfig.toml`, `wrangler.toml`, `vercel.json`,
+`tsconfig.json`, etc.) before running rules. Detection is included in
+both the human and JSON output. **Zero changes to rule behaviour** —
+no existing finding count moves on any current fixture. Adapter
+consumption of the profile lands in v0.4.0, vertical-slice
+stack-specific recognition in v0.5.0.
+
+### Added
+
+- `stryx_index::profile` module — `ProjectProfile`, `Detected<T>`,
+  `Evidence`, `EvidenceKind`, plus hint enums for language, runtime,
+  framework, data layer, validator, auth, LLM SDK, and deployment per
+  ADR 0013 and `docs/architecture/project-profile.md`.
+- `stryx_index::profile::detect(path)` cheap-pass entry point.
+  Reads at most ~10 files (package.json, lockfiles, configs); never
+  parses source, never makes network calls, never installs anything.
+  Errors are logged at `warn` and never propagated — a malformed
+  workspace yields an empty profile, not a failed scan.
+- Initial detector coverage:
+  - `runtime/{node,bun,deno,cloudflare-workers}`
+  - `framework/{next-backend,hono,express,fastify,nestjs,elysia,oak}`
+  - `data/{prisma,drizzle,kysely,knex,pg,mysql2,mongoose}`
+  - `validation/{zod,valibot,yup,joi,ajv,arktype,typebox}`
+  - `auth/{better-auth,auth-js,clerk,supabase-auth,lucia}`
+  - `llm/{openai,anthropic,vercel-ai-sdk,langchain}`
+  - `deploy/{vercel,cloudflare,aws-lambda,netlify,fly-io,docker}`
+- `ScanResult.profile: ProjectProfile` field. Additive — existing
+  callers of `stryx_cli::scan` keep working.
+- `JsonReport.profile: Option<&ProjectProfile>` field with
+  `#[serde(skip_serializing_if = "Option::is_none")]`. JSON envelope
+  schema string stays `stryx.findings/v1` because the addition is
+  byte-identical when no stack evidence is present.
+- Compact human profile block at the top of `stryx scan` output, e.g.
+  `stack: language: typescript • runtime: bun • framework: hono • ...`.
+  Only the top-confidence hint per family is shown; full evidence is
+  in JSON.
+- `stryx_index::jsonc` — extracted `strip_jsonc` from `stryx_cli` so
+  the new profile detector and the existing tsconfig path-alias
+  reader share a single JSON-with-comments stripper.
+- `tests/fixtures/project-profile/{bun-hono-drizzle-zod,
+  next-prisma-zod, express-pg-joi, empty}/` — four synthetic mini
+  projects exercising the detector across stacks plus the empty
+  workspace baseline.
+- `crates/stryx_cli/tests/profile.rs` — integration tests asserting
+  the expected hints and confidence floors for each fixture.
+
+### Changed
+
+- `stryx_reporter::write_report` signature gained a
+  `profile: Option<&ProjectProfile>` parameter. Internal CLI
+  consumers (`cmd_scan`) updated; downstream callers using the
+  reporter directly need to pass `None` to opt out.
+- `stryx_cli` deletes its local `strip_jsonc` and imports from
+  `stryx_index::jsonc::strip_jsonc`. Single source of truth.
+
+### Added (carried forward from pre-0.3.0 Unreleased)
+
+- Documented the stack-aware scanning direction: project profiles,
+  stack adapters, stack catalog, target CLI output, and ADR 0013.
+- Added `AGENTS.md` as the single source of truth for AI-agent context,
+  with `CLAUDE.md` reduced to a compatibility redirect.
+- Added a dedicated `generic/hardcoded-secret` rule doc.
+- Rule docs now act as fix guides. Every shipped rule documents
+  `How to fix` and `What Stryx recognizes` so CLI `Read more` links
+  can point to concrete remediation guidance instead of vague best
+  practices.
+- Contributor, PR, and issue templates updated to require remediation
+  guidance for new rules.
+
+### Out of scope for this release (planned for v0.4.0+)
+
+- Source-evidence pass (imports, globals, call expressions).
+- `WorkspaceProfile` for monorepos.
+- `--profile` flag (print profile + exit).
+- `[profile]` section in `stryx.toml` for overrides.
+- Adapter consumption of the profile.
+
 ## [0.2.15] — 2026-05-15
 
 Patch release. **Assignment handling in non-flagship rules** —
@@ -293,7 +375,7 @@ flows that the previous visitor missed entirely.
 ## [0.2.10] — 2026-05-15
 
 Patch release. **Real soundness fix — closes the audit's #1 gap.**
-The single most common false-negative pattern in AI-generated code
+The single most common false-negative pattern in backend handler code
 now fires correctly.
 
 ### Fixed
@@ -544,12 +626,10 @@ publish path.
 
 ### Changed
 
-- Docs reorganisation: `CLAUDE.md` is now the single source of
-  truth for AI-agent context. `AGENTS.md` removed (was a 33-line
-  pointer to `CLAUDE.md`); `.github/copilot-instructions.md`
-  trimmed to a thin pointer to `CLAUDE.md` instead of duplicating
-  its content. `README.md` adds an explicit pointer for AI agents
-  (Claude Code, Cursor, Copilot, Codex, …).
+- Docs reorganisation for that release: `CLAUDE.md` was made the
+  AI-agent context file and the earlier `AGENTS.md` pointer was
+  removed. This historical layout is superseded in `[Unreleased]`,
+  where `AGENTS.md` becomes the canonical agent context.
 - Rule-doc consistency pass: all 10 rule docs in `docs/rules/`
   now share the same 14-section template shape (the four newer
   rule docs gained `Configuration` + `Suppressing this rule`
@@ -749,7 +829,8 @@ false positives. Zero-finding repos (formbricks, inbox-zero,
 typebot, midday, lobe-chat, payload) confirm zod / TRPC / strong
 framework validation is recognised correctly. TP-heavy repos
 (papermark with 70 findings, dub with 6) catch the TS-cast-on-body
-and template-literal-host-injection patterns AI tools produce.
+and template-literal-host-injection patterns common in production
+handlers.
 
 **Performance** — 8,513 TS files scanned in 2.16s on lobe-chat
 (~3,900 files/sec), well under the `≤ 30s / 10k files` budget

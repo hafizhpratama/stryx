@@ -1,4 +1,4 @@
-// Real AI-generated pattern: extract a primary-key value from the
+// Real backend pattern: extract a primary-key value from the
 // untrusted body via a helper, then use it as a Prisma where-clause.
 // Slice 3.5 stores `id`'s shape as `Obj{id: Tainted+Bot}`. The
 // local-shape-at-sink consumer reads that shape when `id` is the

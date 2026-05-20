@@ -1,6 +1,6 @@
 //! Bench for `flow/sql-injection`.
 //!
-//! Per CLAUDE.md hard rule #7 the per-rule per-file p99 budget is ≤ 1ms.
+//! Per AGENTS.md the per-rule per-file p99 budget is ≤ 1ms.
 //! Slice 1 is single-file; the hot path is the call-expression walk
 //! checking each call's `.property` name against the small set of
 //! recognised raw-SQL sink shapes.

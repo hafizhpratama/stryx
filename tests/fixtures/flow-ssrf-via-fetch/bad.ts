@@ -5,7 +5,7 @@ import type { NextRequest } from "next/server";
 import axios from "axios";
 import got from "got";
 
-// CASE 1: classic body→fetch — the canonical AI-generated pattern.
+// CASE 1: classic body→fetch proxy pattern.
 export async function POST(req: NextRequest) {
   const { url } = await req.json();
   const response = await fetch(url);

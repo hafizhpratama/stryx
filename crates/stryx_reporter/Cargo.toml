@@ -9,6 +9,7 @@ authors      = { workspace = true }
 description  = "Output formatters for the Stryx static analyzer. Human-readable and JSON finder reports; SARIF and GitHub annotations planned."
 
 [dependencies]
-stryx_core = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
+stryx_core  = { workspace = true }
+stryx_index = { workspace = true }
+serde       = { workspace = true }
+serde_json  = { workspace = true }

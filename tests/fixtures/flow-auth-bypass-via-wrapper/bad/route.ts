@@ -1,4 +1,4 @@
-// AI-generated admin route. The handler is wrapped in `withAuth`, but
+// Admin route. The handler is wrapped in `withAuth`, but
 // the wrapper itself is a no-op (see ./lib.ts). Stryx should follow
 // the import and flag the export.
 

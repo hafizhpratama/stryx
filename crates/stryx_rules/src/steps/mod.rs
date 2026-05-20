@@ -85,7 +85,7 @@ pub struct PropSpec {
 ///
 /// The trait is dispatched via [`StepKind`]'s closed-enum match —
 /// no `Box<dyn TaintStep>` in the hot path
-/// ([CLAUDE.md](../../../../CLAUDE.md) hard rule #3). Authoring a
+/// ([AGENTS.md](../../../../AGENTS.md)). Authoring a
 /// new step means: write a struct, `impl TaintStep` for it, add a
 /// variant to `StepKind`.
 pub trait TaintStep {
@@ -140,9 +140,9 @@ pub trait TaintStep {
 /// Subsequent slices add sinks (8.4), sanitisers (8.3), and
 /// propagators (8.5). The closed-enum shape keeps dispatch on the
 /// hot path as a jump table — no `Box<dyn TaintStep>`
-/// ([CLAUDE.md] hard rule #3).
+/// ([AGENTS.md]).
 ///
-/// [CLAUDE.md]: ../../../../CLAUDE.md
+/// [AGENTS.md]: ../../../../AGENTS.md
 pub enum StepKind {
     BodySource(sources::BodySource),
     ParserSanitizer(sanitizers::ParserSanitizer),

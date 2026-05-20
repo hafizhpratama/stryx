@@ -1,6 +1,6 @@
 // The wrapper signature looks like real auth scaffolding, but the
-// body is a no-op. AI-generated wrappers commonly leave a TODO here
-// and ship to production unprotected.
+// body is a no-op. Placeholder wrappers commonly leave a TODO here
+// and ship unprotected.
 
 type Handler = (req: Request) => Promise<Response>;
 

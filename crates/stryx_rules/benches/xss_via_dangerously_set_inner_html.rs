@@ -1,6 +1,6 @@
 //! Bench for `flow/xss-via-dangerously-set-inner-html`.
 //!
-//! Per CLAUDE.md hard rule #7 the per-rule per-file p99 budget is ≤ 1ms.
+//! Per AGENTS.md the per-rule per-file p99 budget is ≤ 1ms.
 //! The hot path here is the JSX-attribute walk inside React component
 //! returns — slice 1 only fires when a `dangerouslySetInnerHTML` attr
 //! is present, so most files cost only the per-attribute name check.

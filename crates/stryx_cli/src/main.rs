@@ -12,7 +12,7 @@ use stryx_rules::builtin_rules;
 #[command(
     name = "stryx",
     version,
-    about = "Sees what your AI missed — across files.",
+    about = "Stack-aware security for JavaScript and TypeScript backends.",
     long_about = None,
 )]
 struct Cli {
@@ -22,7 +22,7 @@ struct Cli {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Scan a directory or file for AI failure patterns.
+    /// Scan a directory or file for backend security flows.
     Scan {
         /// Path to scan. Defaults to the current directory.
         #[arg(default_value = ".")]
@@ -120,6 +120,7 @@ fn cmd_scan(path: &Path, format_str: &str, fail_on: &str) -> Result<ExitCode> {
         &mut handle,
         &result.findings,
         |p| result.sources.get(p).cloned(),
+        Some(&result.profile),
         format,
     )?;
 

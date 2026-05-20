@@ -34,15 +34,16 @@ Closes #
 
 ### If adding a new rule
 
-- [ ] Real-world bad fixture with attribution comment (AI tool, model,
-      date, prompt). Single file for single-file rules; a `bad/`
+- [ ] Bad fixture with a comment explaining the source → sink shape and
+      stack surface. Single file for single-file rules; a `bad/`
       directory for cross-file flow rules.
-- [ ] Bad fixture is your own AI-generated output or permissively-
+- [ ] Bad fixture is your own minimal reproduction or permissively-
       licensed code you can attribute (no closed-source pulls, no GPL).
 - [ ] Good fixture (file or `good/` directory) showing the safe version.
 - [ ] Rule documentation in `docs/rules/<category>-<rule-id>.md`
       (e.g. `flow-unvalidated-body-to-db.md`) following the template,
-      including the **Taint signature** section.
+      including the **How to fix**, **What Stryx recognizes**, and
+      **Taint signature** sections.
 - [ ] `taint_signature()` and `scope()` declared on the `Rule` impl
       per [ADR 0003](../docs/decisions/0003-cross-file-and-taint-as-core.md).
 - [ ] Integration test in `tests/rules.rs`
@@ -52,6 +53,8 @@ Closes #
 - [ ] If LLM escalation: prompt template in
       `crates/stryx_llm/prompts/<category>/<rule-id>.txt`
 - [ ] Updated `docs/rules/README.md` index
+- [ ] CLI message/fix hint points to the same remediation described in
+      the rule doc
 
 ### If modifying engine / pipeline
 

@@ -1,7 +1,7 @@
 //! Microbench for `generic/hardcoded-secret`.
 //!
 //! Establishes the perf baseline so regressions show up immediately. Per
-//! CLAUDE.md hard rule #7 the per-rule per-file budget is ≤ 1ms p99.
+//! AGENTS.md keeps the per-rule per-file budget at ≤ 1ms p99.
 
 use std::hint::black_box;
 use std::path::PathBuf;

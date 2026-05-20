@@ -27,8 +27,8 @@ point in the scope, `field` is treated as untainted.
 
 This is real progress over no narrowing at all — it eliminates a
 genuine FP class on Prisma `where: { [allowedKey]: ... }` patterns.
-But four guard shapes that AI-generated code routinely produces are
-still invisible to the engine:
+But four guard shapes that backend code routinely uses are still
+invisible to the engine:
 
 ### Problem 1: positive branch-scoped narrowing
 
@@ -247,7 +247,7 @@ generalisation; everything is early-return.
 
 - Doesn't solve Problem 1 (positive branch-scoped narrowing) at
   all. The pattern stays invisible to the engine. Per the
-  competitive review this is the *most common* shape AI tools emit.
+  competitive review this is the most common shape in real handlers.
 - Each new shape duplicates the per-rule predicate problem ADR 0008
   is fixing.
 - The hand-rolled recognisers (`collect_includes_narrowed`,
@@ -412,7 +412,7 @@ scoped narrowing):**
   loop semantics.
 - **`switch` guards.** Each case-body gets its scope, but no
   fall-through analysis (a case without `break` is the same as
-  a sequential block today). Acceptable; AI-generated switches
+  a sequential block today). Acceptable; backend switches
   rarely use fall-through deliberately.
 - **Custom validator inference (without LLM).** Recognising that
   `function isValidId(x): x is string { ... }` is a TS user-

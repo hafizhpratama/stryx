@@ -1,0 +1,19 @@
+{
+  "name": "express-pg-joi-fixture",
+  "version": "0.0.0",
+  "private": true,
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.0",
+    "pg": "^8.13.0",
+    "joi": "^17.13.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0"
+  }
+}

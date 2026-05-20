@@ -1,4 +1,4 @@
-// AI-generated debug / health / config endpoints. Each one ships at
+// Debug / health / config endpoints. Each one ships at
 // least one secret straight out to a public HTTP response. Stryx
 // should flag every Response.json / res.json / c.json / new Response
 // call where a secret-shaped value reaches the body.

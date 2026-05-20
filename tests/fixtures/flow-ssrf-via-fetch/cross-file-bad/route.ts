@@ -1,4 +1,4 @@
-// AI-generated Next.js route handler. The outbound fetch happens
+// Next.js route handler. The outbound fetch happens
 // inside `forwardProxy` from `./lib`. Slice 1 cannot see this;
 // slice 2 must.
 

@@ -1,6 +1,6 @@
 //! Bench for `flow/prompt-injection`.
 //!
-//! Per CLAUDE.md hard rule #7 the per-rule per-file p99 budget is ≤ 1ms.
+//! Per AGENTS.md the per-rule per-file p99 budget is ≤ 1ms.
 //! Slice 1 is single-file; the visitor's hot path is the object-literal
 //! walk inside the sink-call's first argument, which only fires when a
 //! recognised LLM SDK chain is present.

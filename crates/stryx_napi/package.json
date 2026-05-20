@@ -1,7 +1,7 @@
 {
   "name": "@hafizhpratama/stryx",
-  "version": "0.2.15",
-  "description": "Sees what your AI missed — across files. Static analyzer for AI-generated TypeScript.",
+  "version": "0.3.0",
+  "description": "Stack-aware security scanner for JavaScript and TypeScript backends.",
   "main": "index.js",
   "types": "index.d.ts",
   "license": "Apache-2.0",
@@ -14,9 +14,11 @@
   "keywords": [
     "static-analysis",
     "linter",
+    "javascript",
     "typescript",
     "security",
-    "ai",
+    "backend",
+    "sast",
     "taint-analysis"
   ],
   "bin": {

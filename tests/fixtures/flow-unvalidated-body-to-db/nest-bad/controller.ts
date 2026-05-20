@@ -1,4 +1,4 @@
-// AI-generated NestJS controller. The body is injected via @Body() and
+// NestJS controller. The body is injected via @Body() and
 // passed to an injected service whose `create` method writes it straight
 // to Prisma without validation. Stryx should follow the cross-class flow
 // (controller → service → DB) and flag the call site here.

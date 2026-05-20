@@ -1,6 +1,6 @@
 //! Bench for `flow/unvalidated-body-to-db`.
 //!
-//! Per CLAUDE.md hard rule #7 the per-rule per-file p99 budget is ≤ 1ms.
+//! Per AGENTS.md the per-rule per-file p99 budget is ≤ 1ms.
 //! Flow rules walk function bodies more aggressively than the secret rule;
 //! this bench locks in the slice 1 baseline.
 

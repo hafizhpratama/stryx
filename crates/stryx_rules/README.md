@@ -3,11 +3,11 @@
 The rule catalogue and the [ADR 0008](../../docs/decisions/0008-taint-step-trait-substrate.md)
 step substrate. Every detection lives here.
 
-## Rule catalogue (v0.1.0)
+## Rule catalogue (v0.2.15)
 
 | Rule ID | Scope | Severity | Doc |
 |---|---|---|---|
-| `generic/hardcoded-secret` | Single-file | Critical | (built-in) |
+| `generic/hardcoded-secret` | Single-file | Critical | [`docs/rules/generic-hardcoded-secret.md`](../../docs/rules/generic-hardcoded-secret.md) |
 | `flow/unvalidated-body-to-db` | Cross-file | High | [`docs/rules/flow-unvalidated-body-to-db.md`](../../docs/rules/flow-unvalidated-body-to-db.md) |
 | `flow/auth-bypass-via-wrapper` | Cross-file | Critical | [`docs/rules/flow-auth-bypass-via-wrapper.md`](../../docs/rules/flow-auth-bypass-via-wrapper.md) |
 | `flow/secret-to-response` | Single-file | Critical | [`docs/rules/flow-secret-to-response.md`](../../docs/rules/flow-secret-to-response.md) |
@@ -37,8 +37,12 @@ Module layout:
 
 ## Adding a new rule
 
-Follow the doc-first flow in [CLAUDE.md](../../CLAUDE.md#adding-a-new-rule):
+Follow the doc-first flow in [AGENTS.md](../../AGENTS.md#adding-or-changing-rules):
 doc → fixtures → implementation → tests → registry → CHANGELOG.
+
+Rule docs are remediation contracts. Each rule page must include
+`How to fix` and `What Stryx recognizes` so CLI `Read more` links lead
+to a concrete safe pattern, not vague best-practice advice.
 
 ## Stability
 

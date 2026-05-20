@@ -1,6 +1,6 @@
 //! Bench for `flow/ssrf-via-fetch`.
 //!
-//! Per CLAUDE.md hard rule #7 the per-rule per-file p99 budget is ≤ 1ms.
+//! Per AGENTS.md the per-rule per-file p99 budget is ≤ 1ms.
 //! Slice 1 is single-file with no call-summary lookups, so this rule
 //! sits well within the per-rule budget.
 

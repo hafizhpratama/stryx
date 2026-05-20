@@ -118,9 +118,10 @@ Concretely:
   noisy security tool gets muted; a precise security tool that
   occasionally misses real issues remains useful as one defense among
   several. Documented in `docs/architecture/taint-engine.md`.
-- TypeScript-only through the foreseeable roadmap. Depth (more
-  frameworks, more source/sink coverage, type-aware analysis) beats
-  breadth (additional languages).
+- v0.1 was TypeScript-first. Later releases added JavaScript file
+  collection while keeping the same JS/TS AST and taint substrate.
+  [ADR 0013](0013-stack-aware-project-profiles.md) refines the roadmap
+  toward stack-aware JavaScript/TypeScript backend/platform scanning.
 
 ## Consequences
 

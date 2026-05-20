@@ -1,4 +1,4 @@
-// AI-generated Next.js route handler. The child_process call
+// Next.js route handler. The child_process call
 // happens inside `convertVideo` from `./lib`. Slice 1 cannot see
 // this; slice 2 must.
 

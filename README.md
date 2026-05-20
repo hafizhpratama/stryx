@@ -1,12 +1,13 @@
 # Stryx
 
-> Sees what your AI missed — across files.
+> Stack-aware security for JavaScript and TypeScript backends.
 
-A Rust static analyzer for AI-generated TypeScript. Stryx catches the
-specific failure patterns AI coding tools commonly produce — missing
-input validation, leaked secrets, weak auth, missing rate limits —
-using cross-file taint analysis with optional LLM-confirmed intent on
-genuinely ambiguous flows.
+Stryx is a stack-aware security scanner for JavaScript and TypeScript
+backends. It detects your runtime, framework, database, validation, auth,
+and LLM SDK surface, then follows cross-file data flow to catch missing
+input validation, leaked secrets, weak auth, unsafe redirects, SSRF, SQL
+injection, command injection, path traversal, and unsafe LLM prompt
+handling.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/github/v/release/hafizhpratama/stryx?label=release)](https://github.com/hafizhpratama/stryx/releases/latest)
@@ -14,11 +15,13 @@ genuinely ambiguous flows.
 
 ## Why
 
-In 2026, ~41% of code is AI-generated and ~45% of it ships with
-vulnerabilities.[^stats] AI coding tools (Cursor, Claude Code, GitHub
-Copilot, v0, Lovable, and others) frequently scaffold code that
-handles untrusted input, secrets, or auth in ways that look plausible
-but skip the runtime safety checks production needs.
+Modern JavaScript and TypeScript backends are assembled from many moving
+parts: runtimes, routers, ORMs, validators, auth libraries, deployment
+targets, and LLM SDKs. The risky part is rarely one line in isolation.
+It is usually a flow across files: request data enters at a route,
+passes through a helper, and reaches a database, shell, filesystem,
+redirect, outbound fetch, response body, or LLM call without the right
+safety boundary.
 
 The hardest patterns to catch are flows that span multiple files — a
 route handler in `app/api/.../route.ts` that passes `req.json()`
@@ -26,10 +29,10 @@ directly into a helper module's database write, with no validator
 anywhere along the path. Single-file linters can't see the disconnect.
 Reviewers may miss it. Tests rarely cover the malicious-payload case.
 
-Stryx is built specifically for these cross-file flows in TypeScript.
-The engine runs in milliseconds (Rust + oxc), produces deterministic
-findings on the AST and project-index pass, and escalates only the
-small subset of genuinely ambiguous zones to a cached LLM check.
+Stryx is built specifically for these cross-file backend flows. The
+engine runs in milliseconds (Rust + oxc), produces deterministic findings
+on the AST and project-index pass, and escalates only the small subset of
+genuinely ambiguous zones to a cached LLM check.
 
 ## Install
 
@@ -70,12 +73,14 @@ You'll get findings like:
 The CLI exits non-zero when findings at or above the configured
 severity threshold are emitted, so it works as a CI gate.
 
+Rule pages are fix guides, not vague best-practice pages. Each rule doc
+states what to change and what Stryx recognizes as fixed.
+
 ## What Stryx catches
 
-Eleven rules in the registry today — three stable cross-file
-flows, four cross-file flows for the AI-coding-tool audience
-(including both Critical-severity injection classes), three
-experimental single-file flows, and one single-file generic.
+Eleven rules in the registry today — three stable cross-file flows, four
+additional cross-file security flows, three experimental single-file
+flows, and one single-file generic.
 See [`docs/rules/`](docs/rules/) for the full contracts.
 
 **Stable (v0.1):**
@@ -121,11 +126,13 @@ See [`docs/rules/`](docs/rules/) for the full contracts.
 ## How Stryx works
 
 ```
-TypeScript source
+JavaScript / TypeScript source
+    ↓
+Project profile (planned): runtime/framework/data/auth/LLM evidence
     ↓
 Layer 1: oxc parser → arena AST (per file, parallel)
     ↓
-Layer 2: project semantic index + AST rules + taint engine
+Layer 2: project semantic index + stack adapters + AST rules + taint engine
     ↓
 Layer 3 (optional): LLM escalation on flagged uncertain zones, cached
     ↓
@@ -142,6 +149,12 @@ Layer 3 is opt-in: bring your own LLM API key to enable it, or run
 with `--no-llm` for fully local deterministic scans (the default).
 
 [Architecture deep-dive →](ARCHITECTURE.md)
+
+The next product direction is stack-aware scanning: Stryx detects the
+TypeScript backend/platform stack (for example Bun + Hono + Drizzle +
+Zod + Better Auth), enables the matching adapters, and keeps the rules
+generic. See [ADR 0013](docs/decisions/0013-stack-aware-project-profiles.md)
+and the [stack-aware roadmap](docs/roadmap/stack-aware-scanning.md).
 
 ## Status
 
@@ -194,23 +207,29 @@ the Phase 2 plan and the v0.1 retrospective.
 
 - [Getting Started](docs/getting-started.md)
 - [Architecture](ARCHITECTURE.md)
+- [Stack-aware CLI target](docs/product/stack-aware-cli.md)
+- [Project profile architecture](docs/architecture/project-profile.md)
+- [Stack adapter architecture](docs/architecture/stack-adapters.md)
+- [Stack catalog](docs/stacks/)
+- [Stack-aware roadmap](docs/roadmap/stack-aware-scanning.md)
 - [Rule library](docs/rules/)
 - [FAQ](docs/faq.md)
 - [Glossary](docs/glossary.md)
 - [Contributing](CONTRIBUTING.md)
 - [Security policy](SECURITY.md)
+- [Agent guide](AGENTS.md)
 
 > **AI agents working in this repo** — Claude Code, Cursor, Copilot,
-> Codex, and others — read [`CLAUDE.md`](CLAUDE.md). It's the single
-> source of truth for project conventions, anti-patterns, and the
-> rule-authoring workflow.
+> Codex, and others — read [`AGENTS.md`](AGENTS.md). It is the single
+> source of truth for agent context; [`CLAUDE.md`](CLAUDE.md) is only a
+> compatibility redirect.
 
 ## Contributing
 
-Stryx grows by community-contributed AI failure patterns. If you've
-seen an AI tool generate code that should have been flagged but
-wasn't, [open a rule request](.github/ISSUE_TEMPLATE/new-rule-request.md)
-with the real output. That's how the rule library compounds.
+Stryx grows by community-contributed backend security patterns. If
+you've seen a JavaScript or TypeScript backend flow that should have
+been flagged but wasn't, [open a rule request](.github/ISSUE_TEMPLATE/new-rule-request.md)
+with a minimal reproduction. That's how the rule library compounds.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev setup and the
 rule-authoring workflow.
@@ -227,8 +246,3 @@ Built on:
 - The OWASP and CWE catalogs — pattern descriptions and references.
 
 Stryx is not affiliated with any of the above.
-
-[^stats]: 41% AI-generated code figure: daily.dev 2026 developer
-    trends report. 45% AI-code vulnerability rate: ACM communications,
-    April 2026 ("Security Implications of AI-Generated Code"). Refresh
-    with primary URLs and newer surveys as they publish.

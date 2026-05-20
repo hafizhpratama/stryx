@@ -1,6 +1,6 @@
 //! Bench for `flow/secret-to-response`.
 //!
-//! Per CLAUDE.md hard rule #7 the per-rule per-file p99 budget is ≤ 1ms.
+//! Per AGENTS.md the per-rule per-file p99 budget is ≤ 1ms.
 //! This rule is a single forward walk with regex source matching, so it
 //! should comfortably sit under the per-rule budget.
 

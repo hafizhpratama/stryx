@@ -25,7 +25,7 @@ const SEVERITY_RANK = {
 
 function usage() {
   return [
-    "stryx — sees what your AI missed",
+    "stryx — stack-aware security for JavaScript and TypeScript backends",
     "",
     "USAGE:",
     "  stryx scan [PATH] [OPTIONS]",

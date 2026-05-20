@@ -1,4 +1,4 @@
-// AI-generated Next.js route handler. The raw-SQL call happens
+// Next.js route handler. The raw-SQL call happens
 // inside `findUserBySlug` from `./lib`. Slice 1 cannot see this;
 // slice 2 must.
 

@@ -65,8 +65,8 @@ cd your-typescript-project
 stryx scan
 ```
 
-Stryx walks your repo respecting `.gitignore`, parses every `.ts` / `.tsx`
-file, and reports findings.
+Stryx walks your repo respecting `.gitignore`, parses JavaScript and
+TypeScript source files, and reports findings.
 
 Sample output:
 
@@ -90,6 +90,37 @@ The CLI exits with a non-zero status when findings are at or above the
 configured severity threshold (default: `high`, configurable via
 `--fail-on <severity>`). This makes Stryx naturally suitable for CI
 gating.
+
+Every finding should include a short fix hint. The linked rule page is
+the full fix guide: it explains the safe pattern and the exact code
+shapes Stryx recognizes as fixed.
+
+## Stack-aware scanning roadmap
+
+The current engine already scans JavaScript/TypeScript files and catches
+cross-file security flows. The next product layer is stack-aware
+profiling: Stryx will detect runtime, framework, database, validation,
+auth, and LLM SDK evidence, then enable the matching adapters.
+
+Target profile output:
+
+```text
+✔ Detecting language. Found TypeScript.
+✔ Detecting runtime. Found Bun.
+✔ Detecting framework. Found Hono.
+✔ Detecting database. Found Drizzle + PostgreSQL.
+✔ Detecting validation. Found Zod.
+✔ Detecting auth. Found Better Auth.
+✔ Detecting LLM SDK. Found OpenAI.
+```
+
+See:
+
+- [Stack-aware CLI target](product/stack-aware-cli.md)
+- [Project profile architecture](architecture/project-profile.md)
+- [Stack adapter architecture](architecture/stack-adapters.md)
+- [Stack catalog](stacks/)
+- [Stack-aware roadmap](roadmap/stack-aware-scanning.md)
 
 ## Configuration
 

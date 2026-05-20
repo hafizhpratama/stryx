@@ -1,4 +1,4 @@
-// AI-generated configuration with secrets baked into source.
+// Configuration with secrets baked into source.
 // Stryx should flag every literal below as `generic/hardcoded-secret`.
 
 export const config = {

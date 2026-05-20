@@ -1,6 +1,6 @@
 //! Bench for `flow/auth-bypass-via-wrapper`.
 //!
-//! Per CLAUDE.md hard rule #7 the per-rule per-file p99 budget is ≤ 1ms.
+//! Per AGENTS.md the per-rule per-file p99 budget is ≤ 1ms.
 //! This rule is a single forward walk that consults the project index;
 //! the bench measures the full scan_dir path through the engine's
 //! two-pass pipeline so the cross-file resolution cost is included.

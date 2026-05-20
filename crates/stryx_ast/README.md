@@ -13,7 +13,7 @@ The normalised AST surface — Stryx's swappable-parser boundary.
 
 ## Why this exists
 
-[CLAUDE.md](../../CLAUDE.md) hard rule #1: rules must not import
+[AGENTS.md](../../AGENTS.md) engineering rule: rules must not import
 oxc types directly. All AST surfaces flow through this crate so
 the parser is swappable. Test: replacing `oxc_parser` with
 another implementation should require zero changes to

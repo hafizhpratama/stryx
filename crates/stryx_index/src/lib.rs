@@ -2,6 +2,9 @@
 //! so cross-file rules can resolve call sites to function bodies in
 //! other files. See `docs/architecture/semantic-index.md`.
 
+pub mod jsonc;
+pub mod profile;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

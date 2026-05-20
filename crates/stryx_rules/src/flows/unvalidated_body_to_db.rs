@@ -735,9 +735,26 @@ impl<'idx> FlowVisitor<'idx> {
                     self.scan_for_sinks(arg);
                     // Slice 3.1 of ADR 0007 — record return-shape
                     // observations alongside the existing boolean.
-                    // Observation-only; `tainted_return` remains the
-                    // source of truth through Phase 3's window.
                     self.record_taint_in_return(arg);
+                    // Enforce the shape-implies-boolean invariant
+                    // documented at the build_summary assertion: the
+                    // structural shape walk and `expr_taint` walk
+                    // different sub-grammars (expr_taint follows
+                    // calls/templates/etc, record_taint_in_return only
+                    // follows object/array/cast literals). They can
+                    // disagree on which path proves "taint reached the
+                    // return". Without this lockstep update, real-world
+                    // class methods (NestJS services with shapes like
+                    // `return { eventId, ...spread }` or
+                    // `return await this.repo.find({ where: { id } })`)
+                    // can record a tainted-leaf shape while leaving
+                    // `tainted_return = false`, which previously
+                    // panicked the debug assertion in build_summary.
+                    if !self.tainted_return
+                        && self.return_shape_seen.count_tainted_leaves() > 0
+                    {
+                        self.tainted_return = true;
+                    }
                 }
             }
             Statement::BlockStatement(bs) => {
@@ -3072,12 +3089,29 @@ fn build_summary(
         // debug assertion against the visitor's findings list, which
         // was the previous source of truth for `reaches`.
         let reaches = param_shape.as_ref().is_some_and(Cell::has_tainted_leaf);
-        debug_assert_eq!(
-            reaches,
-            !visitor.findings.is_empty(),
-            "shape-derived reaches must match findings.is_empty(); \
-             a finding-emission path is missing its record_taint_in_arg call",
-        );
+        // Engine invariant: shape-derived `reaches` must match
+        // `!findings.is_empty()`. They walk the same input via
+        // different paths, so disagreement means a finding-emission
+        // path is missing its `record_taint_in_arg` call. We surface
+        // this as a warning with the source snippet instead of
+        // panicking — engine bugs should not kill user scans.
+        let has_findings = !visitor.findings.is_empty();
+        if reaches != has_findings {
+            tracing::warn!(
+                "engine invariant tripped in flow/unvalidated-body-to-db: \
+                 shape-derived reaches ({reaches}) != findings-present ({has_findings})\n  \
+                 file: {file}\n  function: {name} (param `{pname}` @ idx {idx})\n\
+                 {snippet}\n  \
+                 scan continues; cross-file taint through this function may be inaccurate.",
+                reaches = reaches,
+                has_findings = has_findings,
+                file = file.display(),
+                name = name,
+                pname = pname,
+                idx = idx,
+                snippet = format_function_snippet(file, params.span.start),
+            );
+        }
         let mut tainted_offsets: Vec<Offset> = param_shape
             .as_ref()
             .map(Cell::top_tainted_offsets)
@@ -3095,11 +3129,27 @@ fn build_summary(
         // the boolean but records no shape (cross-file return-shape
         // propagation lands in slice 3.5).
         let return_shape = visitor.return_shape_seen.canonicalize();
-        debug_assert!(
-            !return_shape.as_ref().is_some_and(Cell::has_tainted_leaf) || propagates_to_return,
-            "return_shape has tainted leaves but tainted_return = false; \
-             a return-statement path is missing its record_taint_in_return call",
-        );
+        // Engine invariant per ADR 0007: a non-empty tainted-leaf
+        // shape implies `tainted_return = true`. With the lockstep
+        // update in `handle_statement::ReturnStatement` this should
+        // not trip for top-level returns; if it does, a non-return
+        // visitor path is recording into `return_shape_seen` without
+        // updating the boolean. Warn with source context and
+        // continue — engine bugs should not kill user scans.
+        if return_shape.as_ref().is_some_and(Cell::has_tainted_leaf) && !propagates_to_return {
+            tracing::warn!(
+                "engine invariant tripped in flow/unvalidated-body-to-db: \
+                 return_shape has tainted leaves but propagates_to_return=false\n  \
+                 file: {file}\n  function: {name} (param `{pname}` @ idx {idx})\n\
+                 {snippet}\n  \
+                 scan continues; cross-file taint through this function may under-propagate.",
+                file = file.display(),
+                name = name,
+                pname = pname,
+                idx = idx,
+                snippet = format_function_snippet(file, params.span.start),
+            );
+        }
         params_out.push(ParamFlow {
             name: pname.clone(),
             reaches_db_sink_unsanitized: reaches,
@@ -3128,6 +3178,47 @@ fn build_summary(
         contains_auth_check: contains_auth_helper_call(body),
         validates_request_body: body_validates_request(body),
     }
+}
+
+/// Read `file` and return a small source snippet (2 lines before,
+/// ~6 lines after) centered on the line containing `anchor_byte`.
+/// Used by the engine-invariant warnings so users see the actual TS
+/// code that tripped the warning, not just a `flow/...rs:NNNN`
+/// location in the analyzer. Returns a fallback string on any read
+/// error — never panics, never propagates errors.
+fn format_function_snippet(file: &std::path::Path, anchor_byte: u32) -> String {
+    let source = match std::fs::read_to_string(file) {
+        Ok(s) => s,
+        Err(_) => return "    (source unavailable — file could not be re-read)".to_string(),
+    };
+    let anchor = anchor_byte as usize;
+    if anchor > source.len() {
+        return format!("    (anchor byte {anchor} out of range, source is {} bytes)", source.len());
+    }
+    let mut line_starts: Vec<usize> = vec![0];
+    for (i, b) in source.bytes().enumerate() {
+        if b == b'\n' {
+            line_starts.push(i + 1);
+        }
+    }
+    let anchor_line = line_starts
+        .iter()
+        .rposition(|&s| s <= anchor)
+        .unwrap_or(0);
+    let start_line = anchor_line.saturating_sub(2);
+    let end_line = (anchor_line + 6).min(line_starts.len().saturating_sub(1));
+    let mut out = String::from("  source:\n");
+    for ln in start_line..=end_line {
+        let line_start = line_starts[ln];
+        let line_end = line_starts
+            .get(ln + 1)
+            .copied()
+            .unwrap_or(source.len());
+        let text = source[line_start..line_end].trim_end_matches('\n');
+        let marker = if ln == anchor_line { ">" } else { " " };
+        out.push_str(&format!("    {marker} {:>5} | {text}\n", ln + 1));
+    }
+    out
 }
 
 /// True if `body` contains a call shaped like

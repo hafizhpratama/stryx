@@ -14,6 +14,12 @@ assignees: ''
 
 <!-- What you'd like Stryx to do. Be specific. -->
 
+## Product boundary
+
+<!-- Is this backend/platform security, stack detection, adapters, reporting,
+     CI, or docs? React/component quality, accessibility, UI style, and
+     generic linting are intentionally out of scope. -->
+
 ## Alternatives considered
 
 <!-- Other approaches you've thought about, including doing nothing. -->

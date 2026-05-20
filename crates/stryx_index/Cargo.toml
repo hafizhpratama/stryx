@@ -12,3 +12,5 @@ description  = "Project-level semantic index for the Stryx static analyzer. Cros
 stryx_core  = { workspace = true }
 stryx_taint = { workspace = true }
 serde       = { workspace = true }
+serde_json  = { workspace = true }
+tracing     = { workspace = true }

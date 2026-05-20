@@ -10,7 +10,7 @@
 //! - `redirect(url)` — bare callable, conventionally imported from
 //!   `next/navigation` or framework helpers. Severity is treated
 //!   the same as the namespaced shapes since the bare-identifier
-//!   form is the AI-generated tutorial-code pattern.
+//!   form is common in tutorial-style route handlers.
 //! - `<ident>.redirect(url, ...)` — covers Express-style
 //!   `res.redirect(url)`, `reply.redirect(url)` (Fastify), and
 //!   chain-style framework adapters.

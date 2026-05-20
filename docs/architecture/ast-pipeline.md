@@ -1,9 +1,9 @@
 # AST Pipeline
 
-How a TypeScript project becomes a list of Findings.
+How a JavaScript/TypeScript project becomes a list of Findings.
 
 > Reflects [ADR 0003](../decisions/0003-cross-file-and-taint-as-core.md):
-> the index build (steps 3–5) is the load-bearing addition that makes
+> the index build (steps 4–6) is the load-bearing addition that makes
 > cross-file analysis possible without holding every AST in memory.
 
 ## Overview
@@ -15,36 +15,39 @@ Project path
 [1] Discovery       (ignore-aware traversal)
    │
    ▼
-[2] Parse           (oxc_parser + oxc_semantic, per file, parallel)
+[2] Profile         (planned: stack evidence from package/config/source)
    │
    ▼
-[3] Index extract   (per file: symbols, imports, calls, framework hints)
+[3] Parse           (oxc_parser + oxc_semantic, per file, parallel)
    │
    ▼
-[4] Free arena      (per-file arenas dropped after extraction)
+[4] Index extract   (per file: symbols, imports, calls, framework hints)
    │
    ▼
-[5] Project merge   (build cross-file structures: stryx_index)
+[5] Free arena      (per-file arenas dropped after extraction)
    │
    ▼
-[6] Analyze         (rules + taint engine query the index;
+[6] Project merge   (build cross-file structures: stryx_index)
+   │
+   ▼
+[7] Analyze         (rules + adapters + taint engine query the index;
                      reparse on demand for cross-file zones)
    │
    ▼
-[7] Emit            (Findings + UncertainZones)
+[8] Emit            (Findings + UncertainZones)
    │
    ▼
-[8] Escalate        (LLM analyzes UncertainZones)
+[9] Escalate        (LLM analyzes UncertainZones)
    │
    ▼
-[9] Report          (formatter writes output)
+[10] Report         (formatter writes output)
 ```
 
-Steps 1–4 run in parallel across files via rayon.
-Step 5 is single-threaded but cheap (hash-map merges).
-Step 6 runs in parallel across files; rules query the shared index.
-Step 8 is async, IO-bound, batched and cached.
-Steps 7 and 9 are sync.
+The profile step is planned by [ADR 0013](../decisions/0013-stack-aware-project-profiles.md).
+It must remain deterministic and local. Steps 3–5 run in parallel across
+files via rayon. Step 6 is single-threaded but cheap (hash-map merges).
+Step 7 runs in parallel across files; rules query the shared index and
+enabled stack adapters. Step 9 is async, IO-bound, batched and cached.
 
 ## Step 1 — File discovery
 
@@ -59,7 +62,21 @@ walk the project respecting:
 Output: a flat `Vec<PathBuf>` of files to scan, ordered for predictable
 benchmarking.
 
-## Step 2 — Parse + Semantic + Normalize
+## Step 2 — Profile (planned)
+
+The planned profile pass gathers deterministic local evidence about the
+project stack:
+
+- package manager and lockfiles
+- `package.json` dependencies and scripts
+- runtime/framework config files
+- imports and well-known global APIs
+- route and handler shapes found during source extraction
+
+The output is a `ProjectProfile` that enables stack adapters. This pass
+does not make network calls, install dependencies, or invoke an LLM.
+
+## Step 3 — Parse + Semantic + Normalize
 
 For each file, in parallel via `rayon`:
 
@@ -96,7 +113,7 @@ The CI contract test enforces the wrap:
 If parsing fails (syntax errors), we log and skip the file. Other files
 still scan.
 
-## Step 3 — Index extract
+## Step 4 — Index extract
 
 A visitor walks the normalized AST once and emits index entries:
 
@@ -107,18 +124,18 @@ A visitor walks the normalized AST once and emits index entries:
 - `FrameworkHint` — heuristics + `package.json` + framework configs
 
 Entries are small (~80–120 bytes each). They go into thread-local
-accumulators that get merged in step 5. The full AST is not retained
+accumulators that get merged in step 6. The full AST is not retained
 beyond this step. See [`semantic-index.md`](semantic-index.md) for the
 data model.
 
-## Step 4 — Free arena
+## Step 5 — Free arena
 
 After index extraction completes for a file, the per-file
 `oxc_allocator::Allocator` is dropped. Peak memory is bounded by
 *active rayon threads*, not by total project size — typically one arena
-per logical CPU during the parallel phase, all freed before step 5.
+per logical CPU during the parallel phase, all freed before step 6.
 
-## Step 5 — Project merge
+## Step 6 — Project merge
 
 Single-threaded merge of per-file index entries into project-level
 structures:
@@ -137,10 +154,10 @@ This is a hash-map merge; cheap (~1s for 100k files). After this step,
 the index is read-only and shareable across all rule analysis. Rules
 hold `&ProjectIndex` for the rest of the pipeline.
 
-## Step 6 — Analyze (rules + taint)
+## Step 7 — Analyze (rules + adapters + taint)
 
 We walk each file's AST again (re-parsed lazily from cache) with all
-enabled rules observing each node, plus the taint engine running
+enabled rules and stack adapters observing each node, plus the taint engine running
 inter-procedural flow analysis using the project index:
 
 ```rust
@@ -168,7 +185,7 @@ This means:
 - Rule order doesn't matter
 - Taint analysis runs once per project, not once per file
 
-## Step 7 — Emit
+## Step 8 — Emit
 
 During traversal, rules emit `Finding`s and `UncertainZone`s into the
 `RuleContext`:
@@ -180,9 +197,9 @@ ctx.emit_uncertain(UncertainZone { /* ... */ });
 
 These accumulate per file. After the walk, the per-file collection is
 returned to `stryx_core`, which merges them with cross-file taint
-flows emitted by `stryx_taint` (which used the project index from step 5).
+flows emitted by `stryx_taint` (which used the project index from step 6).
 
-## Step 8 — Escalation (optional)
+## Step 9 — Escalation (optional)
 
 If LLM escalation is enabled and the scan produced UncertainZones,
 `stryx_core` batches them into LLM calls.
@@ -205,7 +222,7 @@ Same content + same taint context + same rule + same prompt + same
 model → same answer, free. See [`taint-engine.md`](taint-engine.md#llm-escalation-interface)
 for why `taint_summary` and `prompt_hash` are part of the key.
 
-## Step 9 — Reporting
+## Step 10 — Reporting
 
 The reporter receives the full `Vec<Finding>` and serializes per the
 chosen format:
@@ -242,19 +259,19 @@ rayon thread pool ┤
 
 CPU-bound work uses `rayon` for data parallelism (one task per file).
 IO-bound work (LLM calls) uses `tokio` async. The boundary is exactly
-between Step 6 and Step 7 — nothing async happens before that.
+between Step 8 and Step 9 — nothing async happens before that.
 
 ## Memory model
 
-- Each file's arena (oxc_allocator) is freed at step 4 — peak memory is
+- Each file's arena (oxc_allocator) is freed at step 5 — peak memory is
   bounded by the number of active rayon threads, not by project size.
 - The project index (`stryx_index`) is the only persistent structure
-  across steps 5–8. Index entries are small (~100 bytes/symbol);
+  across steps 6–9. Index entries are small (~100 bytes/symbol);
   ~270MB resident for a 100k-file repo. See
   [`semantic-index.md`](semantic-index.md#memory-model).
 - Function summaries cached by `stryx_taint` are ~100 bytes each;
   ~10MB for a 100k-LoC repo.
-- On-demand re-parses in step 6 use a per-call arena that's dropped
+- On-demand re-parses in step 7 use a per-call arena that's dropped
   immediately after the rule finishes inspecting the file.
 - Findings and UncertainZones are owned `String`/`Vec` allocations.
   Lifetime: until reporter writes them out.
@@ -280,7 +297,7 @@ process (configurable via `--max-skip-rate`).
 ## What this pipeline does NOT do
 
 - **Full type checking** — We do not run TypeScript's type checker.
-  Steps 2–3 use oxc's syntactic + scope analysis (`oxc_semantic`).
+  Steps 3–4 use oxc's syntactic + scope analysis (`oxc_semantic`).
   Full type-aware analysis is Phase 4 work; until then, rules that
   need type flow emit UncertainZones for LLM escalation.
 - **Cross-package taint propagation** — We do not propagate taint
@@ -293,7 +310,7 @@ process (configurable via `--max-skip-rate`).
 
 Cross-file analysis itself is **done** by this pipeline as of v0.1
 (per [ADR 0003](../decisions/0003-cross-file-and-taint-as-core.md));
-the project index in step 5 is the load-bearing addition.
+the project index in step 6 is the load-bearing addition.
 
 ## Profiling tips
 

@@ -257,7 +257,7 @@ Concrete consequences of choosing precision:
    taint-amplifying.
 4. We do not flag "this *might* flow if reflection is used."
 
-This stance is repeated in CLAUDE.md and the rule template so contributors
+This stance is repeated in AGENTS.md and the rule template so contributors
 align rules to it. A rule that requires soundness should be implemented
 elsewhere (e.g., as an opt-in `--strict` mode in a future phase).
 
@@ -420,8 +420,8 @@ Each new source/sink/sanitizer needs:
 
 1. The implementation file
 2. A doc entry in `docs/architecture/taint-catalog.md`
-3. A real-world fixture in `tests/fixtures/taint/<id>/` showing it
-   firing on AI-generated code (with the attribution comment)
+3. A real-world fixture in `tests/fixtures/taint/<id>/` showing the
+   source or sink firing on a minimal reproduction
 4. A counter-fixture showing it correctly *not* firing
 5. Registration in `crates/stryx_taint/src/registry.rs`
 

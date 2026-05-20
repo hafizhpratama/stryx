@@ -17,6 +17,21 @@ recognised, known FP zones, history).
 - **cross-file** — taint flows across imports via
   `ExportedFunctionSummary` from the project index
 
+## Rule docs as fix guides
+
+Every rule page is also a remediation guide. Stryx should not tell users
+"follow best practices" and leave the fix vague. Each rule doc must state:
+
+- what to change
+- where the safety boundary belongs
+- what Stryx recognizes as fixed
+- what common "fixes" are still unsafe
+
+This is especially important for stack-aware adapters: the CLI can stay
+short (`Fix: parse with URL and allow-list host/protocol`), while the
+rule page explains exact accepted shapes for Next.js, Hono, Express,
+Bun, Drizzle, Better Auth, OpenAI, and future adapters.
+
 ## Rules shipped at v0.2.1
 
 11 rules in the registry. Source under
@@ -58,7 +73,7 @@ OSS sweep surfaces real TPs that span files.
 
 | Rule ID | Status | Severity | Scope | What it catches |
 |---|---|---|---|---|
-| `generic/hardcoded-secret` | 🔵 | medium | single-file | Credential-shaped strings inline in source (API keys, JWT secrets, DB URIs) |
+| [`generic/hardcoded-secret`](generic-hardcoded-secret.md) | 🔵 | critical / high | single-file | Credential-shaped strings inline in source (API keys, JWT secrets, DB URIs) |
 
 ## How rules are organized
 
@@ -84,10 +99,11 @@ rule's taint logic dispatches through it.
 See [CONTRIBUTING.md](../../CONTRIBUTING.md) for the full workflow.
 Short version:
 
-1. Find the failure in real AI output — Cursor / Claude Code /
-   Copilot / v0 / Lovable. Don't invent examples.
+1. Find the failure in a real backend security pattern or minimal
+   reproduction. Preserve the source, sink, guard, and stack shape.
 2. Write the doc first following [`_template.md`](_template.md),
-   including the "Taint signature" section.
+   including the "How to fix", "What Stryx recognizes", and
+   "Taint signature" sections.
 3. Implement under
    `crates/stryx_rules/src/{sources,sinks,sanitizers,flows}/<rule_id>.rs`.
 4. Add `tests/fixtures/<rule-id>/{bad,good}.ts` (or
@@ -99,9 +115,9 @@ Short version:
 
 ## Requesting a rule
 
-Found AI generating something dangerous that we don't catch?
+Found a dangerous backend flow that we don't catch?
 [Open a rule request](../../.github/ISSUE_TEMPLATE/new-rule-request.md)
-with the real AI output verbatim.
+with a minimal reproduction.
 
 ## Disabling rules
 

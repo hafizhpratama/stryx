@@ -1,12 +1,12 @@
 # @hafizhpratama/stryx
 
-> Sees what your AI missed — across files.
+> Stack-aware security for JavaScript and TypeScript backends.
 
-A Rust static analyzer for AI-generated TypeScript. Catches the
-specific failure patterns AI coding tools (Cursor, Claude Code,
-GitHub Copilot, v0, Lovable, …) commonly produce — missing input
-validation, leaked secrets, weak auth, SQL injection, command
-injection, SSRF, open redirects — using **cross-file taint
+A stack-aware security scanner for JavaScript and TypeScript backends.
+Stryx detects runtime, framework, database, validation, auth, and LLM SDK
+surfaces, then catches missing input validation, leaked secrets, weak
+auth, SQL injection, command injection, SSRF, open redirects, path
+traversal, and unsafe LLM prompt handling using **cross-file taint
 analysis** that single-file linters can't match.
 
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/hafizhpratama/stryx/blob/main/LICENSE)
@@ -88,14 +88,19 @@ call site, even though no single file shows the full path.
 See the [full rule library](https://github.com/hafizhpratama/stryx/tree/main/docs/rules)
 on GitHub.
 
+Each rule page is also a fix guide: it explains the concrete safe pattern
+and what Stryx recognizes as fixed.
+
 ## How it works
 
 ```
-TypeScript source
+JavaScript / TypeScript source
+    ↓
+Project profile (planned): runtime/framework/data/auth/LLM evidence
     ↓
 Layer 1: oxc parser → arena AST (per file, parallel)
     ↓
-Layer 2: project semantic index + AST rules + taint engine
+Layer 2: project semantic index + stack adapters + AST rules + taint engine
     ↓
 Layer 3 (optional): LLM escalation on flagged uncertain zones, cached
     ↓

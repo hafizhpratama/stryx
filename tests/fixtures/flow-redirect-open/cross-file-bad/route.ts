@@ -1,4 +1,4 @@
-// AI-generated Next.js OAuth-callback shape. The actual redirect
+// Next.js OAuth-callback shape. The actual redirect
 // happens inside `loginRedirect` from `./lib`. Slice 1 can't see
 // this; slice 2 must.
 

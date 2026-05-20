@@ -173,6 +173,23 @@ For a *single-file* rule (e.g., a pure-AST sanitizer detector), set
 `scope: SingleFile`, declare the node kinds in `interests()`, and use
 `visit` to inspect each matching node directly.
 
+## Rule docs as remediation contracts
+
+Every shipped rule has a markdown page in `docs/rules/`. That page is
+part of the public rule contract, not marketing copy. It must include:
+
+- **How to fix** — the concrete remediation the CLI can point to.
+- **What Stryx recognizes** — the exact safe shapes the analyzer accepts
+  today, plus common shapes it does not accept.
+- **Taint signature** — source labels, sink IDs, sanitisers/guards, and
+  scope.
+- **Known false positive zones** — when to suppress and when the rule
+  should be tightened instead.
+
+Do not write vague "best practice" guidance. A rule doc should answer:
+"What code change makes this finding go away, and why is that change
+actually safe?"
+
 ## Visitor traits
 
 We provide several visitor traits in `stryx_ast::visit`:
@@ -209,7 +226,7 @@ is much higher than the cost of running a Layer 3 escalation.
 
 | Severity | When to use |
 |---|---|
-| info | Notable but not a problem ("AI-generated boilerplate detected") |
+| info | Notable but not a problem ("debug endpoint exposes too much context") |
 | low | Minor concern ("Missing JSDoc on auth function") |
 | medium | Real issue, not directly exploitable ("Logging request body") |
 | high | Likely bug or security issue ("Missing input validation") |
@@ -222,7 +239,7 @@ incident in days, not weeks."* Calibration drift erodes trust.
 
 The per-rule budget is the strictest of the three; the whole-pipeline and
 full-scan budgets live in [ARCHITECTURE.md](../../ARCHITECTURE.md#performance-budget)
-and [CLAUDE.md](../../CLAUDE.md#performance-budget).
+and [AGENTS.md](../../AGENTS.md).
 
 - ≤ 1ms per file at p99 for AST analysis (this rule, in isolation)
 - ≤ 100MB additional memory across the entire scan
@@ -267,9 +284,9 @@ tests/fixtures/<rule-id>/
 └── README.md    # Optional notes about the fixtures
 ```
 
-Include a comment in `bad.ts` documenting the AI tool, model, prompt,
-and date that produced it. We use this to track which AI tools cause
-which patterns over time.
+Include a comment in `bad.ts` documenting the source → sink shape and
+the relevant stack surface. This keeps fixture intent clear when the
+implementation changes later.
 
 ## Integration tests
 

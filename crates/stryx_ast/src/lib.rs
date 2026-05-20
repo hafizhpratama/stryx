@@ -1,6 +1,6 @@
 //! Stryx AST layer. Owns the parser entry point and converts oxc spans to
 //! the stryx-native [`Span`](stryx_core::Span). Higher layers should depend
-//! on this crate, not on `oxc_*` directly — see CLAUDE.md hard rule #1.
+//! on this crate, not on `oxc_*` directly — see AGENTS.md.
 
 use std::path::{Path, PathBuf};
 

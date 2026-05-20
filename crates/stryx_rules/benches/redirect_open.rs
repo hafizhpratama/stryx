@@ -1,6 +1,6 @@
 //! Bench for `flow/redirect-open`.
 //!
-//! Per CLAUDE.md hard rule #7 the per-rule per-file p99 budget is ≤ 1ms.
+//! Per AGENTS.md the per-rule per-file p99 budget is ≤ 1ms.
 //! Structurally mirrors `flow/ssrf-via-fetch` (same source, different
 //! sink set), so the performance profile should match.
 

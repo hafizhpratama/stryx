@@ -2,28 +2,30 @@
 
 ## What is Stryx?
 
-A pre-deploy static analyzer for AI-generated TypeScript. It catches
-the specific failure patterns AI coding tools commonly produce —
-missing input validation, leaked secrets, weak auth, missing rate
-limits — using cross-file taint analysis with optional LLM
-confirmation on genuinely ambiguous flows.
+A pre-deploy, stack-aware security scanner for JavaScript and TypeScript
+backends. It detects runtime, framework, database, validation, auth, and
+LLM SDK surfaces, then catches missing input validation, leaked secrets,
+weak auth, SSRF, unsafe redirects, SQL injection, command injection,
+filesystem path traversal, and unsafe LLM prompt handling using
+cross-file taint analysis with optional LLM confirmation on genuinely
+ambiguous flows.
 
 ## Where does Stryx fit alongside other tools?
 
-Static analysis and AI-code review are crowded spaces, and most
-existing tools serve real needs. Here's how Stryx is positioned:
+Static analysis and code review are crowded spaces, and most existing
+tools serve real needs. Here's how Stryx is positioned:
 
 ### Generic SAST (Snyk, Semgrep, SonarQube)
 
 These are language-agnostic, broad in coverage, and built for
-security teams. Stryx is narrower — TypeScript only — and focuses on
-patterns common in AI-generated code, particularly cross-file flows.
+security teams. Stryx is narrower — JavaScript/TypeScript backend code
+— and focuses on stack-aware cross-file flows.
 Many teams will use Stryx alongside an existing SAST.
 
 A note on Semgrep specifically: their rule library is under the
 Semgrep Rules License, which restricts commercial use in competing
 products. Stryx writes its detection logic from scratch, using OWASP,
-CWE, and analysis of real AI output as references.
+CWE, official framework docs, and minimal reproductions as references.
 
 ### LLM-driven PR review (CodeRabbit, Greptile, Cursor BugBot)
 
@@ -42,18 +44,18 @@ semantic index and an inter-procedural taint engine to track flows
 across file boundaries, which single-file linters aren't designed
 for. Many teams will run both.
 
-### Other AI-aware OSS tools (e.g., VibeSafe)
+### Stack-specific scanners and framework linters
 
-There are a few open-source projects exploring AI-aware DevSecOps,
-each with a different scope. Stryx narrows to TypeScript and goes
-deep on cross-file taint flows in that ecosystem. Different tools,
-overlapping audiences.
+Framework-specific tools can be excellent inside their own ecosystem.
+Stryx's angle is the cross-stack backend flow: request source in one
+framework, helper in another package, database or network sink elsewhere.
+The stack profile tells Stryx which adapters to enable.
 
 ## How do I know if Stryx is the right fit?
 
 Stryx is a good fit if:
 
-- You ship TypeScript with AI assistance.
+- You ship JavaScript or TypeScript backend/API code.
 - You want a pre-deploy gate, not just IDE warnings.
 - The patterns you most worry about are flows that span multiple
   files (a route handler that hands off to a helper, an env-var
@@ -64,7 +66,9 @@ Stryx is a good fit if:
 
 Look elsewhere if:
 
-- You need multi-language coverage today (Stryx is TypeScript-only).
+- You need multi-language coverage today.
+- You want React component, hook, accessibility, bundle-size, or visual
+  UI quality analysis.
 - You need a comprehensive enterprise SAST with a long compliance
   feature list — Stryx is narrower than that on purpose.
 
@@ -98,15 +102,37 @@ instance running a code-capable model.
 
 ## What languages and frameworks?
 
-**Language:** TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`). JavaScript
-support is on the roadmap.
+**Language:** JavaScript and TypeScript (`.ts`, `.tsx`, `.mts`, `.cts`,
+`.js`, `.jsx`, `.mjs`, `.cjs`).
 
-**Frameworks with framework-aware rules:**
+**Frameworks with framework-aware rules today:**
 - Next.js — App Router and Pages Router (v0.1).
-- Hono and Express — added via source/sink adapters in a later phase.
+- Hono and Express — partial source/sink coverage, with stack adapters
+  becoming the formal path.
 - Generic TypeScript — covered.
 
-We prioritize framework support based on what AI tools generate most.
+The next direction is stack-aware scanning: detect runtime, framework,
+database, validation, auth, and LLM SDKs, then enable matching adapters.
+See [the stack-aware roadmap](roadmap/stack-aware-scanning.md).
+
+## Does Stryx do React component quality, hooks, accessibility, or bundle-size checks?
+
+No. Stryx is **stack-aware security scanning for TypeScript
+backends/platforms**. It does not analyze React hooks, component
+architecture, rendering performance, accessibility, Tailwind, or
+bundle-style issues — those are well-covered by other tools.
+
+Next.js support is scoped to backend surfaces: route handlers, server
+actions, middleware, auth, and database access. Use Stryx alongside
+ESLint, oxlint, and any client-side React quality tool — it doesn't
+try to replace your toolchain.
+
+## Are rule docs best-practice docs?
+
+No. Rule docs are fix guides. They explain the unsafe flow, how to fix
+it, and what Stryx recognizes as fixed. That keeps the CLI terse while
+giving users a concrete remediation path when they follow the `Read more`
+link.
 
 ## How accurate is Stryx?
 
@@ -137,8 +163,8 @@ should fire.
 
 [Open a rule request](https://github.com/hafizhpratama/stryx/issues/new?template=new-rule-request.md)
 with a real example of the failure mode. The more concrete the
-example (real AI output, the prompt that produced it, why it's
-dangerous), the easier the rule is to write well.
+example (minimal reproduction, unsafe flow, expected safe shape), the
+easier the rule is to write well.
 
 ## Can I write my own rules?
 
@@ -156,13 +182,12 @@ between WASM and a Rust crate-plugin pattern.
 - [GitHub Sponsors](https://github.com/sponsors/stryx) if you'd like
   to fund development directly.
 
-## Is Stryx affiliated with Anthropic, Cursor, GitHub, or any AI tool vendor?
+## Is Stryx affiliated with Anthropic, Cursor, GitHub, or any vendor?
 
 No. Stryx is an independent open-source project. The default Layer 3
 client targets Anthropic's API because their model and terms suit
 the use case well, but the `LlmClient` trait is provider-pluggable —
-OpenAI, local Ollama, and other providers are first-class. Stryx is
-vendor-neutral on which AI tool generated the code being scanned.
+OpenAI, local Ollama, and other providers are first-class.
 
 ## I have another question
 

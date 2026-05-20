@@ -12,11 +12,9 @@ This document mixes shipped behaviour with design intent. The
 following are **not yet implemented** — flagged inline with 📋:
 
 - `re_export_chain` traversal in `SymbolEntry` — the implemented
-  `ProjectIndex::resolve` does *one* hop only. Barrel files
-  (`export * from "./other"`) are silently dropped. Phase 3 fix.
-- tsconfig path-alias resolution (`@/lib/db`, `~/lib/db`,
-  `#internal/db`) — `is_relative_specifier` rejects anything not
-  starting with `./` or `../`. Phase 3 fix.
+  `ProjectIndex::resolve` now handles direct and wildcard re-exports
+  in the v0.2 line, but the richer `SymbolEntry` design below remains
+  design intent.
 - On-disk SQLite cache at `~/.cache/stryx/index/` — not in code.
   v0.2.1 rebuilds the index every scan from in-memory parse results.
 - Tarjan SCC detection on circular imports — not in code. Cycles
@@ -25,9 +23,11 @@ following are **not yet implemented** — flagged inline with 📋:
 
 What **is** built: `FileSummary` per file with exports/locals/
 imports/classes maps; `ProjectIndex::resolve` and `resolve_summary`
-walking the import map for relative specifiers; per-file extract
-populated by `flow/unvalidated-body-to-db`'s extract pass; `classes`
-field for class-method resolution (NestJS-shaped controllers).
+walking the import map for relative specifiers and tsconfig/jsconfig
+path aliases; per-file extract populated by flow-rule extract passes;
+`classes` field for class-method resolution (NestJS-shaped controllers).
+The next planned extension is `ProjectProfile` for stack-aware adapter
+enablement; see [project-profile.md](project-profile.md).
 
 ## What it is and why it exists
 

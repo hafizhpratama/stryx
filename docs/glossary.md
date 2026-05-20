@@ -28,6 +28,17 @@ A concrete instance of a Rule firing on real code. A Finding includes:
 
 A scan output is a list of Findings.
 
+### Fix hint
+A short remediation string attached to a Finding. The CLI prints it
+inline; the rule page expands it into a full fix guide. Fix hints should
+describe a concrete safe shape, not generic "best practice" advice.
+
+### Fix guide
+The remediation section in a rule doc. It explains how to change the
+code and what Stryx recognizes as fixed. Fix guides live in
+`docs/rules/*.md` under the `How to fix` and `What Stryx recognizes`
+headings.
+
 ### Zone
 A region of source code identified by file path + start byte + end byte.
 Used as the unit of analysis for Layer 3 LLM escalation. Smaller than a
@@ -126,6 +137,19 @@ The project-level read-only data structure built once per scan
 hints — enough to answer cross-file questions without keeping every
 AST resident. See [`architecture/semantic-index.md`](architecture/semantic-index.md).
 
+### ProjectProfile
+The planned stack-detection model from
+[ADR 0013](decisions/0013-stack-aware-project-profiles.md). It records
+detected language, runtime, framework, data layer, validation, auth, LLM
+SDK, and deployment evidence so Stryx can enable the right adapters.
+
+### StackAdapter
+A planned adapter that contributes stack-specific sources, sinks,
+sanitisers, guards, and propagators to generic rules. Example:
+`framework/hono` teaches Stryx about `c.req.json()` and `c.redirect()`;
+`runtime/bun` teaches Stryx about `Bun.serve`, `Bun.spawn`, and
+`Bun.write`.
+
 ### RuleScope
 Either `SingleFile` or `CrossFile`. Declared by each rule so the
 orchestrator knows whether to dispatch the rule per-file or per-project.
@@ -136,13 +160,13 @@ We use 5 levels:
 
 | Level | When to use |
 |---|---|
-| **info** | Notable but not a problem (e.g., "AI-generated boilerplate detected") |
+| **info** | Notable but not a problem (e.g., "debug endpoint exposes too much context") |
 | **low** | Minor concern, no immediate risk (e.g., missing JSDoc on auth function) |
 | **medium** | Real issue but not exploitable directly (e.g., overly permissive logging) |
 | **high** | Likely bug or security issue (e.g., missing input validation on API route) |
 | **critical** | Severe, exploitable, or actively dangerous (e.g., hardcoded production secret) |
 
-Default `fail_on` threshold is `medium`. CLI exits non-zero when any Finding
+Default `fail_on` threshold is `high`. CLI exits non-zero when any Finding
 at or above this threshold is emitted.
 
 ## Confidence
@@ -178,8 +202,9 @@ When this doc says "Layer 1/2/3" without prefix, it always refers to these.
 ## Rule lifecycle
 
 ### Status: experimental
-Newly added. May have false positives. Disabled by default. Surface only
-under `--include-experimental`.
+Newly added. May have false positives. May still be enabled by default
+when the consequence is serious and the rule is conservative. The rule
+doc must clearly describe known false-positive zones.
 
 ### Status: beta
 Tested, low false positive rate. Enabled by default at non-critical

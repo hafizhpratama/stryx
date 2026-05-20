@@ -29,9 +29,9 @@ $ stryx --version
 2. ...
 3. ...
 
-### Minimal reproducing TypeScript
+### Minimal reproducing JavaScript/TypeScript
 
-If possible, include the smallest TypeScript file that reproduces the
+If possible, include the smallest JavaScript/TypeScript file that reproduces the
 issue. If the issue is repo-wide, link to a minimal repo or paste
 relevant snippets.
 
@@ -61,6 +61,7 @@ paste output here
 
 - [ ] Updating to the latest Stryx version
 - [ ] Running with `--verbose` for more detailed logs
+- [ ] Including profile/adapter output if the bug involves stack detection
 - [ ] Running with `RUST_LOG=stryx=trace` for trace logs
 - [ ] Searching existing issues for similar reports
 

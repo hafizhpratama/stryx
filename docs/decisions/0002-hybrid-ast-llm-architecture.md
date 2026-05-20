@@ -8,8 +8,9 @@
 
 ## Context
 
-Stryx must catch AI-generated code failure patterns in TypeScript. The
-2026 competitive landscape splits into three architectural camps:
+Stryx must catch backend security failure patterns in JavaScript and
+TypeScript. The 2026 competitive landscape splits into three
+architectural camps:
 
 1. **Pure AST scanners** (oxlint, Biome, Snyk, Semgrep) — fast,
    deterministic, but blind to semantic intent. Cannot answer questions
@@ -20,9 +21,9 @@ Stryx must catch AI-generated code failure patterns in TypeScript. The
 3. **Static rule packs** (eslint-plugin-security, etc.) — pattern-based,
    limited to what someone wrote a rule for, slow on large codebases.
 
-None of these camps clearly serve "indie developer to mid-size team
-shipping AI-generated TypeScript." Each has blind spots that matter for
-this audience.
+None of these camps clearly serve "teams shipping JavaScript and
+TypeScript backends that need fast, stack-aware pre-deploy security
+checks." Each has blind spots that matter for this audience.
 
 ## Options considered
 

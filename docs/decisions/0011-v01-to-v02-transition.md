@@ -111,9 +111,8 @@ slice-2 cross-file extensions:
   motivating real-world finding.
 
 The slice-1 single-file versions are intentionally conservative
-in scope. Cross-file is what makes the rules catch the
-production patterns AI tools actually produce (separating route
-handler from service module).
+in scope. Cross-file is what makes the rules catch production
+patterns that separate route handlers from service modules.
 
 **Track B — coverage breadth.**
 

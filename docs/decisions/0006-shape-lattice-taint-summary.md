@@ -187,8 +187,8 @@ in that graph.
   analysis needs class-hierarchy analysis, points-to constraint
   generation, and cycle resolution. Performance budget (ADR
   0001 / `ARCHITECTURE.md`) does not survive this.
-- Most AI-generated Next.js handler code we target does not exhibit
-  the aliasing patterns that justify the cost — it's
+- Most Next.js handler code we target does not exhibit the aliasing
+  patterns that justify the cost — it's
   declaration-and-immediate-use. Field sensitivity captures the
   precision wins; aliasing is a long tail.
 - Conflicts with our "boring stack, scale later" instinct. This

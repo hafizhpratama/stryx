@@ -1,7 +1,7 @@
 # Stryx Architecture
 
 > Deep design reference. Read this before making structural changes.
-> Last reviewed: 2026-05-14 (v0.2.1)
+> Last reviewed: 2026-05-20 (v0.3.0)
 
 ## Design goals
 
@@ -99,6 +99,14 @@ stryx/
   table, import graph, intra-file call graph, framework hints. Built
   once per scan; queried by rules and the taint engine. See
   [`docs/architecture/semantic-index.md`](docs/architecture/semantic-index.md).
+  At v0.3.0 the crate also owns the cheap-pass `ProjectProfile`
+  detector (`stryx_index::profile`), which inspects package.json,
+  lockfiles, and a few config files to identify the runtime,
+  framework, data layer, validator, auth provider, LLM SDK, and
+  deployment target. The profile is surfaced via `ScanResult.profile`
+  and the JSON envelope, but does not yet influence rule behaviour —
+  adapter consumption lands in v0.4.0. See
+  [`docs/architecture/project-profile.md`](docs/architecture/project-profile.md).
 
 - **`stryx_taint`** owns: the inter-procedural taint engine — `Source`,
   `Sink`, `Sanitizer` traits, taint labels, function summaries with
@@ -110,7 +118,10 @@ stryx/
   Each rule implements the `Rule` trait and may declare a
   `taint_signature()` and `scope()` (single-file or cross-file).
   At v0.2.1, 11 rules ship in the registry; the `StepKind` substrate
-  (ADR 0008) carries 17 closed-enum variants × 6 trait methods.
+  (ADR 0008) carries 17 closed-enum variants × 6 trait methods. The
+  planned adapter registry keeps rule semantics generic while adding
+  stack-specific source/sink/sanitiser/guard facts; see
+  [`docs/architecture/stack-adapters.md`](docs/architecture/stack-adapters.md).
 
 - **`stryx_llm`** owns: the `LlmClient` trait, prompt templates per rule,
   retry logic, cost tracking. Pluggable: Anthropic, OpenAI, local Ollama.

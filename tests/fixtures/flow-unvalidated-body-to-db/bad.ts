@@ -1,4 +1,4 @@
-// AI-generated Next.js route handler. The body is parsed but never validated
+// Next.js route handler. The body is parsed but never validated
 // before being written to the database — Stryx should flag the prisma.user.create
 // call as `flow/unvalidated-body-to-db`.
 

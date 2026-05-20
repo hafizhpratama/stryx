@@ -84,9 +84,8 @@ own validation idioms.
 
 If each framework requires a Rust pull request to a hardcoded
 list, framework breadth becomes a release-cadence problem.
-Indie devs and vibe coders — the priority audience per
-CLAUDE.md — adopt new frameworks faster than a release cycle
-can keep up.
+Small teams and fast-moving backend projects adopt new frameworks
+faster than a release cycle can keep up.
 
 ### What the deep-dive showed
 

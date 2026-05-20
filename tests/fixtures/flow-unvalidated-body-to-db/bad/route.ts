@@ -1,4 +1,4 @@
-// AI-generated Next.js route handler. The DB write happens inside
+// Next.js route handler. The DB write happens inside
 // `createUser` from `./lib`. Slice 1 cannot see this; slice 2 must.
 
 import { NextRequest, NextResponse } from "next/server";

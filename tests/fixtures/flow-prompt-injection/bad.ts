@@ -8,8 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 const openai = new OpenAI();
 const anthropic = new Anthropic();
 
-// CASE 1: classic body→OpenAI chat user-content — the canonical
-// AI-generated pattern.
+// CASE 1: classic body→OpenAI chat user-content.
 export async function POST(req: NextRequest) {
   const { message } = await req.json();
   const completion = await openai.chat.completions.create({

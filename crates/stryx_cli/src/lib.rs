@@ -13,6 +13,8 @@ use std::sync::Arc;
 
 use stryx_ast::{Allocator, parse};
 use stryx_core::Finding;
+use stryx_index::jsonc::strip_jsonc;
+use stryx_index::profile::{self, ProjectProfile};
 use stryx_index::{PathAlias, ProjectIndex};
 use stryx_rules::{RuleContext, RuleRegistry, builtin_rules};
 
@@ -24,9 +26,12 @@ pub use suppress::filter_suppressed;
 /// content keyed by absolute path so callers (CLI, JSON reporter,
 /// SARIF reporter, GitHub annotation reporter) can resolve
 /// line/column positions without re-reading from disk.
+/// `profile` captures detected stack evidence from package.json,
+/// lockfiles, and config files (no source parsing required).
 pub struct ScanResult {
     pub findings: Vec<Finding>,
     pub sources: HashMap<PathBuf, String>,
+    pub profile: ProjectProfile,
 }
 
 /// Scan a path. Walks `path` (gitignore-aware via the `ignore` crate)
@@ -42,10 +47,19 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
     let files =
         collect_targets(path).with_context(|| format!("collect targets at {}", path.display()))?;
 
+    // Build the project profile once at scan start. Cheap (reads at
+    // most ~10 files: package.json + lockfiles + a few configs) and
+    // independent of the per-file extract loop, so it runs unconditionally
+    // — even an empty-target scan returns whatever profile evidence
+    // exists, which is the right answer for `scan --format=json` on a
+    // workspace with a package.json but no committed sources yet.
+    let profile = profile::detect(path);
+
     if files.is_empty() {
         return Ok(ScanResult {
             findings: Vec::new(),
             sources: HashMap::new(),
+            profile,
         });
     }
 
@@ -139,6 +153,7 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
     Ok(ScanResult {
         findings,
         sources: sources_out,
+        profile,
     })
 }
 
@@ -214,74 +229,6 @@ fn parse_tsconfig_paths(tsconfig_path: &Path) -> Result<Vec<PathAlias>> {
         });
     }
     Ok(out)
-}
-
-/// Strip `//` line comments, `/* … */` block comments, and trailing
-/// commas before `]` / `}`. Naive but adequate for tsconfig files —
-/// quoted strings are handled (so `"//"` inside a string isn't
-/// stripped). This is *not* a full JSON5 parser.
-fn strip_jsonc(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    let mut chars = input.chars().peekable();
-    let mut in_string = false;
-    let mut escape = false;
-    while let Some(c) = chars.next() {
-        if in_string {
-            out.push(c);
-            if escape {
-                escape = false;
-            } else if c == '\\' {
-                escape = true;
-            } else if c == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match c {
-            '"' => {
-                out.push(c);
-                in_string = true;
-            }
-            '/' if chars.peek() == Some(&'/') => {
-                while let Some(&n) = chars.peek() {
-                    if n == '\n' {
-                        break;
-                    }
-                    chars.next();
-                }
-            }
-            '/' if chars.peek() == Some(&'*') => {
-                chars.next();
-                while let Some(n) = chars.next() {
-                    if n == '*' && chars.peek() == Some(&'/') {
-                        chars.next();
-                        break;
-                    }
-                }
-            }
-            _ => out.push(c),
-        }
-    }
-    // Strip trailing commas: `,]` → `]`, `,}` → `}`. Whitespace and
-    // newlines may sit between the comma and the closing bracket.
-    let bytes = out.into_bytes();
-    let mut cleaned = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b',' {
-            let mut j = i + 1;
-            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
-                j += 1;
-            }
-            if j < bytes.len() && (bytes[j] == b']' || bytes[j] == b'}') {
-                i += 1;
-                continue;
-            }
-        }
-        cleaned.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8(cleaned).expect("ascii-safe transform")
 }
 
 fn collect_targets(root: &Path) -> Result<Vec<PathBuf>> {

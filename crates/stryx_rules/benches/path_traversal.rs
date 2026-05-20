@@ -1,6 +1,6 @@
 //! Bench for `flow/path-traversal`.
 //!
-//! Per CLAUDE.md hard rule #7 the per-rule per-file p99 budget is ≤ 1ms.
+//! Per AGENTS.md the per-rule per-file p99 budget is ≤ 1ms.
 //! Slice 1 is single-file with no sanitiser recognition, so this rule
 //! is the cheapest of the three new flow rules.
 

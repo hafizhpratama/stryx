@@ -1,6 +1,6 @@
 ---
 name: New rule request
-about: You found AI generating dangerous TypeScript code Stryx doesn't catch yet
+about: You found a dangerous JavaScript/TypeScript backend flow Stryx doesn't catch yet
 title: "[rule] "
 labels: rule-request
 assignees: ''
@@ -14,25 +14,22 @@ assignees: ''
 
 <!-- One sentence: what's the failure mode? -->
 
-## Real-world AI output
+## Minimal reproduction
 
-**This must be REAL output from an AI tool, not invented.** Synthetic
-examples don't represent real failure modes accurately.
+Prefer the smallest JavaScript/TypeScript example that preserves the real
+source, sink, guard, framework, and cross-file shape.
 
-> ⚠️ **Licensing**: only paste code you generated yourself by prompting
-> an AI tool, or code from a permissively-licensed source you can
-> attribute. Do **not** paste proprietary code, copyleft (GPL/LGPL/AGPL)
-> code, or other people's code without permission. By submitting, you
-> agree to license your contribution under Apache 2.0.
+> ⚠️ **Licensing**: only paste code you wrote yourself or code from a
+> permissively-licensed source you can attribute. Do **not** paste
+> proprietary code, copyleft (GPL/LGPL/AGPL) code, or other people's code
+> without permission. By submitting, you agree to license your
+> contribution under Apache 2.0.
 
-Tool that generated it: <!-- e.g. Cursor, Claude Code, Copilot, v0, Lovable -->
-Model (if known): <!-- e.g. Claude Sonnet 4.6, GPT-5, etc. -->
-Date: <!-- approximately when was it generated? -->
-Original prompt (or close paraphrase):
-<!-- "I asked it to..." -->
+Stack: <!-- e.g. Bun + Hono + Drizzle + Zod -->
+Where this came from: <!-- production bug, local repro, OSS example, tutorial pattern -->
 
 ```ts
-// paste the bad code here
+// paste the bad code or minimal reproduction here
 ```
 
 ## Why this is a problem
@@ -45,8 +42,16 @@ Original prompt (or close paraphrase):
 // paste the fixed version
 ```
 
-## Framework
+## What should Stryx recognize as fixed?
 
+<!-- Be concrete: zod.safeParse + success check, host allow-list before fetch,
+     parameterized query, session guard before handler, etc. -->
+
+## Runtime / framework
+
+- [ ] Bun
+- [ ] Node.js
+- [ ] Deno
 - [ ] Next.js (App Router)
 - [ ] Next.js (Pages Router)
 - [ ] Hono
@@ -55,6 +60,17 @@ Original prompt (or close paraphrase):
 - [ ] NestJS
 - [ ] Generic TypeScript (not framework-specific)
 - [ ] Other: 
+
+## Stack surface
+
+- [ ] Runtime
+- [ ] Framework/router
+- [ ] Database/query layer
+- [ ] Validation
+- [ ] Auth/session
+- [ ] LLM SDK
+- [ ] Filesystem/process/network
+- [ ] Other:
 
 ## Suggested severity
 
