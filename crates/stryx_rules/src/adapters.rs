@@ -398,9 +398,9 @@ impl AdapterRegistry {
     ///
     /// - Runtime: `node`, `bun`
     /// - Framework: `express`, `fastify`, `hono`, `nestjs`, `next-backend`
-    /// - Data layer: `prisma`, `drizzle`, `pg`
-    /// - Validation: `zod`, `valibot`, `joi`, `yup`, `class-validator`
-    /// - Auth: `better-auth`, `auth-js`
+    /// - Data layer: `prisma`, `drizzle`, `pg`, `mysql2`
+    /// - Validation: `zod`, `valibot`, `joi`, `yup`, `ajv`, `class-validator`
+    /// - Auth: `better-auth`, `auth-js`, `clerk`
     /// - LLM SDK: `openai`, `anthropic`
     pub fn builtin() -> Self {
         static NODE: crate::adapters_node::NodeAdapter = crate::adapters_node::NodeAdapter;
@@ -419,17 +419,21 @@ impl AdapterRegistry {
         static DRIZZLE: crate::adapters_drizzle::DrizzleAdapter =
             crate::adapters_drizzle::DrizzleAdapter;
         static PG: crate::adapters_pg::PgAdapter = crate::adapters_pg::PgAdapter;
+        static MYSQL2: crate::adapters_mysql2::Mysql2Adapter =
+            crate::adapters_mysql2::Mysql2Adapter;
         static ZOD: crate::adapters_zod::ZodAdapter = crate::adapters_zod::ZodAdapter;
         static VALIBOT: crate::adapters_valibot::ValibotAdapter =
             crate::adapters_valibot::ValibotAdapter;
         static JOI: crate::adapters_joi::JoiAdapter = crate::adapters_joi::JoiAdapter;
         static YUP: crate::adapters_yup::YupAdapter = crate::adapters_yup::YupAdapter;
+        static AJV: crate::adapters_ajv::AjvAdapter = crate::adapters_ajv::AjvAdapter;
         static CLASS_VALIDATOR: crate::adapters_class_validator::ClassValidatorAdapter =
             crate::adapters_class_validator::ClassValidatorAdapter;
         static BETTER_AUTH: crate::adapters_better_auth::BetterAuthAdapter =
             crate::adapters_better_auth::BetterAuthAdapter;
         static AUTH_JS: crate::adapters_auth_js::AuthJsAdapter =
             crate::adapters_auth_js::AuthJsAdapter;
+        static CLERK: crate::adapters_clerk::ClerkAdapter = crate::adapters_clerk::ClerkAdapter;
         static OPENAI: crate::adapters_openai::OpenAiAdapter =
             crate::adapters_openai::OpenAiAdapter;
         static ANTHROPIC: crate::adapters_anthropic::AnthropicAdapter =
@@ -446,13 +450,16 @@ impl AdapterRegistry {
                 &PRISMA,
                 &DRIZZLE,
                 &PG,
+                &MYSQL2,
                 &ZOD,
                 &VALIBOT,
                 &JOI,
                 &YUP,
+                &AJV,
                 &CLASS_VALIDATOR,
                 &BETTER_AUTH,
                 &AUTH_JS,
+                &CLERK,
                 &OPENAI,
                 &ANTHROPIC,
             ],
@@ -702,12 +709,12 @@ mod tests {
     use std::path::PathBuf;
     use stryx_index::profile::{Detected, Evidence, EvidenceKind, FrameworkHint, ProjectProfile};
 
-    /// `builtin()` currently registers 19 adapters across six
+    /// `builtin()` currently registers 22 adapters across six
     /// dimensions. This pin updates as new built-in adapters land.
     #[test]
     fn builtin_registry_contains_expected_adapters() {
         let reg = AdapterRegistry::builtin();
-        assert_eq!(reg.all().len(), 19);
+        assert_eq!(reg.all().len(), 22);
         let ids: Vec<&str> = reg.all().iter().map(|a| a.id().0).collect();
         assert!(ids.contains(&"runtime/node"));
         assert!(ids.contains(&"runtime/bun"));
@@ -719,13 +726,16 @@ mod tests {
         assert!(ids.contains(&"data/prisma"));
         assert!(ids.contains(&"data/drizzle"));
         assert!(ids.contains(&"data/pg"));
+        assert!(ids.contains(&"data/mysql2"));
         assert!(ids.contains(&"validation/zod"));
         assert!(ids.contains(&"validation/valibot"));
         assert!(ids.contains(&"validation/joi"));
         assert!(ids.contains(&"validation/yup"));
+        assert!(ids.contains(&"validation/ajv"));
         assert!(ids.contains(&"validation/class-validator"));
         assert!(ids.contains(&"auth/better-auth"));
         assert!(ids.contains(&"auth/auth-js"));
+        assert!(ids.contains(&"auth/clerk"));
         assert!(ids.contains(&"llm/openai"));
         assert!(ids.contains(&"llm/anthropic"));
     }
