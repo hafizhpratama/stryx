@@ -5,8 +5,8 @@ This guide gets you from zero to your first scan in 5 minutes.
 ## Install
 
 At v0.3.0 there are three install paths that work today (from source,
-pre-built binary, npm), plus two distribution channels that follow as
-soon as the Homebrew tap and crates.io setup land.
+pre-built binary, npm). A crates.io publish (`cargo install stryx-cli`)
+follows once the crate is registered.
 
 ### From source — works today
 
@@ -53,8 +53,6 @@ to an existing package. The scoped name is the canonical install.
 
 ### Coming soon
 
-- **Homebrew** (`brew install stryx/tap/stryx`) — once the Homebrew
-  tap repo is set up.
 - **Cargo** (`cargo install stryx-cli`) — once published to
   crates.io.
 
@@ -292,20 +290,22 @@ Override via `stryx.toml` or `--include` / `--exclude` flags.
 
 ## Updating Stryx
 
-Until the npm and Homebrew channels ship, update from source or
-re-download a pre-built binary from the latest GitHub Release:
+Update from npm, from source, or by re-downloading a pre-built binary
+from the latest GitHub Release:
 
 ```bash
+# From npm (recommended)
+npm install -g @hafizhpratama/stryx@latest
+
 # From source
 cd stryx && git pull && cargo install --path crates/stryx_cli --force
 
 # From release artifact
-curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.14-x86_64-unknown-linux-gnu.tar.gz | tar xz
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.3.0-x86_64-unknown-linux-gnu.tar.gz | tar xz
 ```
 
-`npm update -g stryx`, `brew upgrade stryx`, and `cargo install
-stryx-cli --force` will work once the respective channels ship
-(Phase 3 roadmap).
+`cargo install stryx-cli --force` will also work once the crate
+ships to crates.io.
 
 We follow SemVer strictly. Patch and minor releases keep the public
 CLI / JSON-output contracts; review the

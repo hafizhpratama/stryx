@@ -48,9 +48,8 @@ Pre-built binaries — attached to the [v0.3.0 GitHub Release](https://github.co
 across five targets (Linux x64/arm64, macOS x64/arm64, Windows x64).
 
 npm — `npm install @hafizhpratama/stryx` or `npx @hafizhpratama/stryx
-scan`. Cargo (`cargo install stryx-cli`) and Homebrew
-(`brew install stryx/tap/stryx`) follow once the tap repo is set
-up.
+scan`. Cargo (`cargo install stryx-cli`) follows once the crate is
+published to crates.io.
 
 ## First scan
 
@@ -198,7 +197,6 @@ for what lands in v0.4.0 (broad adapter pass across all P0/P1 stacks).
 - 🚧 Broad adapter pass — sources / sinks / sanitisers / guards
   for every P0 and P1 stack in the catalog (v0.4.0)
 - 🚧 GitHub Action
-- 🚧 Homebrew formula
 - 📋 `flow/path-traversal` slice 2 (deferred — 0 OSS TPs in
   Phase 1 sample)
 - 📋 Score (0–100, severity-capped), surface controls, `--diff <base>`
