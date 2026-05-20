@@ -394,12 +394,24 @@ pub struct AdapterRegistry {
 
 impl AdapterRegistry {
     /// Construct the built-in registry. Adapters are registered here
-    /// as they ship — currently `framework/nestjs`.
+    /// as they ship. Currently:
+    ///
+    /// - `framework/express` — Express HTTP framework
+    /// - `framework/hono` — Hono HTTP framework (Bun / Edge runtimes)
+    /// - `framework/nestjs` — NestJS decorator-based framework
+    /// - `framework/next-backend` — Next.js backend surfaces (App
+    ///   Router route handlers, Pages Router API routes,
+    ///   server actions, middleware)
     pub fn builtin() -> Self {
+        static EXPRESS: crate::adapters_express::ExpressAdapter =
+            crate::adapters_express::ExpressAdapter;
+        static HONO: crate::adapters_hono::HonoAdapter = crate::adapters_hono::HonoAdapter;
         static NESTJS: crate::adapters_nestjs::NestJsAdapter =
             crate::adapters_nestjs::NestJsAdapter;
+        static NEXT_BACKEND: crate::adapters_next::NextBackendAdapter =
+            crate::adapters_next::NextBackendAdapter;
         Self {
-            adapters: vec![&NESTJS],
+            adapters: vec![&EXPRESS, &HONO, &NESTJS, &NEXT_BACKEND],
         }
     }
 
@@ -646,13 +658,19 @@ mod tests {
     use std::path::PathBuf;
     use stryx_index::profile::{Detected, Evidence, EvidenceKind, FrameworkHint, ProjectProfile};
 
-    /// `builtin()` currently registers exactly the `framework/nestjs`
-    /// adapter. This pin updates as new built-in adapters land.
+    /// `builtin()` currently registers four framework adapters
+    /// (`express`, `hono`, `nestjs`, `next-backend`). This pin
+    /// updates as new built-in adapters land in subsequent slices
+    /// (runtime/data/validation/auth/llm).
     #[test]
-    fn builtin_registry_contains_nestjs_adapter() {
+    fn builtin_registry_contains_expected_adapters() {
         let reg = AdapterRegistry::builtin();
-        assert_eq!(reg.all().len(), 1);
-        assert_eq!(reg.all()[0].id(), AdapterId("framework/nestjs"));
+        assert_eq!(reg.all().len(), 4);
+        let ids: Vec<&str> = reg.all().iter().map(|a| a.id().0).collect();
+        assert!(ids.contains(&"framework/express"));
+        assert!(ids.contains(&"framework/hono"));
+        assert!(ids.contains(&"framework/nestjs"));
+        assert!(ids.contains(&"framework/next-backend"));
     }
 
     #[test]
