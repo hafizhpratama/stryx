@@ -16,13 +16,16 @@
 
 pub mod adapters;
 pub mod adapters_better_auth;
+pub mod adapters_bun;
 pub mod adapters_class_validator;
 pub mod adapters_drizzle;
 pub mod adapters_express;
 pub mod adapters_hono;
 pub mod adapters_nestjs;
 pub mod adapters_next;
+pub mod adapters_node;
 pub mod adapters_openai;
+pub mod adapters_pg;
 pub mod adapters_prisma;
 pub mod adapters_zod;
 pub mod flows;

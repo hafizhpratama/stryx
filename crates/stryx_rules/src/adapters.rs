@@ -396,12 +396,15 @@ impl AdapterRegistry {
     /// Construct the built-in registry. Adapters are registered here
     /// as they ship. Currently:
     ///
+    /// - Runtime: `node`, `bun`
     /// - Framework: `express`, `hono`, `nestjs`, `next-backend`
-    /// - Data layer: `prisma`, `drizzle`
+    /// - Data layer: `prisma`, `drizzle`, `pg`
     /// - Validation: `zod`, `class-validator`
     /// - Auth: `better-auth`
     /// - LLM SDK: `openai`
     pub fn builtin() -> Self {
+        static NODE: crate::adapters_node::NodeAdapter = crate::adapters_node::NodeAdapter;
+        static BUN: crate::adapters_bun::BunAdapter = crate::adapters_bun::BunAdapter;
         static EXPRESS: crate::adapters_express::ExpressAdapter =
             crate::adapters_express::ExpressAdapter;
         static HONO: crate::adapters_hono::HonoAdapter = crate::adapters_hono::HonoAdapter;
@@ -413,6 +416,7 @@ impl AdapterRegistry {
             crate::adapters_prisma::PrismaAdapter;
         static DRIZZLE: crate::adapters_drizzle::DrizzleAdapter =
             crate::adapters_drizzle::DrizzleAdapter;
+        static PG: crate::adapters_pg::PgAdapter = crate::adapters_pg::PgAdapter;
         static ZOD: crate::adapters_zod::ZodAdapter = crate::adapters_zod::ZodAdapter;
         static CLASS_VALIDATOR: crate::adapters_class_validator::ClassValidatorAdapter =
             crate::adapters_class_validator::ClassValidatorAdapter;
@@ -422,12 +426,15 @@ impl AdapterRegistry {
             crate::adapters_openai::OpenAiAdapter;
         Self {
             adapters: vec![
+                &NODE,
+                &BUN,
                 &EXPRESS,
                 &HONO,
                 &NESTJS,
                 &NEXT_BACKEND,
                 &PRISMA,
                 &DRIZZLE,
+                &PG,
                 &ZOD,
                 &CLASS_VALIDATOR,
                 &BETTER_AUTH,
@@ -679,19 +686,22 @@ mod tests {
     use std::path::PathBuf;
     use stryx_index::profile::{Detected, Evidence, EvidenceKind, FrameworkHint, ProjectProfile};
 
-    /// `builtin()` currently registers ten adapters across five
+    /// `builtin()` currently registers 13 adapters across six
     /// dimensions. This pin updates as new built-in adapters land.
     #[test]
     fn builtin_registry_contains_expected_adapters() {
         let reg = AdapterRegistry::builtin();
-        assert_eq!(reg.all().len(), 10);
+        assert_eq!(reg.all().len(), 13);
         let ids: Vec<&str> = reg.all().iter().map(|a| a.id().0).collect();
+        assert!(ids.contains(&"runtime/node"));
+        assert!(ids.contains(&"runtime/bun"));
         assert!(ids.contains(&"framework/express"));
         assert!(ids.contains(&"framework/hono"));
         assert!(ids.contains(&"framework/nestjs"));
         assert!(ids.contains(&"framework/next-backend"));
         assert!(ids.contains(&"data/prisma"));
         assert!(ids.contains(&"data/drizzle"));
+        assert!(ids.contains(&"data/pg"));
         assert!(ids.contains(&"validation/zod"));
         assert!(ids.contains(&"validation/class-validator"));
         assert!(ids.contains(&"auth/better-auth"));
