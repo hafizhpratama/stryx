@@ -38,6 +38,15 @@ use stryx_core::{Finding, Severity, Span};
 use stryx_index::FileSummary;
 use stryx_taint::{ExportedFunctionSummary, ParamFlow};
 
+use crate::adapters::EnabledAdapters;
+// Reuse the canonical NestJS-style decorated-param pre-taint helper from
+// the flagship `flow/unvalidated-body-to-db` rule. The helper resolves
+// the active set of body-source decorators from `EnabledAdapters` (e.g.
+// `@Body() / @Query() / @Param() / @Headers() / @Req()` with the NestJS
+// adapter on) and skips params whose TS type annotation looks like a
+// validated DTO. Keeping a single implementation avoids the two rules
+// drifting on what counts as a body-decorated param.
+use crate::flows::unvalidated_body_to_db::decorated_param_names_for_adapters;
 use crate::steps::sinks::{ExecSink, is_exec_sink_call};
 use crate::steps::sources::BodySource;
 use crate::steps::{StepCtx, StepKind};
@@ -82,7 +91,12 @@ impl Rule for CommandInjectionViaExec {
     }
 
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
-        let mut visitor = CommandInjectionVisitor::new(ctx.file.path.clone(), ctx.index, true);
+        let mut visitor = CommandInjectionVisitor::new_with_adapters(
+            ctx.file.path.clone(),
+            ctx.index,
+            true,
+            ctx.adapters,
+        );
         for stmt in &ctx.file.program.body {
             visitor.visit_statement(stmt);
         }
@@ -103,6 +117,14 @@ struct CommandInjectionVisitor<'idx> {
     /// simulation (only the pre-tainted param contributes; ambient
     /// `req.body` reads inside helpers must not spawn spurious sinks).
     body_source_active: bool,
+    /// Active stack adapters resolved from the project's `ProjectProfile`.
+    /// `None` when the rule is exercised outside the production scan loop
+    /// (per-param simulation, unit-test sites that build the visitor
+    /// directly). Consumed by the decorated-param pre-taint pass in
+    /// `visit_function` to recognise every `DecoratedParam` source an
+    /// active adapter contributes (e.g. NestJS's `@Body() / @Query() /
+    /// @Param() / @Headers() / @Req()`).
+    adapters: Option<&'idx EnabledAdapters>,
     findings: Vec<Finding>,
 }
 
@@ -112,11 +134,21 @@ impl<'idx> CommandInjectionVisitor<'idx> {
         index: Option<&'idx stryx_index::ProjectIndex>,
         body_source_active: bool,
     ) -> Self {
+        Self::new_with_adapters(file, index, body_source_active, None)
+    }
+
+    fn new_with_adapters(
+        file: PathBuf,
+        index: Option<&'idx stryx_index::ProjectIndex>,
+        body_source_active: bool,
+        adapters: Option<&'idx EnabledAdapters>,
+    ) -> Self {
         Self {
             file,
             scopes: vec![HashMap::new()],
             index,
             body_source_active,
+            adapters,
             findings: Vec::new(),
         }
     }
@@ -331,6 +363,23 @@ impl<'idx> CommandInjectionVisitor<'idx> {
 impl<'a, 'idx> Visit<'a> for CommandInjectionVisitor<'idx> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: stryx_ast::ScopeFlags) {
         self.enter_fn();
+        // NestJS and similar frameworks declare body sources via parameter
+        // decorators (`@Body() dto: CreateUserDto`). Pre-taint any param
+        // marked with one — the framework will inject body data there.
+        // Which decorators count comes from the active
+        // [`EnabledAdapters`]; with the NestJS adapter on that's
+        // `@Body() / @Query() / @Param() / @Headers() / @Req()`. Without
+        // adapters (the per-param simulation path, unit-test sites
+        // constructing the visitor directly) only `@Body()` is
+        // recognised — preserves byte-identical behaviour on the
+        // existing fixtures. Gated on `body_source_active` so the
+        // simulation pass — which pre-taints exactly one named param —
+        // doesn't double-source via decorators.
+        if self.body_source_active {
+            for pname in decorated_param_names_for_adapters(&func.params, self.adapters) {
+                self.taint(pname);
+            }
+        }
         if let Some(body) = &func.body {
             for stmt in &body.statements {
                 self.visit_statement(stmt);

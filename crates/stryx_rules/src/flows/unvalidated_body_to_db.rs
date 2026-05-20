@@ -2503,7 +2503,7 @@ fn match_includes_negation<'a>(
 /// all pre-taint via the same path — that's the v0.4.0 substrate
 /// payoff: a single rule consumes broader recognition without
 /// hardcoding the decorator list.
-fn decorated_param_names_for_adapters(
+pub(crate) fn decorated_param_names_for_adapters(
     params: &stryx_ast::ast::FormalParameters<'_>,
     adapters: Option<&crate::adapters::EnabledAdapters>,
 ) -> Vec<String> {

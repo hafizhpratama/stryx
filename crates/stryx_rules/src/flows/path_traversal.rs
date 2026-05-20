@@ -21,6 +21,8 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
+use crate::adapters::EnabledAdapters;
+use crate::flows::unvalidated_body_to_db::decorated_param_names_for_adapters;
 use crate::steps::sinks::{FsSink, is_fs_sink_call};
 use crate::steps::sources::BodySource;
 use crate::steps::{StepCtx, StepKind};
@@ -54,11 +56,8 @@ impl Rule for PathTraversal {
     }
 
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
-        let mut visitor = PathTraversalVisitor {
-            file: ctx.file.path.clone(),
-            scopes: vec![HashMap::new()],
-            findings: Vec::new(),
-        };
+        let mut visitor =
+            PathTraversalVisitor::new_with_adapters(ctx.file.path.clone(), ctx.index, ctx.adapters);
         for stmt in &ctx.file.program.body {
             visitor.visit_statement(stmt);
         }
@@ -66,17 +65,52 @@ impl Rule for PathTraversal {
     }
 }
 
-struct PathTraversalVisitor {
+struct PathTraversalVisitor<'idx> {
     file: std::path::PathBuf,
     scopes: Vec<HashMap<String, ()>>,
     findings: Vec<Finding>,
+    /// Read-only project index. Slice 1 of this rule is single-file
+    /// and the step recognisers it consults (`BodySource`, `FsSink`)
+    /// do not read `index` today — but we still thread it through so
+    /// the constructor signature matches the canonical
+    /// `new_with_adapters(path, index, adapters)` shape shipped in
+    /// commit `e422557` for the flagship rule. Future cross-file
+    /// extensions can drop in here without resurrecting a wider edit.
+    index: Option<&'idx stryx_index::ProjectIndex>,
+    /// Active stack adapters resolved from the project's
+    /// `ProjectProfile`. `None` outside the production scan loop.
+    /// Consumed by the body-decorated-param pre-taint pass in
+    /// `visit_function` to extend `@Body()`-only recognition to every
+    /// `DecoratedParam` source pattern an active adapter contributes
+    /// (`@Query()` / `@Param()` / `@Headers()` / `@Req()` for the
+    /// NestJS adapter, future framework decorators too).
+    adapters: Option<&'idx EnabledAdapters>,
 }
 
-impl PathTraversalVisitor {
-    fn step_ctx(&self) -> StepCtx<'_, 'static> {
+impl<'idx> PathTraversalVisitor<'idx> {
+    #[allow(dead_code)]
+    fn new(file: std::path::PathBuf, index: Option<&'idx stryx_index::ProjectIndex>) -> Self {
+        Self::new_with_adapters(file, index, None)
+    }
+
+    fn new_with_adapters(
+        file: std::path::PathBuf,
+        index: Option<&'idx stryx_index::ProjectIndex>,
+        adapters: Option<&'idx EnabledAdapters>,
+    ) -> Self {
+        Self {
+            file,
+            scopes: vec![HashMap::new()],
+            findings: Vec::new(),
+            index,
+            adapters,
+        }
+    }
+
+    fn step_ctx(&self) -> StepCtx<'_, 'idx> {
         StepCtx {
             file: &self.file,
-            index: None,
+            index: self.index,
             body_source_active: true,
         }
     }
@@ -219,9 +253,18 @@ impl PathTraversalVisitor {
     }
 }
 
-impl<'a> Visit<'a> for PathTraversalVisitor {
+impl<'a, 'idx> Visit<'a> for PathTraversalVisitor<'idx> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: stryx_ast::ScopeFlags) {
         self.enter_fn();
+        // NestJS and similar frameworks declare body sources via parameter
+        // decorators (`@Body() dto: CreateUserDto`). Pre-taint any param
+        // marked with a decorator the active adapter set recognises — the
+        // framework will inject body data there. Without any adapter
+        // (legacy test sites that build a visitor directly), only `@Body()`
+        // is recognised, preserving prior behaviour for existing fixtures.
+        for pname in decorated_param_names_for_adapters(&func.params, self.adapters) {
+            self.taint(pname);
+        }
         if let Some(body) = &func.body {
             for stmt in &body.statements {
                 self.visit_statement(stmt);
@@ -291,3 +334,11 @@ fn collect_binding_names(pat: &BindingPattern<'_>, out: &mut Vec<String>) {
         BindingPattern::AssignmentPattern(a) => collect_binding_names(&a.left, out),
     }
 }
+
+// Decorator pre-taint helpers are shared from the flagship rule
+// (`flows/unvalidated_body_to_db::decorated_param_names_for_adapters`)
+// via `pub(crate)`. Single source of truth for the DTO-suffix heuristic,
+// active-decorator union, and decorator-shape matching — so any future
+// substrate tweak (new `AstMatcher::DecoratedParam` consumers, looser
+// validated-DTO rules) lands in one place and every body-source flow
+// rule picks it up.
