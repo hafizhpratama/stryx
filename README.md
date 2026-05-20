@@ -128,7 +128,7 @@ See [`docs/rules/`](docs/rules/) for the full contracts.
 ```
 JavaScript / TypeScript source
     ↓
-Project profile (planned): runtime/framework/data/auth/LLM evidence
+Project profile: runtime / framework / data / auth / LLM evidence
     ↓
 Layer 1: oxc parser → arena AST (per file, parallel)
     ↓

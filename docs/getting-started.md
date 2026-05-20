@@ -4,9 +4,9 @@ This guide gets you from zero to your first scan in 5 minutes.
 
 ## Install
 
-At v0.2.14 there are two install paths that work today, and three
-distribution channels that follow as soon as the npm namespace and
-Homebrew tap repo are set up.
+At v0.3.0 there are three install paths that work today (from source,
+pre-built binary, npm), plus two distribution channels that follow as
+soon as the Homebrew tap and crates.io setup land.
 
 ### From source — works today
 
@@ -21,15 +21,15 @@ Needs the Rust toolchain (1.93+). The `stryx` binary lands in
 
 ### Pre-built binaries — works today
 
-The [v0.2.14 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.14)
+The [v0.3.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.3.0)
 ships archives across five targets (Linux x64/arm64, macOS x64/arm64,
 Windows x64):
 
 ```bash
 # Linux x86_64 example — substitute target for your platform.
-curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.2.14-x86_64-unknown-linux-gnu.tar.gz \
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.3.0-x86_64-unknown-linux-gnu.tar.gz \
   | tar xz
-./stryx-0.2.14-x86_64-unknown-linux-gnu/stryx scan
+./stryx-0.3.0-x86_64-unknown-linux-gnu/stryx scan
 ```
 
 Targets available:

@@ -3,7 +3,7 @@
 The rule catalogue and the [ADR 0008](../../docs/decisions/0008-taint-step-trait-substrate.md)
 step substrate. Every detection lives here.
 
-## Rule catalogue (v0.2.15)
+## Rule catalogue (v0.3.0)
 
 | Rule ID | Scope | Severity | Doc |
 |---|---|---|---|

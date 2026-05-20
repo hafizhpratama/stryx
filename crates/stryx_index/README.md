@@ -14,8 +14,13 @@ and [ADR 0013](../../docs/decisions/0013-stack-aware-project-profiles.md).
 
 - **`ProjectIndex`** — the top-level concurrent map (`DashMap`).
   Cheaply cloneable; rayon workers share a single instance.
-- **`ProjectProfile`** — planned stack-detection record that will sit
-  beside the index and explain which adapters are enabled.
+- **`ProjectProfile`** — cheap-pass stack-detection record (shipped
+  in v0.3.0). Built once at scan start by reading `package.json`,
+  lockfiles, and a small set of config files; surfaced via
+  `ScanResult.profile` and the JSON envelope so reporters can show
+  the detected runtime / framework / data layer / validator / auth /
+  LLM SDK / deployment. Adapter consumption of the profile lands
+  in v0.4.0.
 - **`FileSummary`** — per-file extraction output: imports, top-level
   exports, locals, class declarations, function summaries.
 - **`ImportRef`** — resolved import (module specifier + symbol +

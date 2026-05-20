@@ -138,10 +138,14 @@ hints — enough to answer cross-file questions without keeping every
 AST resident. See [`architecture/semantic-index.md`](architecture/semantic-index.md).
 
 ### ProjectProfile
-The planned stack-detection model from
-[ADR 0013](decisions/0013-stack-aware-project-profiles.md). It records
-detected language, runtime, framework, data layer, validation, auth, LLM
-SDK, and deployment evidence so Stryx can enable the right adapters.
+The stack-detection model from
+[ADR 0013](decisions/0013-stack-aware-project-profiles.md), shipped
+in v0.3.0. It records detected language, runtime, framework, data
+layer, validation, auth, LLM SDK, and deployment evidence so Stryx
+can enable the right adapters. Built by the cheap-pass detector in
+`stryx_index::profile` from `package.json`, lockfiles, and a small
+set of config files — no source parsing required. Adapter
+consumption of the profile lands in v0.4.0.
 
 ### StackAdapter
 A planned adapter that contributes stack-specific sources, sinks,

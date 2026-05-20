@@ -40,7 +40,7 @@ boundaries.
 ```text
 JavaScript / TypeScript source
   ↓
-Project profile (planned): runtime/framework/data/auth/LLM evidence
+Project profile: runtime / framework / data / auth / LLM evidence
   ↓
 Layer 1: oxc parser
   ↓
@@ -94,7 +94,7 @@ Key docs:
 ## Workspace map
 
 - `crates/stryx_ast` — parser boundary and AST visitor exports
-- `crates/stryx_index` — project semantic index and planned profile layer
+- `crates/stryx_index` — project semantic index and stack profile layer
 - `crates/stryx_taint` — taint labels, summaries, and flow primitives
 - `crates/stryx_rules` — shipped rules, steps, and future adapters
 - `crates/stryx_cli` — CLI scan orchestration
