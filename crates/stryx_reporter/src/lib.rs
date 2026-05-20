@@ -169,7 +169,35 @@ fn write_human<W: Write>(
         write_footer(out, options)?;
         return Ok(());
     }
-    let _ = options.verbose;
+    if options.verbose {
+        write_human_findings_full(out, findings, &source_lookup)?;
+    } else {
+        write_human_findings_grouped(out, findings, &source_lookup)?;
+    }
+    let summary = ReportSummary::from_findings(findings);
+    writeln!(
+        out,
+        "\n{} finding(s): {} critical, {} high, {} medium, {} low, {} info (score: {}/100)",
+        summary.total,
+        summary.critical,
+        summary.high,
+        summary.medium,
+        summary.low,
+        summary.info,
+        summary.score,
+    )?;
+    write_footer(out, options)?;
+    Ok(())
+}
+
+/// Verbose output: one block per finding, exactly the pre-grouping
+/// shape. Preserved for users piping into grep / regex tools that
+/// expect a stable per-finding line shape.
+fn write_human_findings_full<W: Write>(
+    out: &mut W,
+    findings: &[Finding],
+    source_lookup: &impl Fn(&std::path::Path) -> Option<String>,
+) -> io::Result<()> {
     for f in findings {
         let (line, col) = source_lookup(&f.span.file)
             .as_deref()
@@ -189,19 +217,82 @@ fn write_human<W: Write>(
             writeln!(out, "         help: {}", help)?;
         }
     }
-    let summary = ReportSummary::from_findings(findings);
-    writeln!(
-        out,
-        "\n{} finding(s): {} critical, {} high, {} medium, {} low, {} info (score: {}/100)",
-        summary.total,
-        summary.critical,
-        summary.high,
-        summary.medium,
-        summary.low,
-        summary.info,
-        summary.score,
-    )?;
-    write_footer(out, options)?;
+    Ok(())
+}
+
+/// Default output: groups findings by (severity, rule_id) and shows
+/// at most `MAX_REPRESENTATIVES` locations per group with a "+N more"
+/// footer when truncated. Same rule-id × same severity is almost
+/// always the same fix, so dumping every line of the same group
+/// drowns out the higher-priority groups below it. `--verbose`
+/// recovers the full list.
+fn write_human_findings_grouped<W: Write>(
+    out: &mut W,
+    findings: &[Finding],
+    source_lookup: &impl Fn(&std::path::Path) -> Option<String>,
+) -> io::Result<()> {
+    const MAX_REPRESENTATIVES: usize = 3;
+
+    // (severity, rule_id) → ordered list of finding indices. BTreeMap
+    // gives deterministic iteration; severity is sorted descending
+    // because we want Critical first, but Severity's natural Ord is
+    // Info → Critical (Info = 0, Critical = 4 in stryx_core). Reverse
+    // by storing as `std::cmp::Reverse<Severity>` keys.
+    use std::cmp::Reverse;
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<(Reverse<Severity>, &str), Vec<&Finding>> = BTreeMap::new();
+    for f in findings {
+        groups
+            .entry((Reverse(f.severity), f.rule_id.as_ref()))
+            .or_default()
+            .push(f);
+    }
+    // Within a group, sort by file path then byte offset so the
+    // representative locations are stable across runs.
+    for items in groups.values_mut() {
+        items.sort_by(|a, b| {
+            a.span
+                .file
+                .cmp(&b.span.file)
+                .then(a.span.start.cmp(&b.span.start))
+        });
+    }
+
+    for ((Reverse(sev), rule), items) in &groups {
+        let count = items.len();
+        let header = if count == 1 {
+            format!("{sev:<8} {rule}  (1 finding)")
+        } else {
+            format!("{sev:<8} {rule}  ({count} findings)")
+        };
+        writeln!(out, "{header}")?;
+        for f in items.iter().take(MAX_REPRESENTATIVES) {
+            let (line, col) = source_lookup(&f.span.file)
+                .as_deref()
+                .map(|src| line_col(src, f.span.start as usize))
+                .unwrap_or((1, 1));
+            writeln!(
+                out,
+                "         {file}:{line}:{col}  {msg}",
+                file = f.span.file.display(),
+                line = line,
+                col = col,
+                msg = f.message,
+            )?;
+        }
+        if count > MAX_REPRESENTATIVES {
+            writeln!(
+                out,
+                "         + {} more (run with --verbose for the full list)",
+                count - MAX_REPRESENTATIVES
+            )?;
+        }
+        // Help text is uniform per rule id, so print it once at the
+        // group level rather than after every representative line.
+        if let Some(help) = items.first().and_then(|f| f.help.as_deref()) {
+            writeln!(out, "         help: {help}")?;
+        }
+    }
     Ok(())
 }
 
@@ -210,7 +301,7 @@ fn write_footer<W: Write>(out: &mut W, options: ReportOptions) -> io::Result<()>
         return Ok(());
     }
     let files = if options.file_count == 1 {
-        "file".to_string()
+        "1 file".to_string()
     } else {
         format!("{} files", options.file_count)
     };
@@ -442,5 +533,106 @@ mod tests {
         // min(0, 99) = 0. Must not underflow.
         let s = ReportSummary::from_findings(&repeat(Severity::Low, 200));
         assert_eq!(s.score, 0);
+    }
+
+    fn mk_at(rule: &str, severity: Severity, file: &str, start: u32, msg: &str) -> Finding {
+        Finding {
+            rule_id: rule.to_string(),
+            severity,
+            message: msg.to_string(),
+            span: Span::new(std::path::PathBuf::from(file), start, start + 1),
+            source: stryx_core::FindingSource::Ast,
+            confidence: stryx_core::Confidence::CERTAIN,
+            help: Some("fix it".to_string()),
+        }
+    }
+
+    fn render(findings: &[Finding], verbose: bool) -> String {
+        let mut buf = Vec::new();
+        write_human(
+            &mut buf,
+            findings,
+            |_| None,
+            None,
+            ReportOptions {
+                verbose,
+                ..Default::default()
+            },
+        )
+        .expect("render");
+        String::from_utf8(buf).expect("utf8")
+    }
+
+    #[test]
+    fn grouped_output_truncates_to_three_representatives() {
+        let findings: Vec<Finding> = (0..5)
+            .map(|i| {
+                mk_at(
+                    "flow/x",
+                    Severity::High,
+                    &format!("file{i}.ts"),
+                    i * 10,
+                    "hit",
+                )
+            })
+            .collect();
+        let out = render(&findings, false);
+        assert!(out.contains("flow/x  (5 findings)"), "{out}");
+        assert!(out.contains("file0.ts"), "{out}");
+        assert!(out.contains("file1.ts"), "{out}");
+        assert!(out.contains("file2.ts"), "{out}");
+        // file3 and file4 are the truncated tail and must not appear
+        // as representative locations.
+        assert!(!out.contains("file3.ts"), "{out}");
+        assert!(!out.contains("file4.ts"), "{out}");
+        assert!(out.contains("+ 2 more"), "{out}");
+        // Help is shown once per group, not once per finding.
+        assert_eq!(out.matches("help: fix it").count(), 1, "{out}");
+    }
+
+    #[test]
+    fn grouped_output_sorts_severity_descending_then_rule_id() {
+        // Use distinct rule ids so we can match unambiguous header
+        // prefixes — searching for bare "low" would hit the "low" in
+        // "flow/..." in earlier headers.
+        let findings = vec![
+            mk_at("rule/b", Severity::Low, "a.ts", 0, "x"),
+            mk_at("rule/a", Severity::Critical, "a.ts", 0, "x"),
+            mk_at("rule/a", Severity::High, "a.ts", 0, "x"),
+        ];
+        let out = render(&findings, false);
+        // Severity's Display impl bypasses width formatting, so the
+        // headers are unpadded: "critical rule/a", "high rule/a",
+        // "low rule/b".
+        let crit = out.find("critical rule/a").expect("critical header");
+        let high = out.find("high rule/a").expect("high header");
+        let low = out.find("low rule/b").expect("low header");
+        assert!(crit < high && high < low, "{out}");
+    }
+
+    #[test]
+    fn verbose_output_prints_each_finding_individually() {
+        let findings: Vec<Finding> = (0..5)
+            .map(|i| {
+                mk_at(
+                    "flow/x",
+                    Severity::High,
+                    &format!("file{i}.ts"),
+                    i * 10,
+                    "hit",
+                )
+            })
+            .collect();
+        let out = render(&findings, true);
+        // All five files must appear in verbose mode.
+        for i in 0..5 {
+            assert!(
+                out.contains(&format!("file{i}.ts")),
+                "missing file{i}: {out}"
+            );
+        }
+        assert!(!out.contains("+ "), "verbose must not show truncation");
+        // In verbose mode help repeats per finding (5 times).
+        assert_eq!(out.matches("help: fix it").count(), 5, "{out}");
     }
 }
