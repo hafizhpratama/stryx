@@ -101,7 +101,8 @@ impl Rule for UnvalidatedBodyToDb {
     }
 
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
-        let mut visitor = FlowVisitor::new(ctx.file.path.clone(), ctx.index);
+        let mut visitor =
+            FlowVisitor::new_with_adapters(ctx.file.path.clone(), ctx.index, ctx.adapters);
         visitor.collect_allow_lists(&ctx.file.program);
         // Pull pre-validated handler names from the file's summary,
         // built during the extract pass. Inside these handlers, body
@@ -198,10 +199,28 @@ struct FlowVisitor<'idx> {
     /// using `validatePartialFeatureFlags(body)` returning
     /// `{success, error}` discriminated union.
     validator_inits: std::collections::HashMap<String, String>,
+    /// Active stack adapters resolved from the project's
+    /// `ProjectProfile`. `None` when the rule is being exercised
+    /// outside the production scan loop (e.g. unit-test sites that
+    /// build a `FlowVisitor` directly without an `EnabledAdapters`).
+    /// Consumed by the body-decorated-param pre-taint pass to
+    /// extend `@Body()`-only recognition to every `DecoratedParam`
+    /// source pattern an active adapter contributes
+    /// (`@Query()` / `@Param()` / `@Headers()` / `@Req()` for the
+    /// NestJS adapter, future framework decorators too).
+    adapters: Option<&'idx crate::adapters::EnabledAdapters>,
 }
 
 impl<'idx> FlowVisitor<'idx> {
     fn new(file: PathBuf, index: Option<&'idx stryx_index::ProjectIndex>) -> Self {
+        Self::new_with_adapters(file, index, None)
+    }
+
+    fn new_with_adapters(
+        file: PathBuf,
+        index: Option<&'idx stryx_index::ProjectIndex>,
+        adapters: Option<&'idx crate::adapters::EnabledAdapters>,
+    ) -> Self {
         Self {
             file,
             findings: Vec::new(),
@@ -216,6 +235,7 @@ impl<'idx> FlowVisitor<'idx> {
             param_shape_seen: Cell::bot(),
             return_shape_seen: Cell::bot(),
             validator_inits: std::collections::HashMap::new(),
+            adapters,
         }
     }
 
@@ -1872,8 +1892,17 @@ impl<'a, 'idx> Visit<'a> for FlowVisitor<'idx> {
         // decorators (`@Body() dto: CreateUserDto`). Pre-taint any param
         // marked with one — the framework will inject body data there.
         // Skip when the enclosing wrapper has already validated the body.
+        //
+        // v0.4.0: which decorators count comes from the active
+        // [`crate::adapters::EnabledAdapters`] — every `DecoratedParam`
+        // matcher contributed by an enabled adapter pre-taints. With
+        // the NestJS adapter on, that's `@Body() / @Query() / @Param()
+        // / @Headers() / @Req()`. Without any adapter (test paths
+        // building a `FlowVisitor` directly), only `@Body()` is
+        // recognised — preserves byte-identical behaviour for the
+        // 197 existing fixtures.
         if self.body_source_active() {
-            for pname in body_decorated_param_names(&func.params) {
+            for pname in decorated_param_names_for_adapters(&func.params, self.adapters) {
                 self.taint(pname);
             }
         }
@@ -2465,10 +2494,27 @@ fn match_includes_negation<'a>(
 /// against the DTO before the body reaches user code, and don't pre-
 /// taint. The framework provides validation we can't see — the
 /// type-name convention is the cheapest signal we can read locally.
-fn body_decorated_param_names(params: &stryx_ast::ast::FormalParameters<'_>) -> Vec<String> {
+///
+/// The set of recognised decorators grows by what active adapters
+/// contribute. Without any adapter (legacy code path used by the
+/// fallback `body_decorated_param_names` free function below), only
+/// `@Body()` is recognised. With the NestJS adapter active,
+/// `@Body()`, `@Query()`, `@Param()`, `@Headers()`, and `@Req()`
+/// all pre-taint via the same path — that's the v0.4.0 substrate
+/// payoff: a single rule consumes broader recognition without
+/// hardcoding the decorator list.
+fn decorated_param_names_for_adapters(
+    params: &stryx_ast::ast::FormalParameters<'_>,
+    adapters: Option<&crate::adapters::EnabledAdapters>,
+) -> Vec<String> {
+    let decorators = active_taint_decorators(adapters);
     let mut out = Vec::new();
     for param in &params.items {
-        if !param.decorators.iter().any(is_body_decorator) {
+        if !param
+            .decorators
+            .iter()
+            .any(|d| is_taint_decorator(d, &decorators))
+        {
             continue;
         }
         if looks_like_validated_dto(param) {
@@ -2479,6 +2525,53 @@ fn body_decorated_param_names(params: &stryx_ast::ast::FormalParameters<'_>) -> 
         }
     }
     out
+}
+
+/// Union of decorator names that should pre-taint their parameter.
+/// Built once per `decorated_param_names_for_adapters` call by
+/// walking every active adapter's source patterns and collecting
+/// the `decorator` field of any `AstMatcher::DecoratedParam`. The
+/// default — when `adapters` is `None` or no adapter contributes a
+/// `DecoratedParam` matcher — falls back to `["Body"]` for
+/// backwards compatibility with the legacy hardcoded check.
+fn active_taint_decorators(
+    adapters: Option<&crate::adapters::EnabledAdapters>,
+) -> Vec<&'static str> {
+    let mut names: Vec<&'static str> = Vec::new();
+    if let Some(adapters) = adapters {
+        for pattern in &adapters.sources {
+            for matcher in pattern.matchers {
+                if let crate::adapters::AstMatcher::DecoratedParam { decorator } = matcher
+                    && !names.contains(decorator)
+                {
+                    names.push(decorator);
+                }
+            }
+        }
+    }
+    if names.is_empty() {
+        names.push("Body");
+    }
+    names
+}
+
+/// True when `decorator` is one of the active taint-pre-taint
+/// decorators. Strips the optional call-expression wrapper so both
+/// `@Body` and `@Body()` shapes match.
+fn is_taint_decorator(
+    decorator: &stryx_ast::ast::Decorator<'_>,
+    active_names: &[&'static str],
+) -> bool {
+    let target = match &decorator.expression {
+        // `@Decorator()` — call expression with the decorator name as callee.
+        Expression::CallExpression(call) => &call.callee,
+        // `@Decorator` — bare identifier.
+        other => other,
+    };
+    matches!(
+        target,
+        Expression::Identifier(id) if active_names.iter().any(|n| *n == id.name.as_str())
+    )
 }
 
 fn looks_like_validated_dto(param: &FormalParameter<'_>) -> bool {
@@ -2498,19 +2591,6 @@ fn looks_like_validated_dto(param: &FormalParameter<'_>) -> bool {
         || name.ends_with("InputDto")
         || name.ends_with("Schema")
         || name.ends_with("Request")
-}
-
-fn is_body_decorator(decorator: &stryx_ast::ast::Decorator<'_>) -> bool {
-    let target = match &decorator.expression {
-        // `@Body()` — call expression with `Body` as callee.
-        Expression::CallExpression(call) => &call.callee,
-        // `@Body` — bare identifier.
-        other => other,
-    };
-    matches!(
-        target,
-        Expression::Identifier(id) if id.name.as_str() == "Body"
-    )
 }
 
 fn callee_chain(expr: &Expression<'_>) -> Option<String> {

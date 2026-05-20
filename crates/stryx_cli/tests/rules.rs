@@ -123,6 +123,103 @@ fn scan_dir(dir: &Path) -> Vec<Finding> {
     stryx_cli::filter_suppressed(findings, &sources)
 }
 
+/// Variant of `scan_dir` that activates the production
+/// `AdapterRegistry::builtin()` against a synthesised
+/// [`stryx_index::profile::ProjectProfile`]. Use for fixtures that
+/// exercise adapter-driven recognition (e.g. NestJS decorators
+/// beyond `@Body()`, which depend on the `framework/nestjs`
+/// adapter contributing `DecoratedParam` source patterns).
+///
+/// The profile is owned by this function, so the resulting
+/// `EnabledAdapters` borrows from it for the entire scan via a
+/// stack-allocated reference. The threading model mirrors
+/// production [`stryx_cli::scan`] exactly.
+fn scan_dir_with_profile(
+    dir: &Path,
+    profile: stryx_index::profile::ProjectProfile,
+) -> Vec<Finding> {
+    use stryx_rules::adapters::AdapterRegistry;
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read fixture dir") {
+        let entry = entry.expect("dir entry");
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) == Some("ts")
+            || p.extension().and_then(|e| e.to_str()) == Some("tsx")
+        {
+            files.push(p);
+        }
+    }
+
+    let registry = builtin_rules();
+    let adapter_registry = AdapterRegistry::builtin();
+    let enabled_adapters = adapter_registry.enabled_for(&profile);
+
+    let mut sources: std::collections::HashMap<PathBuf, String> = Default::default();
+    for path in &files {
+        let source = std::fs::read_to_string(path).expect("read");
+        sources.insert(path.clone(), source);
+    }
+
+    // Pass 1 — iterative extract. Mirrors `scan_dir` but threads
+    // `Some(&enabled_adapters)` through the RuleContext so adapter-
+    // aware rules (currently only the v0.4.0 decorator pre-taint
+    // path in flow/unvalidated-body-to-db) see the active adapters.
+    let mut index = ProjectIndex::new();
+    let mut prev_signal = 0usize;
+    for round in 0..10 {
+        let mut next = ProjectIndex::new();
+        for path in &files {
+            let allocator = Allocator::default();
+            let source = sources.get(path).unwrap();
+            let parsed = parse(&allocator, path, source).expect("parse");
+            let ctx = RuleContext {
+                file: &parsed,
+                index: Some(&index),
+                adapters: Some(&enabled_adapters),
+            };
+            for rule in registry.rules() {
+                if let Some(summary) = rule.extract(&ctx) {
+                    next.insert_file(summary);
+                }
+            }
+        }
+        next.finalize();
+        let signal: usize = next
+            .files()
+            .flat_map(|f| f.exports.values().chain(f.locals.values()))
+            .flat_map(|e| e.params.iter())
+            .map(|p| {
+                usize::from(p.reaches_db_sink_unsanitized)
+                    + usize::from(p.reaches_fetch_sink_unsanitized)
+                    + usize::from(p.reaches_redirect_sink_unsanitized)
+            })
+            .sum();
+        index = next;
+        if round > 0 && signal == prev_signal {
+            break;
+        }
+        prev_signal = signal;
+    }
+
+    // Pass 2 — run, with adapters threaded.
+    let mut findings = Vec::new();
+    for path in &files {
+        let allocator = Allocator::default();
+        let source = sources.get(path).unwrap();
+        let parsed = parse(&allocator, path, source).expect("parse");
+        let ctx = RuleContext {
+            file: &parsed,
+            index: Some(&index),
+            adapters: Some(&enabled_adapters),
+        };
+        for rule in registry.rules() {
+            findings.extend(rule.run(&ctx));
+        }
+    }
+    stryx_cli::filter_suppressed(findings, &sources)
+}
+
 /// Variant of `scan_dir` that returns the converged index instead of
 /// the findings, so tests can inspect summary-level state (param
 /// flows, offsets) without re-running the engine.
@@ -1353,6 +1450,77 @@ fn unvalidated_body_to_db_nest_bad_fires() {
             .iter()
             .map(|f| (&f.span.file, &f.message))
             .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unvalidated_body_to_db_nest_query_bad_with_nestjs_adapter() {
+    // Proof-of-life for the v0.4.0 adapter substrate.
+    //
+    // The `nest-query-bad/` fixture uses `@Query() filters: any` —
+    // a decorator the rule's pre-v0.4.0 hardcoded `is_body_decorator`
+    // path did NOT recognise (it only matched `@Body`). The
+    // framework/nestjs adapter contributes a `DecoratedParam` source
+    // pattern for `@Query()` (alongside `@Body`, `@Param`, `@Headers`,
+    // `@Req`), and the flagship rule's body-decorated-param pre-taint
+    // pass now consumes those patterns via `EnabledAdapters`.
+    //
+    // The test scans with a synthesised `ProjectProfile` carrying
+    // `FrameworkHint::NestJs` at 0.90 confidence, which activates the
+    // adapter through the substrate's default `is_enabled` resolution.
+    //
+    // Without the adapter, `scan_dir(...)` would return zero findings
+    // on this fixture (the rule's fallback `["Body"]` list misses
+    // `Query`). With the adapter, `flow/unvalidated-body-to-db` fires
+    // on the controller's call into the service that writes to Prisma.
+    use stryx_index::profile::{Detected, FrameworkHint, ProjectProfile};
+
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/nest-query-bad");
+    let profile = ProjectProfile {
+        frameworks: vec![Detected {
+            id: FrameworkHint::NestJs,
+            confidence: 0.90,
+            evidence: vec![],
+        }],
+        ..Default::default()
+    };
+
+    let findings: Vec<_> = scan_dir_with_profile(&dir, profile)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    let controller_path = dir.join("controller.ts");
+    assert!(
+        findings.iter().any(|f| f.span.file == controller_path),
+        "expected flow/unvalidated-body-to-db finding on controller.ts \
+         (proof that @Query() pre-taint via framework/nestjs adapter \
+         drives detection); got: {:?}",
+        findings
+            .iter()
+            .map(|f| (&f.span.file, &f.message))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
+fn unvalidated_body_to_db_nest_query_bad_silent_without_adapters() {
+    // Companion to the test above. Same fixture, but scanned via the
+    // adapter-less `scan_dir(...)` helper that mirrors how the rule
+    // behaved pre-v0.4.0. The flagship rule's hardcoded fallback
+    // `["Body"]` decorator list misses `@Query()`, so this fixture
+    // should produce zero findings here — proving the substrate is
+    // the load-bearing piece, not a behaviour change in the rule
+    // itself.
+    let dir = fixtures_root().join("flow-unvalidated-body-to-db/nest-query-bad");
+    let findings: Vec<_> = scan_dir(&dir)
+        .into_iter()
+        .filter(|f| f.rule_id == "flow/unvalidated-body-to-db")
+        .collect();
+    assert!(
+        findings.is_empty(),
+        "expected zero findings without adapter wiring — the @Query() \
+         decorator is not in the legacy hardcoded list; got: {:?}",
+        findings.iter().map(|f| &f.message).collect::<Vec<_>>(),
     );
 }
 
