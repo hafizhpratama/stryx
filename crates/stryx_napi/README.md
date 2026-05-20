@@ -64,7 +64,7 @@ npx @hafizhpratama/stryx scan . --fail-on=medium
 
 ## What it catches
 
-11 rules in the registry at v0.2.7. Highlights:
+11 rules in the registry. Highlights:
 
 | Rule | Severity | Catches |
 |---|---|---|
@@ -94,17 +94,21 @@ and what Stryx recognizes as fixed.
 ## How it works
 
 ```
-JavaScript / TypeScript source
+JavaScript / TypeScript source + package.json + lockfiles + configs
     ↓
-Project profile (planned): runtime/framework/data/auth/LLM evidence
+Project profile: detect runtime / framework / data layer /
+                 validator / auth / LLM SDK / deployment from
+                 package metadata (no source parsing)
     ↓
 Layer 1: oxc parser → arena AST (per file, parallel)
     ↓
-Layer 2: project semantic index + stack adapters + AST rules + taint engine
+Layer 2: project semantic index + AST rules + taint engine
+         (stack adapters consume the profile in upcoming v0.4.0)
     ↓
 Layer 3 (optional): LLM escalation on flagged uncertain zones, cached
     ↓
-Findings (JSON or human text)
+Findings (JSON or human text), prepended by a compact stack block:
+    stack: language: typescript • runtime: bun • framework: hono • ...
 ```
 
 Most findings come from deterministic Rust analysis in milliseconds.
@@ -139,9 +143,16 @@ with the real code that triggered it.
 
 ## Status
 
-**v0.2.7** — experimental, opt-in. APIs follow SemVer. 11 rules
-shipped; cross-file slice 2 complete for all Critical-severity
-rules. See the [changelog](https://github.com/hafizhpratama/stryx/blob/main/CHANGELOG.md)
+**v0.3.0** — first stack-aware milestone. `ProjectProfile`
+cheap-pass detection ships: Stryx now identifies the user's
+TypeScript backend stack (language, runtime, framework, data
+layer, validator, auth, LLM SDK, deployment) from `package.json`,
+lockfiles, and config files. Detection appears in both human and
+JSON output. The next release (v0.4.0) wires the profile into
+rule decisions across a broad adapter pass — every P0/P1 stack
+in the catalog. Zero rule-behaviour change in v0.3.0; the 11
+existing rules fire on the same code they did at v0.2.15. APIs
+follow SemVer. See the [changelog](https://github.com/hafizhpratama/stryx/blob/main/CHANGELOG.md)
 for release-by-release detail.
 
 ## Links
