@@ -251,6 +251,7 @@ fn validator_label(v: ValidatorHint) -> &'static str {
         ValidatorHint::Ajv => "ajv",
         ValidatorHint::ArkType => "arktype",
         ValidatorHint::TypeBox => "typebox",
+        ValidatorHint::ClassValidator => "class-validator",
     }
 }
 

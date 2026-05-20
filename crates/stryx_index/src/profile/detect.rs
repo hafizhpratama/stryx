@@ -368,6 +368,17 @@ fn detect_validators(pkg: Option<&PackageJson>) -> Vec<Detected<ValidatorHint>> 
     push_dep_for(&mut acc, pkg, "ajv", ValidatorHint::Ajv);
     push_dep_for(&mut acc, pkg, "arktype", ValidatorHint::ArkType);
     push_dep_for(&mut acc, pkg, "@sinclair/typebox", ValidatorHint::TypeBox);
+    // `class-validator` is the NestJS-default decorator-based DTO
+    // validator. Single package — no `class-transformer` companion
+    // signal is added here because a project using `class-transformer`
+    // alone (mapping but no validation) shouldn't be reported as a
+    // class-validator user.
+    push_dep_for(
+        &mut acc,
+        pkg,
+        "class-validator",
+        ValidatorHint::ClassValidator,
+    );
 
     finalize(acc)
 }
@@ -547,4 +558,175 @@ fn finalize<T: Copy + Ord>(acc: HashMap<T, Vec<Evidence>>) -> Vec<Detected<T>> {
             .then_with(|| a.id.cmp(&b.id))
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for individual detector functions.
+    //!
+    //! Whole-fixture coverage (a populated mini-project tree per stack)
+    //! lives in `crates/stryx_cli/tests/profile.rs`. Tests here are
+    //! reserved for cases that don't yet warrant a full fixture — e.g.
+    //! a single new validator detection — and exercise `detect()`
+    //! against a one-off `package.json` written into a temp dir.
+    use super::*;
+    use std::fs;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    /// Per-test counter ensures unique temp paths even if two tests
+    /// land on the same nanosecond.
+    static TMPDIR_SEQ: AtomicU64 = AtomicU64::new(0);
+
+    /// RAII handle for a uniquely-named temp directory under
+    /// [`std::env::temp_dir`]. Cleans itself up on drop so failed tests
+    /// don't leave junk in `/tmp`. We hand-roll this rather than pull
+    /// `tempfile` because the crate has no other tempdir consumer and
+    /// the dependency surface for one unit test isn't worth the cost.
+    struct TempProject(PathBuf);
+
+    impl TempProject {
+        fn new(label: &str) -> Self {
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let seq = TMPDIR_SEQ.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!(
+                "stryx-detect-{label}-{pid}-{nanos}-{seq}",
+                pid = std::process::id()
+            ));
+            fs::create_dir_all(&dir).expect("create temp project dir");
+            Self(dir)
+        }
+
+        fn write_package_json(&self, body: &str) {
+            fs::write(self.0.join("package.json"), body).expect("write package.json");
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TempProject {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A `package.json` listing `class-validator` as a runtime
+    /// dependency must surface a `ValidatorHint::ClassValidator`
+    /// detection at >= 0.30 confidence (one dependency-evidence
+    /// weight, matching every other validator in `detect_validators`).
+    /// Pins the new detection wired alongside the
+    /// `validation/class-validator` adapter.
+    #[test]
+    fn class_validator_dependency_is_detected() {
+        let proj = TempProject::new("class-validator");
+        proj.write_package_json(
+            r#"{
+                "name": "cv-fixture",
+                "version": "0.0.0",
+                "private": true,
+                "dependencies": {
+                    "class-validator": "^0.14.0"
+                }
+            }"#,
+        );
+
+        let profile = detect(proj.path());
+        let found = profile
+            .validators
+            .iter()
+            .find(|d| d.id == ValidatorHint::ClassValidator)
+            .expect("class-validator detection missing");
+        assert!(
+            found.confidence >= 0.30,
+            "class-validator confidence too low: {}",
+            found.confidence
+        );
+        assert!(
+            found
+                .evidence
+                .iter()
+                .any(|e| e.kind == EvidenceKind::Dependency
+                    && e.detail.contains("class-validator")),
+            "expected a Dependency-kind evidence entry mentioning class-validator: {:#?}",
+            found.evidence
+        );
+    }
+
+    /// devDependencies path: when `class-validator` is declared only
+    /// under devDependencies, it must still surface but with
+    /// `EvidenceKind::DevDependency`. Mirrors how every other
+    /// validator routes through `push_dep_for`.
+    #[test]
+    fn class_validator_dev_dependency_is_detected() {
+        let proj = TempProject::new("class-validator-dev");
+        proj.write_package_json(
+            r#"{
+                "name": "cv-dev-fixture",
+                "version": "0.0.0",
+                "private": true,
+                "devDependencies": {
+                    "class-validator": "^0.14.0"
+                }
+            }"#,
+        );
+
+        let profile = detect(proj.path());
+        let found = profile
+            .validators
+            .iter()
+            .find(|d| d.id == ValidatorHint::ClassValidator)
+            .expect("class-validator detection missing from devDependencies");
+        assert!(
+            found
+                .evidence
+                .iter()
+                .any(|e| e.kind == EvidenceKind::DevDependency),
+            "expected DevDependency-kind evidence: {:#?}",
+            found.evidence
+        );
+    }
+
+    /// Negative: a project that uses Zod but not `class-validator`
+    /// must not surface a `ClassValidator` hint. Guards against a
+    /// future regression where the detector accidentally matches on
+    /// substring or unrelated `class-*` packages.
+    #[test]
+    fn class_validator_absent_when_only_zod_present() {
+        let proj = TempProject::new("zod-only");
+        proj.write_package_json(
+            r#"{
+                "name": "zod-only-fixture",
+                "version": "0.0.0",
+                "private": true,
+                "dependencies": {
+                    "zod": "^3.23.0",
+                    "class-transformer": "^0.5.1"
+                }
+            }"#,
+        );
+
+        let profile = detect(proj.path());
+        assert!(
+            !profile
+                .validators
+                .iter()
+                .any(|d| d.id == ValidatorHint::ClassValidator),
+            "ClassValidator wrongly detected in Zod-only project: {:#?}",
+            profile.validators
+        );
+        // Sanity-check: Zod is detected so the test is exercising the
+        // same code path, not failing because detection ran early-exit.
+        assert!(
+            profile
+                .validators
+                .iter()
+                .any(|d| d.id == ValidatorHint::Zod),
+            "Zod missing — test fixture would prove nothing"
+        );
+    }
 }

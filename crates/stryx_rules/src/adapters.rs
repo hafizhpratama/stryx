@@ -396,12 +396,10 @@ impl AdapterRegistry {
     /// Construct the built-in registry. Adapters are registered here
     /// as they ship. Currently:
     ///
-    /// - `framework/express` — Express HTTP framework
-    /// - `framework/hono` — Hono HTTP framework (Bun / Edge runtimes)
-    /// - `framework/nestjs` — NestJS decorator-based framework
-    /// - `framework/next-backend` — Next.js backend surfaces (App
-    ///   Router route handlers, Pages Router API routes,
-    ///   server actions, middleware)
+    /// - Framework: `express`, `hono`, `nestjs`, `next-backend`
+    /// - Data layer: `prisma`
+    /// - Validation: `class-validator`
+    /// - Auth: `better-auth`
     pub fn builtin() -> Self {
         static EXPRESS: crate::adapters_express::ExpressAdapter =
             crate::adapters_express::ExpressAdapter;
@@ -410,8 +408,22 @@ impl AdapterRegistry {
             crate::adapters_nestjs::NestJsAdapter;
         static NEXT_BACKEND: crate::adapters_next::NextBackendAdapter =
             crate::adapters_next::NextBackendAdapter;
+        static PRISMA: crate::adapters_prisma::PrismaAdapter =
+            crate::adapters_prisma::PrismaAdapter;
+        static CLASS_VALIDATOR: crate::adapters_class_validator::ClassValidatorAdapter =
+            crate::adapters_class_validator::ClassValidatorAdapter;
+        static BETTER_AUTH: crate::adapters_better_auth::BetterAuthAdapter =
+            crate::adapters_better_auth::BetterAuthAdapter;
         Self {
-            adapters: vec![&EXPRESS, &HONO, &NESTJS, &NEXT_BACKEND],
+            adapters: vec![
+                &EXPRESS,
+                &HONO,
+                &NESTJS,
+                &NEXT_BACKEND,
+                &PRISMA,
+                &CLASS_VALIDATOR,
+                &BETTER_AUTH,
+            ],
         }
     }
 
@@ -658,19 +670,20 @@ mod tests {
     use std::path::PathBuf;
     use stryx_index::profile::{Detected, Evidence, EvidenceKind, FrameworkHint, ProjectProfile};
 
-    /// `builtin()` currently registers four framework adapters
-    /// (`express`, `hono`, `nestjs`, `next-backend`). This pin
-    /// updates as new built-in adapters land in subsequent slices
-    /// (runtime/data/validation/auth/llm).
+    /// `builtin()` currently registers seven adapters across four
+    /// dimensions. This pin updates as new built-in adapters land.
     #[test]
     fn builtin_registry_contains_expected_adapters() {
         let reg = AdapterRegistry::builtin();
-        assert_eq!(reg.all().len(), 4);
+        assert_eq!(reg.all().len(), 7);
         let ids: Vec<&str> = reg.all().iter().map(|a| a.id().0).collect();
         assert!(ids.contains(&"framework/express"));
         assert!(ids.contains(&"framework/hono"));
         assert!(ids.contains(&"framework/nestjs"));
         assert!(ids.contains(&"framework/next-backend"));
+        assert!(ids.contains(&"data/prisma"));
+        assert!(ids.contains(&"validation/class-validator"));
+        assert!(ids.contains(&"auth/better-auth"));
     }
 
     #[test]

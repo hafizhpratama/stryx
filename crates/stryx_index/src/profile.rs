@@ -148,6 +148,11 @@ pub enum ValidatorHint {
     ArkType,
     #[serde(rename = "typebox")]
     TypeBox,
+    /// `class-validator` — the decorator-based DTO validator NestJS
+    /// ships with by default. Serialises as `"class-validator"` via
+    /// the enum's kebab-case rule (no explicit rename needed); the
+    /// brand-name lock-in test in this module pins the spelling.
+    ClassValidator,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -238,6 +243,10 @@ mod tests {
             (
                 serde_json::to_string(&RuntimeHint::CloudflareWorkers).unwrap(),
                 "\"cloudflare-workers\"",
+            ),
+            (
+                serde_json::to_string(&ValidatorHint::ClassValidator).unwrap(),
+                "\"class-validator\"",
             ),
         ];
         for (got, want) in &cases {
