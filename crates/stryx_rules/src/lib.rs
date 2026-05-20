@@ -15,6 +15,7 @@
 //! default no-op implementation contributes nothing to the index.
 
 pub mod adapters;
+pub mod adapters_nestjs;
 pub mod flows;
 pub mod generic;
 pub mod registry;

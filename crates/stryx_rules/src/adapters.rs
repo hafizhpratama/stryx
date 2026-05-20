@@ -386,18 +386,20 @@ fn hint_serde_name<T: serde::Serialize>(hint: &T) -> String {
 /// Catalogue of every built-in adapter. Constructed once at startup
 /// via [`AdapterRegistry::builtin`]; reused across rayon workers.
 ///
-/// At substrate slice (ADR 0014 step 2), the registry is empty.
-/// First adapters land in a later slice.
+/// Currently registered: `framework/nestjs` (source patterns only).
+/// More adapters land in subsequent slices.
 pub struct AdapterRegistry {
     adapters: Vec<&'static dyn StackAdapter>,
 }
 
 impl AdapterRegistry {
-    /// Construct the built-in registry. Empty at the substrate
-    /// slice — adapters will be registered here as they ship.
+    /// Construct the built-in registry. Adapters are registered here
+    /// as they ship — currently `framework/nestjs`.
     pub fn builtin() -> Self {
+        static NESTJS: crate::adapters_nestjs::NestJsAdapter =
+            crate::adapters_nestjs::NestJsAdapter;
         Self {
-            adapters: Vec::new(),
+            adapters: vec![&NESTJS],
         }
     }
 
@@ -644,14 +646,13 @@ mod tests {
     use std::path::PathBuf;
     use stryx_index::profile::{Detected, Evidence, EvidenceKind, FrameworkHint, ProjectProfile};
 
-    /// At substrate slice, `builtin()` ships no adapters. This test
-    /// pins that fact — when adapters start landing in later
-    /// slices, this test should fail and be updated alongside the
-    /// adapter registration.
+    /// `builtin()` currently registers exactly the `framework/nestjs`
+    /// adapter. This pin updates as new built-in adapters land.
     #[test]
-    fn builtin_registry_is_empty_at_substrate_slice() {
+    fn builtin_registry_contains_nestjs_adapter() {
         let reg = AdapterRegistry::builtin();
-        assert_eq!(reg.all().len(), 0);
+        assert_eq!(reg.all().len(), 1);
+        assert_eq!(reg.all()[0].id(), AdapterId("framework/nestjs"));
     }
 
     #[test]
