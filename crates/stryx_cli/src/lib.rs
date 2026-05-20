@@ -7,9 +7,11 @@ use anyhow::{Context, Result};
 use dashmap::DashMap;
 use ignore::WalkBuilder;
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use stryx_ast::{Allocator, parse};
 use stryx_core::Finding;
@@ -29,10 +31,35 @@ pub use suppress::filter_suppressed;
 /// line/column positions without re-reading from disk.
 /// `profile` captures detected stack evidence from package.json,
 /// lockfiles, and config files (no source parsing required).
+/// `file_count` and `elapsed_ms` are populated by the engine so the
+/// reporter footer can show `scanned N files in Mms` without
+/// recomputing the duration on the caller side.
 pub struct ScanResult {
     pub findings: Vec<Finding>,
     pub sources: HashMap<PathBuf, String>,
     pub profile: ProjectProfile,
+    pub file_count: usize,
+    pub elapsed_ms: u128,
+}
+
+/// Knobs that change which files are scanned without changing what
+/// the rules do. Defaults to "scan everything" (no diff filter).
+#[derive(Debug, Clone, Default)]
+pub struct ScanOptions {
+    /// When `Some(base)`, only scan files that differ from the given
+    /// git ref (branch, commit, or tag). Falls back to a full scan
+    /// when the working tree is not a git repository or the git
+    /// command fails. Used by `stryx --diff main` for PR-only CI runs.
+    pub diff_base: Option<String>,
+}
+
+/// Scan a path with default options. See [`scan_with_options`].
+///
+/// Kept as a thin wrapper for callers that don't need to configure
+/// scan behaviour (the napi binding, integration tests). New surfaces
+/// should call [`scan_with_options`] directly.
+pub fn scan(path: &Path) -> Result<ScanResult> {
+    scan_with_options(path, &ScanOptions::default())
 }
 
 /// Scan a path. Walks `path` (gitignore-aware via the `ignore` crate)
@@ -40,13 +67,23 @@ pub struct ScanResult {
 /// the iterative two-pass extract→run pipeline, and returns the
 /// findings.
 ///
+/// When `options.diff_base` is set, the file set is intersected with
+/// the git diff against that ref (added/modified/renamed/untracked
+/// files); a non-git directory or git failure logs at `warn` and
+/// falls back to a full scan rather than erroring out.
+///
 /// Returns an empty result when the path contains no scannable
 /// files. Parse errors and unreadable files are logged via `tracing`
 /// and skipped, not propagated.
-pub fn scan(path: &Path) -> Result<ScanResult> {
+pub fn scan_with_options(path: &Path, options: &ScanOptions) -> Result<ScanResult> {
+    let start = Instant::now();
     let registry = Arc::new(builtin_rules());
-    let files =
+    let mut files =
         collect_targets(path).with_context(|| format!("collect targets at {}", path.display()))?;
+
+    if let Some(base) = options.diff_base.as_deref() {
+        files = apply_diff_filter(path, files, base);
+    }
 
     // Build the project profile once at scan start. Cheap (reads at
     // most ~10 files: package.json + lockfiles + a few configs) and
@@ -69,8 +106,12 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
             findings: Vec::new(),
             sources: HashMap::new(),
             profile,
+            file_count: 0,
+            elapsed_ms: start.elapsed().as_millis(),
         });
     }
+
+    let file_count = files.len();
 
     let sources: Arc<DashMap<PathBuf, String>> = Arc::new(DashMap::new());
 
@@ -165,7 +206,113 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
         findings,
         sources: sources_out,
         profile,
+        file_count,
+        elapsed_ms: start.elapsed().as_millis(),
     })
+}
+
+/// Filter `files` down to those that differ from `base` per `git
+/// diff`. Includes added/modified/renamed tracked files plus
+/// untracked-but-not-ignored ones, since a PR can introduce new
+/// files in either state. Returns the input unchanged (logged) when
+/// git is unavailable, `root` is not a git work tree, or `base` is
+/// unknown.
+fn apply_diff_filter(root: &Path, files: Vec<PathBuf>, base: &str) -> Vec<PathBuf> {
+    let diff_set = match collect_diff_paths(root, base) {
+        Ok(set) => set,
+        Err(err) => {
+            tracing::warn!(
+                %err,
+                base,
+                "--diff: git lookup failed, falling back to full scan"
+            );
+            return files;
+        }
+    };
+    if diff_set.is_empty() {
+        // Empty diff is a real signal (nothing changed), not a failure.
+        // Skip the scan entirely by returning an empty file list.
+        return Vec::new();
+    }
+    files
+        .into_iter()
+        .filter(|f| match f.canonicalize() {
+            Ok(canon) => diff_set.contains(&canon),
+            Err(_) => diff_set.contains(f),
+        })
+        .collect()
+}
+
+fn collect_diff_paths(root: &Path, base: &str) -> Result<HashSet<PathBuf>> {
+    let git_root = find_git_root(root).context("not inside a git work tree")?;
+    let mut out: HashSet<PathBuf> = HashSet::new();
+
+    // Tracked changes between `base` and the working tree. `--diff-filter`
+    // keeps Added/Copied/Modified/Renamed; deletions are uninteresting
+    // (the file isn't there to scan). Use `<base>...` (three dots) so
+    // the comparison is against the merge-base, matching how PR diffs
+    // are computed on GitHub/GitLab.
+    let tracked = run_git(
+        &git_root,
+        &[
+            "diff",
+            "--name-only",
+            "--diff-filter=ACMR",
+            &format!("{base}..."),
+        ],
+    )?;
+    for line in tracked.lines() {
+        if !line.trim().is_empty() {
+            out.insert(git_root.join(line));
+        }
+    }
+
+    // Untracked-but-not-ignored files. PR branches commonly add new
+    // files that haven't been staged yet; without this they'd be
+    // silently skipped.
+    let untracked = run_git(&git_root, &["ls-files", "--others", "--exclude-standard"])?;
+    for line in untracked.lines() {
+        if !line.trim().is_empty() {
+            out.insert(git_root.join(line));
+        }
+    }
+
+    // Canonicalize so the filter compares apples to apples — both
+    // `collect_targets` paths and these paths go through the same
+    // normalization.
+    let canonical: HashSet<PathBuf> = out
+        .into_iter()
+        .map(|p| p.canonicalize().unwrap_or(p))
+        .collect();
+    Ok(canonical)
+}
+
+fn find_git_root(start: &Path) -> Option<PathBuf> {
+    let start = start.canonicalize().ok()?;
+    let mut cur: &Path = if start.is_file() {
+        start.parent()?
+    } else {
+        start.as_path()
+    };
+    loop {
+        if cur.join(".git").exists() {
+            return Some(cur.to_path_buf());
+        }
+        cur = cur.parent()?;
+    }
+}
+
+fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .with_context(|| format!("spawn git {args:?}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        anyhow::bail!("git {args:?} failed: {stderr}");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Read `tsconfig.json` or `jsconfig.json` at the scan root and

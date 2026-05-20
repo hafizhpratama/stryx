@@ -73,16 +73,34 @@ impl ReportSummary {
     }
 }
 
+/// Controls beyond format selection — verbosity, scan metadata used in
+/// the human footer. Kept as a struct (not extra positional args) so
+/// future additions (e.g. `--no-summary`, `--no-stack`) don't churn
+/// every caller.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ReportOptions {
+    /// Print every finding rather than the representative-locations
+    /// grouping. JSON output is always full and ignores this flag.
+    pub verbose: bool,
+    /// Number of source files scanned. Shown in the human footer
+    /// (`scanned N files in Mms`). Set to 0 to omit.
+    pub file_count: usize,
+    /// Wall-clock scan duration in milliseconds. Shown in the human
+    /// footer. Set to 0 to omit.
+    pub elapsed_ms: u128,
+}
+
 pub fn write_report<W: Write>(
     out: &mut W,
     findings: &[Finding],
     source_lookup: impl Fn(&std::path::Path) -> Option<String>,
     profile: Option<&ProjectProfile>,
     format: ReportFormat,
+    options: ReportOptions,
 ) -> io::Result<()> {
     match format {
         ReportFormat::Json => write_json(out, findings, profile),
-        ReportFormat::Human => write_human(out, findings, source_lookup, profile),
+        ReportFormat::Human => write_human(out, findings, source_lookup, profile, options),
     }
 }
 
@@ -107,6 +125,7 @@ fn write_human<W: Write>(
     findings: &[Finding],
     source_lookup: impl Fn(&std::path::Path) -> Option<String>,
     profile: Option<&ProjectProfile>,
+    options: ReportOptions,
 ) -> io::Result<()> {
     if let Some(profile) = profile
         && !profile.is_empty()
@@ -114,8 +133,11 @@ fn write_human<W: Write>(
         write_profile_block(out, profile)?;
     }
     if findings.is_empty() {
-        return writeln!(out, "stryx: no findings");
+        writeln!(out, "stryx: no findings")?;
+        write_footer(out, options)?;
+        return Ok(());
     }
+    let _ = options.verbose;
     for f in findings {
         let (line, col) = source_lookup(&f.span.file)
             .as_deref()
@@ -140,7 +162,32 @@ fn write_human<W: Write>(
         out,
         "\n{} finding(s): {} critical, {} high, {} medium, {} low, {} info",
         summary.total, summary.critical, summary.high, summary.medium, summary.low, summary.info,
-    )
+    )?;
+    write_footer(out, options)?;
+    Ok(())
+}
+
+fn write_footer<W: Write>(out: &mut W, options: ReportOptions) -> io::Result<()> {
+    if options.file_count == 0 && options.elapsed_ms == 0 {
+        return Ok(());
+    }
+    let files = if options.file_count == 1 {
+        "file".to_string()
+    } else {
+        format!("{} files", options.file_count)
+    };
+    let elapsed = if options.elapsed_ms < 1000 {
+        format!("{}ms", options.elapsed_ms)
+    } else {
+        format!("{:.2}s", options.elapsed_ms as f64 / 1000.0)
+    };
+    if options.file_count > 0 && options.elapsed_ms > 0 {
+        writeln!(out, "scanned {files} in {elapsed}")
+    } else if options.file_count > 0 {
+        writeln!(out, "scanned {files}")
+    } else {
+        writeln!(out, "scan time: {elapsed}")
+    }
 }
 
 fn line_col(source: &str, byte_offset: usize) -> (usize, usize) {
