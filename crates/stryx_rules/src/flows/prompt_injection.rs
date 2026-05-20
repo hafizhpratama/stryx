@@ -35,6 +35,8 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
+use crate::adapters::EnabledAdapters;
+use crate::flows::unvalidated_body_to_db::decorated_param_names_for_adapters;
 use crate::steps::sinks::{LlmPromptSink, is_llm_prompt_sink_call};
 use crate::steps::sources::BodySource;
 use crate::steps::{StepCtx, StepKind};
@@ -71,11 +73,8 @@ impl Rule for PromptInjection {
     }
 
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
-        let mut visitor = PromptInjectionVisitor {
-            file: ctx.file.path.clone(),
-            scopes: vec![HashMap::new()],
-            findings: Vec::new(),
-        };
+        let mut visitor =
+            PromptInjectionVisitor::new_with_adapters(ctx.file.path.clone(), ctx.adapters);
         for stmt in &ctx.file.program.body {
             visitor.visit_statement(stmt);
         }
@@ -83,13 +82,34 @@ impl Rule for PromptInjection {
     }
 }
 
-struct PromptInjectionVisitor {
+struct PromptInjectionVisitor<'idx> {
     file: std::path::PathBuf,
     scopes: Vec<HashMap<String, ()>>,
+    /// Active stack adapters resolved from the project's
+    /// `ProjectProfile`. `None` when the rule is exercised outside the
+    /// production scan loop (unit-test sites that build a visitor
+    /// directly). Consumed by the decorator pre-taint pass in
+    /// `visit_function` to extend `@Body()`-only recognition to every
+    /// `DecoratedParam` source pattern an active adapter contributes
+    /// (`@Query()` / `@Param()` / `@Headers()` / `@Req()` for the
+    /// NestJS adapter, future framework decorators too).
+    adapters: Option<&'idx EnabledAdapters>,
     findings: Vec<Finding>,
 }
 
-impl PromptInjectionVisitor {
+impl<'idx> PromptInjectionVisitor<'idx> {
+    fn new_with_adapters(
+        file: std::path::PathBuf,
+        adapters: Option<&'idx EnabledAdapters>,
+    ) -> Self {
+        Self {
+            file,
+            scopes: vec![HashMap::new()],
+            adapters,
+            findings: Vec::new(),
+        }
+    }
+
     fn step_ctx(&self) -> StepCtx<'_, 'static> {
         StepCtx {
             file: &self.file,
@@ -314,9 +334,16 @@ impl PromptInjectionVisitor {
     }
 }
 
-impl<'a> Visit<'a> for PromptInjectionVisitor {
+impl<'a, 'idx> Visit<'a> for PromptInjectionVisitor<'idx> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: stryx_ast::ScopeFlags) {
         self.enter_fn();
+        // Decorator pre-taint (v0.4.0 substrate consumer). NestJS-style
+        // `@Body() / @Query() / @Param() / @Headers() / @Req()`
+        // parameters introduce UserInput taint; the active adapter set
+        // tells us which decorator names count.
+        for pname in decorated_param_names_for_adapters(&func.params, self.adapters) {
+            self.taint(pname);
+        }
         if let Some(body) = &func.body {
             for stmt in &body.statements {
                 self.visit_statement(stmt);

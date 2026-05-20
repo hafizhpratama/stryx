@@ -34,6 +34,8 @@ use stryx_core::{Finding, Severity, Span};
 use stryx_index::FileSummary;
 use stryx_taint::{ExportedFunctionSummary, ParamFlow};
 
+use crate::adapters::EnabledAdapters;
+use crate::flows::unvalidated_body_to_db::decorated_param_names_for_adapters;
 use crate::steps::sanitizers::{
     branch_returns, extract_url_constructor_input, match_url_allow_list_guard,
 };
@@ -85,7 +87,8 @@ impl Rule for SsrfViaFetch {
     }
 
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
-        let mut visitor = SsrfVisitor::new(ctx.file.path.clone(), ctx.index, true);
+        let mut visitor =
+            SsrfVisitor::new_with_adapters(ctx.file.path.clone(), ctx.index, true, ctx.adapters);
         for stmt in &ctx.file.program.body {
             visitor.visit_statement(stmt);
         }
@@ -137,6 +140,16 @@ struct SsrfVisitor<'idx> {
     /// parameter contributes; ambient `req.body` reads must not turn
     /// into spurious sinks inside helpers that don't take a request).
     body_source_active: bool,
+    /// Active stack adapters resolved from the project's
+    /// `ProjectProfile`. `None` when the rule is exercised outside the
+    /// production scan loop (unit-test sites that build a visitor
+    /// directly, or the per-param simulation that runs during summary
+    /// extraction). Consumed by the decorator pre-taint pass in
+    /// `visit_function` to extend `@Body()`-only recognition to every
+    /// `DecoratedParam` source pattern an active adapter contributes
+    /// (`@Query()` / `@Param()` / `@Headers()` / `@Req()` for the
+    /// NestJS adapter, future framework decorators too).
+    adapters: Option<&'idx EnabledAdapters>,
     findings: Vec<Finding>,
 }
 
@@ -146,6 +159,15 @@ impl<'idx> SsrfVisitor<'idx> {
         index: Option<&'idx stryx_index::ProjectIndex>,
         body_source_active: bool,
     ) -> Self {
+        Self::new_with_adapters(file, index, body_source_active, None)
+    }
+
+    fn new_with_adapters(
+        file: PathBuf,
+        index: Option<&'idx stryx_index::ProjectIndex>,
+        body_source_active: bool,
+        adapters: Option<&'idx EnabledAdapters>,
+    ) -> Self {
         Self {
             file,
             scopes: vec![HashMap::new()],
@@ -153,6 +175,7 @@ impl<'idx> SsrfVisitor<'idx> {
             safe_host_bindings: HashMap::new(),
             index,
             body_source_active,
+            adapters,
             findings: Vec::new(),
         }
     }
@@ -543,6 +566,28 @@ impl<'idx> SsrfVisitor<'idx> {
 impl<'a, 'idx> Visit<'a> for SsrfVisitor<'idx> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: stryx_ast::ScopeFlags) {
         self.enter_fn();
+        // NestJS and similar frameworks declare body sources via parameter
+        // decorators (`@Body() dto: CreateUserDto`). Pre-taint any param
+        // marked with one — the framework will inject body data there.
+        //
+        // The set of recognised decorators is contributed by the active
+        // `EnabledAdapters` (NestJS adapter → `@Body() / @Query() /
+        // @Param() / @Headers() / @Req()`). When no adapter is wired
+        // (per-param simulation, unit-test paths), the helper falls
+        // back to `@Body()`-only recognition, preserving byte-identical
+        // behaviour for existing fixtures.
+        //
+        // Helper imported from the flagship rule
+        // (`flows::unvalidated_body_to_db::decorated_param_names_for_adapters`)
+        // rather than duplicated — it has no private dependencies that
+        // would force inline copying, and a single owner keeps the
+        // decorator-recognition logic consistent across all body-source
+        // rules during the v0.4.0 migration.
+        if self.body_source_active {
+            for pname in decorated_param_names_for_adapters(&func.params, self.adapters) {
+                self.taint(pname);
+            }
+        }
         if let Some(body) = &func.body {
             for stmt in &body.statements {
                 self.visit_statement(stmt);
