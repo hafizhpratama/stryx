@@ -46,6 +46,7 @@ fn scan_dir(dir: &Path) -> usize {
             let ctx = RuleContext {
                 file: &parsed,
                 index: Some(&index),
+                adapters: None,
             };
             for rule in registry.rules() {
                 if let Some(s) = rule.extract(&ctx) {
@@ -65,6 +66,7 @@ fn scan_dir(dir: &Path) -> usize {
         let ctx = RuleContext {
             file: &parsed,
             index: Some(&index),
+            adapters: None,
         };
         for rule in registry.rules() {
             count += rule.run(&ctx).len();

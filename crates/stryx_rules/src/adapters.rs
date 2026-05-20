@@ -473,6 +473,171 @@ impl EnabledAdapters {
     }
 }
 
+// =============================================================================
+// Matcher dispatch
+// =============================================================================
+
+/// Read-only context handed to every [`AstMatcher::matches`] call.
+///
+/// Carries just enough state for matchers to resolve their AST shape
+/// against the current file (and optionally the cross-file index).
+/// Mirrors the slim contract of [`crate::steps::StepCtx`] — matchers
+/// answer "does this expression match this shape?"; they do not
+/// mutate visitor state.
+///
+/// `index` is consulted only by the [`AstMatcher::ImportedCall`]
+/// variant, which needs the per-file `imports` map to distinguish a
+/// real `child_process::exec` call from an unrelated local `exec`
+/// binding. All other variants are pure-syntactic and ignore it.
+pub struct MatcherContext<'a, 'b> {
+    pub file: &'a stryx_ast::ParsedFile<'b>,
+    pub index: Option<&'a stryx_index::ProjectIndex>,
+}
+
+impl AstMatcher {
+    /// True iff this matcher's AST shape applies to `expr`.
+    ///
+    /// Dispatch is a `match` on the enum so the compiler lowers it to
+    /// a jump table — per [AGENTS.md] the hot path may not use
+    /// `Box<dyn Trait>`. Per-variant matching reuses the same
+    /// syntactic decompositions already in
+    /// [`crate::steps::sources::body`] and
+    /// [`crate::steps::sinks::exec`] so the substrate is
+    /// shape-equivalent to the inline recognisers it replaces.
+    ///
+    /// [AGENTS.md]: ../../../AGENTS.md
+    pub fn matches(
+        &self,
+        ctx: &MatcherContext<'_, '_>,
+        expr: &stryx_ast::ast::Expression<'_>,
+    ) -> bool {
+        use stryx_ast::ast::Expression;
+        match *self {
+            AstMatcher::MemberOnParam { receiver, property } => match expr {
+                Expression::StaticMemberExpression(m) => {
+                    expression_is_ident(&m.object, receiver)
+                        && (property == "*" || m.property.name.as_str() == property)
+                }
+                _ => false,
+            },
+
+            AstMatcher::MethodCall { receiver, method } => match expr {
+                Expression::CallExpression(call) => match &call.callee {
+                    Expression::StaticMemberExpression(callee_member) => {
+                        callee_member.property.name.as_str() == method
+                            && expression_matches_dotted_chain(&callee_member.object, receiver)
+                    }
+                    _ => false,
+                },
+                _ => false,
+            },
+
+            AstMatcher::ImportedCall { module, name } => match expr {
+                Expression::CallExpression(call) => match &call.callee {
+                    Expression::Identifier(id) if id.name.as_str() == name => {
+                        // Look up the bare-ident callee in the
+                        // current file's import map. The matcher only
+                        // fires when the import target's module
+                        // specifier matches `module` exactly — this
+                        // is what tells a real `child_process::exec`
+                        // call apart from a local function literally
+                        // named `exec`.
+                        let Some(index) = ctx.index else {
+                            return false;
+                        };
+                        let Some(summary) = index.file(&ctx.file.path) else {
+                            return false;
+                        };
+                        summary
+                            .imports
+                            .get(name)
+                            .map(|import_ref| import_ref.module_specifier == module)
+                            .unwrap_or(false)
+                    }
+                    _ => false,
+                },
+                _ => false,
+            },
+
+            // `DecoratedParam` shape is recognised at formal-parameter
+            // declaration sites (e.g. NestJS controller methods'
+            // `@Body() dto: T`), not at expression sites.
+            // `Expression` nodes carry no parameter decorator
+            // information, so this matcher always returns `false`
+            // when consulted via `matches`. Decorator-driven parameter
+            // recognition is wired in a separate code path during
+            // rule migration — out of scope for this slice.
+            AstMatcher::DecoratedParam { .. } => false,
+
+            AstMatcher::NamespaceCall { namespace, member } => match expr {
+                Expression::CallExpression(call) => match &call.callee {
+                    Expression::StaticMemberExpression(callee_member) => {
+                        callee_member.property.name.as_str() == member
+                            && expression_is_ident(&callee_member.object, namespace)
+                    }
+                    _ => false,
+                },
+                _ => false,
+            },
+
+            AstMatcher::MethodCallAnyReceiver { method } => match expr {
+                Expression::CallExpression(call) => match &call.callee {
+                    Expression::StaticMemberExpression(callee_member) => {
+                        callee_member.property.name.as_str() == method
+                    }
+                    _ => false,
+                },
+                _ => false,
+            },
+
+            // Same story as `DecoratedParam`: class-level decorators
+            // (`@Controller() class FooController { ... }`) attach to
+            // class declarations, not to expressions. Out of scope
+            // for the expression-matching slice.
+            AstMatcher::DecoratedClass { .. } => false,
+        }
+    }
+}
+
+/// True when `expr` is a bare `Identifier` whose name equals `name`.
+/// Used by the namespace/receiver shapes to recognise a single-segment
+/// receiver like `Bun` or `req`.
+fn expression_is_ident(expr: &stryx_ast::ast::Expression<'_>, name: &str) -> bool {
+    matches!(expr, stryx_ast::ast::Expression::Identifier(id) if id.name.as_str() == name)
+}
+
+/// True when `expr` matches the dotted-identifier chain `chain`. The
+/// chain is a `.`-separated string of identifiers like `"c.req"` or
+/// `"req"`; the expression must be a corresponding `Identifier`
+/// (single segment) or right-leaning [`StaticMemberExpression`] chain
+/// rooted at an `Identifier` (multi-segment). Computed member access
+/// (`a["b"]`), private fields (`a.#b`), call results, or anything
+/// non-trivial fails the match — the chain syntax exists to keep the
+/// recognised shape narrow.
+///
+/// Empty `chain` returns `false` defensively; well-formed patterns
+/// never construct an empty receiver.
+fn expression_matches_dotted_chain(expr: &stryx_ast::ast::Expression<'_>, chain: &str) -> bool {
+    use stryx_ast::ast::Expression;
+    if chain.is_empty() {
+        return false;
+    }
+    // Walk `chain` right-to-left and `expr` outside-in: for
+    // `"c.req"` against `c.req`, the SME peels `req` (matches the
+    // last segment) and recurses on `c` (matches the remaining
+    // single segment).
+    let (head, tail) = match chain.rsplit_once('.') {
+        Some((head, tail)) => (head, tail),
+        None => return expression_is_ident(expr, chain),
+    };
+    match expr {
+        Expression::StaticMemberExpression(m) => {
+            m.property.name.as_str() == tail && expression_matches_dotted_chain(&m.object, head)
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -571,5 +736,410 @@ mod tests {
             AdapterKind::Framework,
             &profile
         ));
+    }
+}
+
+#[cfg(test)]
+mod matcher_tests {
+    //! Per-variant tests for [`AstMatcher::matches`].
+    //!
+    //! Each test parses a tiny TS snippet via [`stryx_ast::parse`],
+    //! pulls out the expression of interest from the AST, and asserts
+    //! the matcher fires / does not fire as documented in
+    //! [ADR 0014](../../../docs/decisions/0014-adapter-substrate-api.md).
+    //!
+    //! The fixture model is deliberately minimal — single-statement
+    //! programs that materialise the expression shape under test —
+    //! so failures point at the matcher, not at AST shape drift.
+    //! When a matcher gains a new sub-shape, the test for that
+    //! variant grows a positive and a negative case for the new
+    //! shape, never a parallel test module.
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use stryx_ast::ast::{Expression, Statement};
+    use stryx_ast::{Allocator, ParsedFile, parse};
+    use stryx_index::{FileSummary, ImportRef, ProjectIndex};
+
+    /// Pull the first expression out of a `const x = <expr>;` or
+    /// `<expr>;` program. Panics on shape mismatch — the snippets
+    /// are author-controlled, so an unexpected AST is a fixture bug.
+    fn first_expression<'a>(parsed: &'a ParsedFile<'_>) -> &'a Expression<'a> {
+        let stmt = parsed
+            .program
+            .body
+            .first()
+            .expect("snippet has at least one statement");
+        match stmt {
+            Statement::VariableDeclaration(decl) => decl
+                .declarations
+                .first()
+                .and_then(|d| d.init.as_ref())
+                .expect("declarator with init"),
+            Statement::ExpressionStatement(es) => &es.expression,
+            _ => panic!("snippet must parse to a VariableDeclaration or ExpressionStatement"),
+        }
+    }
+
+    /// Convenience: parse `source` into an allocator-owned
+    /// [`ParsedFile`] at a virtual path.
+    fn parse_snippet<'a>(allocator: &'a Allocator, source: &'a str) -> ParsedFile<'a> {
+        parse(allocator, Path::new("/virt/file.ts"), source).expect("parse")
+    }
+
+    /// Build a no-index [`MatcherContext`] borrowed from `file`. The
+    /// `index: None` arm is what most matcher variants need — only
+    /// [`AstMatcher::ImportedCall`] consults the index, and those
+    /// tests build their own `MatcherContext` inline with a real
+    /// [`ProjectIndex`].
+    fn matcher_ctx<'a, 'b>(file: &'a ParsedFile<'b>) -> MatcherContext<'a, 'b> {
+        MatcherContext { file, index: None }
+    }
+
+    // ── MemberOnParam ───────────────────────────────────────────────
+
+    #[test]
+    fn member_on_param_matches_req_body() {
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "const x = req.body;");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MemberOnParam {
+            receiver: "req",
+            property: "body",
+        };
+        assert!(matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn member_on_param_rejects_wrong_receiver() {
+        // `other.body` must not match `req.*`.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "const x = other.body;");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MemberOnParam {
+            receiver: "req",
+            property: "body",
+        };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn member_on_param_wildcard_property_matches_any_field() {
+        // `property: "*"` is the "any field on this receiver" form,
+        // used for shapes like `searchParams.X` where every property
+        // is URL-derived.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "const x = req.weird_custom_field;");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MemberOnParam {
+            receiver: "req",
+            property: "*",
+        };
+        assert!(matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn member_on_param_rejects_wrong_property_when_named() {
+        // Named property must match exactly — `req.foo` does not
+        // match `req.body`.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "const x = req.foo;");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MemberOnParam {
+            receiver: "req",
+            property: "body",
+        };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    // ── MethodCall ──────────────────────────────────────────────────
+
+    #[test]
+    fn method_call_matches_chained_receiver() {
+        // `c.req.json()` — two-segment receiver chain, exactly the
+        // Hono context shape called out in the ADR.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "c.req.json();");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MethodCall {
+            receiver: "c.req",
+            method: "json",
+        };
+        assert!(matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn method_call_matches_single_segment_receiver() {
+        // `req.json()` — single-ident receiver, the bare-handler case.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "req.json();");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MethodCall {
+            receiver: "req",
+            method: "json",
+        };
+        assert!(matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn method_call_rejects_wrong_method() {
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "c.req.text();");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MethodCall {
+            receiver: "c.req",
+            method: "json",
+        };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn method_call_rejects_wrong_receiver() {
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "ctx.req.json();");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MethodCall {
+            receiver: "c.req",
+            method: "json",
+        };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    // ── ImportedCall ────────────────────────────────────────────────
+
+    #[test]
+    fn imported_call_returns_false_without_index() {
+        // Per ADR 0014: when `ctx.index` is `None`, an `ImportedCall`
+        // matcher cannot resolve the import target and must abstain.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "exec('ls');");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::ImportedCall {
+            module: "child_process",
+            name: "exec",
+        };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn imported_call_matches_when_import_resolves_to_module() {
+        // Build a real ProjectIndex with the file's `imports` map
+        // populated so the matcher can verify `exec` came from
+        // `child_process`. Parsing the snippet here doesn't populate
+        // the index (the index is built by the extract pass, not by
+        // `parse`), so we hand-roll the summary to mirror what the
+        // pass would produce for `import { exec } from "child_process"`.
+        let alloc = Allocator::default();
+        let file_path = PathBuf::from("/virt/file.ts");
+        let source = "exec('ls');";
+        let parsed = parse(&alloc, &file_path, source).expect("parse");
+        let expr = first_expression(&parsed);
+
+        let mut summary = FileSummary {
+            path: file_path.clone(),
+            ..Default::default()
+        };
+        summary.imports.insert(
+            "exec".into(),
+            ImportRef {
+                module_specifier: "child_process".into(),
+                imported_name: "exec".into(),
+            },
+        );
+        let mut index = ProjectIndex::new();
+        index.insert_file(summary);
+
+        let ctx = MatcherContext {
+            file: &parsed,
+            index: Some(&index),
+        };
+
+        let matcher = AstMatcher::ImportedCall {
+            module: "child_process",
+            name: "exec",
+        };
+        assert!(matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn imported_call_rejects_wrong_module() {
+        // Same shape, but the import comes from an unrelated module —
+        // a local helper that happens to be named `exec`. Stryx must
+        // not raise a `child_process` finding.
+        let alloc = Allocator::default();
+        let file_path = PathBuf::from("/virt/file.ts");
+        let parsed = parse(&alloc, &file_path, "exec('ls');").expect("parse");
+        let expr = first_expression(&parsed);
+
+        let mut summary = FileSummary {
+            path: file_path.clone(),
+            ..Default::default()
+        };
+        summary.imports.insert(
+            "exec".into(),
+            ImportRef {
+                module_specifier: "./my-local-helpers".into(),
+                imported_name: "exec".into(),
+            },
+        );
+        let mut index = ProjectIndex::new();
+        index.insert_file(summary);
+
+        let ctx = MatcherContext {
+            file: &parsed,
+            index: Some(&index),
+        };
+
+        let matcher = AstMatcher::ImportedCall {
+            module: "child_process",
+            name: "exec",
+        };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn imported_call_rejects_member_call_callee() {
+        // `cp.exec('ls')` is not a bare-ident call — `ImportedCall`
+        // shape is specifically the destructured-import case.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "cp.exec('ls');");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::ImportedCall {
+            module: "child_process",
+            name: "exec",
+        };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    // ── NamespaceCall ───────────────────────────────────────────────
+
+    #[test]
+    fn namespace_call_matches_bun_spawn() {
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "Bun.spawn(['ls']);");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::NamespaceCall {
+            namespace: "Bun",
+            member: "spawn",
+        };
+        assert!(matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn namespace_call_rejects_wrong_namespace() {
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "Deno.spawn(['ls']);");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::NamespaceCall {
+            namespace: "Bun",
+            member: "spawn",
+        };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn namespace_call_rejects_chained_receiver() {
+        // Namespace shape is single-ident only — `globalThis.Bun.spawn()`
+        // is not a `NamespaceCall` match because the receiver is not a
+        // bare identifier. Adapters that need that shape can either
+        // use `MethodCall` with a dotted receiver or add a dedicated
+        // variant in a future slice.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "globalThis.Bun.spawn(['ls']);");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::NamespaceCall {
+            namespace: "Bun",
+            member: "spawn",
+        };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    // ── MethodCallAnyReceiver ───────────────────────────────────────
+
+    #[test]
+    fn method_call_any_receiver_matches_parse() {
+        // The schema-parse shape — receiver identity doesn't matter,
+        // only the called method name.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "schema.parse(x);");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MethodCallAnyReceiver { method: "parse" };
+        assert!(matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn method_call_any_receiver_matches_any_receiver() {
+        // Same call shape with a completely different receiver name —
+        // still matches.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "UserSchema.parse(input);");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MethodCallAnyReceiver { method: "parse" };
+        assert!(matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn method_call_any_receiver_rejects_wrong_method() {
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "schema.other(x);");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MethodCallAnyReceiver { method: "parse" };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn method_call_any_receiver_rejects_bare_ident_call() {
+        // Bare-ident `parse(x)` is not a member call — the matcher
+        // explicitly requires a `<receiver>.<method>(...)` shape.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "parse(x);");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::MethodCallAnyReceiver { method: "parse" };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    // ── DecoratedParam / DecoratedClass ─────────────────────────────
+
+    #[test]
+    fn decorated_param_always_false_on_expressions() {
+        // `Expression` nodes don't carry parameter decorators —
+        // recognition happens at the parameter declaration site in a
+        // separate code path. Documented in the matcher impl.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "const x = req.body;");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::DecoratedParam { decorator: "Body" };
+        assert!(!matcher.matches(&ctx, expr));
+    }
+
+    #[test]
+    fn decorated_class_always_false_on_expressions() {
+        // Class-level decorators attach to class declarations, not
+        // expressions. Documented in the matcher impl.
+        let alloc = Allocator::default();
+        let parsed = parse_snippet(&alloc, "const x = req.body;");
+        let expr = first_expression(&parsed);
+        let ctx = matcher_ctx(&parsed);
+        let matcher = AstMatcher::DecoratedClass {
+            decorator: "Controller",
+        };
+        assert!(!matcher.matches(&ctx, expr));
     }
 }

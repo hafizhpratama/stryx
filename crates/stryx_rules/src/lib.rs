@@ -21,8 +21,14 @@ pub mod registry;
 pub mod steps;
 
 use stryx_ast::ParsedFile;
+use stryx_ast::ast::Expression;
 use stryx_core::{Finding, RuleId, Severity};
 use stryx_index::{FileSummary, ProjectIndex};
+
+use crate::adapters::{
+    EnabledAdapters, GuardPattern, MatcherContext, PropagatorPattern, SanitiserPattern,
+    SinkPattern, SourcePattern,
+};
 
 /// Per-rule metadata surfaced by `--list-rules` and reporters.
 #[derive(Debug, Clone, Copy)]
@@ -34,10 +40,94 @@ pub struct RuleMeta {
 
 /// Context handed to a rule on every pass. The `index` is `None` during
 /// the extract pass (the index is being built) and `Some` during the
-/// run pass.
+/// run pass. `adapters` is `None` when the caller hasn't resolved a
+/// `ProjectProfile` yet (most unit-test sites); production scans
+/// always populate it from
+/// [`adapters::AdapterRegistry::enabled_for`].
 pub struct RuleContext<'a, 'b> {
     pub file: &'a ParsedFile<'b>,
     pub index: Option<&'a ProjectIndex>,
+    pub adapters: Option<&'a EnabledAdapters>,
+}
+
+impl<'a, 'b> RuleContext<'a, 'b> {
+    /// First source pattern in the enabled adapter set whose matcher
+    /// list matches `expr`. Returns `None` when no adapters are
+    /// configured (`self.adapters` is `None`), when none of the
+    /// active adapters contribute sources, or when no matcher fires.
+    ///
+    /// Rule callers use this to ask "is this expression a recognised
+    /// untrusted-input source on the active stack?" without knowing
+    /// which adapters are live. The returned pattern's `label` drives
+    /// the taint label introduced; `id` is the diagnostic attribution
+    /// used by reporters (`source: framework/nestjs/body-param`).
+    pub fn match_source(&self, expr: &Expression<'_>) -> Option<&'static SourcePattern> {
+        let mctx = MatcherContext {
+            file: self.file,
+            index: self.index,
+        };
+        self.adapters?
+            .sources
+            .iter()
+            .find(|p| p.matchers.iter().any(|m| m.matches(&mctx, expr)))
+            .copied()
+    }
+
+    /// First sink pattern whose matcher list matches `expr`. See
+    /// [`match_source`](Self::match_source) for the lookup model.
+    pub fn match_sink(&self, expr: &Expression<'_>) -> Option<&'static SinkPattern> {
+        let mctx = MatcherContext {
+            file: self.file,
+            index: self.index,
+        };
+        self.adapters?
+            .sinks
+            .iter()
+            .find(|p| p.matchers.iter().any(|m| m.matches(&mctx, expr)))
+            .copied()
+    }
+
+    /// First sanitiser pattern whose matcher list matches `expr`. See
+    /// [`match_source`](Self::match_source) for the lookup model.
+    pub fn match_sanitiser(&self, expr: &Expression<'_>) -> Option<&'static SanitiserPattern> {
+        let mctx = MatcherContext {
+            file: self.file,
+            index: self.index,
+        };
+        self.adapters?
+            .sanitisers
+            .iter()
+            .find(|p| p.matchers.iter().any(|m| m.matches(&mctx, expr)))
+            .copied()
+    }
+
+    /// First guard pattern whose matcher list matches `expr`. See
+    /// [`match_source`](Self::match_source) for the lookup model.
+    pub fn match_guard(&self, expr: &Expression<'_>) -> Option<&'static GuardPattern> {
+        let mctx = MatcherContext {
+            file: self.file,
+            index: self.index,
+        };
+        self.adapters?
+            .guards
+            .iter()
+            .find(|p| p.matchers.iter().any(|m| m.matches(&mctx, expr)))
+            .copied()
+    }
+
+    /// First propagator pattern whose matcher list matches `expr`. See
+    /// [`match_source`](Self::match_source) for the lookup model.
+    pub fn match_propagator(&self, expr: &Expression<'_>) -> Option<&'static PropagatorPattern> {
+        let mctx = MatcherContext {
+            file: self.file,
+            index: self.index,
+        };
+        self.adapters?
+            .propagators
+            .iter()
+            .find(|p| p.matchers.iter().any(|m| m.matches(&mctx, expr)))
+            .copied()
+    }
 }
 
 /// What a rule contributes to the project index. Most rules return
@@ -60,3 +150,111 @@ pub trait Rule: Send + Sync {
 }
 
 pub use registry::{RuleRegistry, builtin_rules};
+
+#[cfg(test)]
+mod context_tests {
+    //! Wiring tests for the adapter substrate hook on
+    //! [`RuleContext`]. They guard the *plumbing*: that `match_*`
+    //! short-circuits to `None` when no adapters are configured, and
+    //! that an `EnabledAdapters` carrying a matching pattern is
+    //! actually reachable through the helper (the helper must build
+    //! a [`MatcherContext`], iterate `adapters.sources`, and surface
+    //! the `&'static SourcePattern` whose matcher fires).
+    //!
+    //! Per-variant matcher logic lives in
+    //! [`crate::adapters::AstMatcher::matches`]; this module only
+    //! pins the wiring, so a single matcher variant is sufficient to
+    //! prove the round-trip.
+    use super::*;
+    use crate::adapters::{AstMatcher, EnabledAdapters, SourcePattern};
+    use std::path::Path;
+    use stryx_ast::{Allocator, parse};
+    use stryx_taint::TaintLabel;
+
+    /// Minimal expression source — `req.body` is the canonical
+    /// `MemberOnParam` shape and the only matcher variant we exercise
+    /// here. Wiring tests deliberately do not enumerate variants;
+    /// matcher-variant coverage belongs in `adapters.rs`.
+    const SAMPLE: &str = "const x = req.body;";
+
+    fn first_expression<'a>(parsed: &'a stryx_ast::ParsedFile<'_>) -> &'a Expression<'a> {
+        // `const x = <expr>;` parses to one VariableDeclaration with
+        // exactly one declarator whose `init` is the expression we
+        // want. Anything else is a fixture bug, so panic loudly.
+        use stryx_ast::ast::Statement;
+        let stmt = parsed
+            .program
+            .body
+            .first()
+            .expect("sample has one statement");
+        match stmt {
+            Statement::VariableDeclaration(decl) => decl
+                .declarations
+                .first()
+                .and_then(|d| d.init.as_ref())
+                .expect("declarator with init"),
+            _ => panic!("sample must parse to a VariableDeclaration"),
+        }
+    }
+
+    #[test]
+    fn match_source_returns_none_when_no_adapters_configured() {
+        let allocator = Allocator::default();
+        let parsed = parse(&allocator, Path::new("/virt/file.ts"), SAMPLE).expect("parse");
+        let expr = first_expression(&parsed);
+
+        let ctx = RuleContext {
+            file: &parsed,
+            index: None,
+            adapters: None,
+        };
+
+        assert!(
+            ctx.match_source(expr).is_none(),
+            "with `adapters: None`, match_source must short-circuit to None"
+        );
+    }
+
+    #[test]
+    fn match_source_returns_pattern_when_matcher_fires() {
+        // Wiring round-trip: an EnabledAdapters carrying a
+        // SourcePattern whose `MemberOnParam` matcher targets
+        // `req.body` is reachable through `ctx.match_source`, and the
+        // helper surfaces the same `&'static SourcePattern` reference
+        // back to the caller (preserving `id` and `label` so rules
+        // can attribute and propagate correctly).
+        static MATCHERS: &[AstMatcher] = &[AstMatcher::MemberOnParam {
+            receiver: "req",
+            property: "body",
+        }];
+        static PATTERN: SourcePattern = SourcePattern {
+            id: "test/req-body",
+            label: TaintLabel::UserInput,
+            matchers: MATCHERS,
+        };
+        let enabled = EnabledAdapters {
+            active: Vec::new(),
+            sources: vec![&PATTERN],
+            sinks: Vec::new(),
+            sanitisers: Vec::new(),
+            guards: Vec::new(),
+            propagators: Vec::new(),
+        };
+
+        let allocator = Allocator::default();
+        let parsed = parse(&allocator, Path::new("/virt/file.ts"), SAMPLE).expect("parse");
+        let expr = first_expression(&parsed);
+
+        let ctx = RuleContext {
+            file: &parsed,
+            index: None,
+            adapters: Some(&enabled),
+        };
+
+        let matched = ctx
+            .match_source(expr)
+            .expect("matcher recognises `req.body`; helper must surface the pattern");
+        assert_eq!(matched.id, "test/req-body");
+        assert_eq!(matched.label, TaintLabel::UserInput);
+    }
+}

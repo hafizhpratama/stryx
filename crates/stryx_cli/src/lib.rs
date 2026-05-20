@@ -16,6 +16,7 @@ use stryx_core::Finding;
 use stryx_index::jsonc::strip_jsonc;
 use stryx_index::profile::{self, ProjectProfile};
 use stryx_index::{PathAlias, ProjectIndex};
+use stryx_rules::adapters::{AdapterRegistry, EnabledAdapters};
 use stryx_rules::{RuleContext, RuleRegistry, builtin_rules};
 
 mod suppress;
@@ -54,6 +55,14 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
     // exists, which is the right answer for `scan --format=json` on a
     // workspace with a package.json but no committed sources yet.
     let profile = profile::detect(path);
+
+    // Resolve which adapters apply to the detected profile. Owned by
+    // this scope so the `&EnabledAdapters` threaded through extract /
+    // run lives for the full pipeline; the registry itself is built
+    // from `&'static` adapter references so cloning the resolved view
+    // per round would be wasteful and is unnecessary.
+    let adapters_registry = AdapterRegistry::builtin();
+    let enabled_adapters = adapters_registry.enabled_for(&profile);
 
     if files.is_empty() {
         return Ok(ScanResult {
@@ -97,7 +106,7 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
         let prev = Arc::new(project_index);
         let summaries: Vec<stryx_index::FileSummary> = files
             .par_iter()
-            .flat_map_iter(|file| extract_file(file, &registry, &sources, &prev))
+            .flat_map_iter(|file| extract_file(file, &registry, &sources, &prev, &enabled_adapters))
             .collect();
         let mut next = ProjectIndex::new();
         for summary in summaries {
@@ -136,7 +145,9 @@ pub fn scan(path: &Path) -> Result<ScanResult> {
     // Pass 2 — run.
     let findings: Vec<Finding> = files
         .par_iter()
-        .flat_map_iter(|file| run_file(file, &registry, &sources, &project_index))
+        .flat_map_iter(|file| {
+            run_file(file, &registry, &sources, &project_index, &enabled_adapters)
+        })
         .collect();
 
     let sources_out: HashMap<PathBuf, String> = sources
@@ -265,6 +276,7 @@ fn extract_file(
     registry: &Arc<RuleRegistry>,
     sources: &Arc<DashMap<PathBuf, String>>,
     prev_index: &Arc<ProjectIndex>,
+    adapters: &EnabledAdapters,
 ) -> Vec<stryx_index::FileSummary> {
     let source = if let Some(cached) = sources.get(file) {
         cached.clone()
@@ -293,6 +305,7 @@ fn extract_file(
     let ctx = RuleContext {
         file: &parsed,
         index: Some(prev_index),
+        adapters: Some(adapters),
     };
     let mut out = Vec::new();
     for rule in registry.rules() {
@@ -408,6 +421,7 @@ fn run_file(
     registry: &Arc<RuleRegistry>,
     sources: &Arc<DashMap<PathBuf, String>>,
     index: &Arc<ProjectIndex>,
+    adapters: &EnabledAdapters,
 ) -> Vec<Finding> {
     let source = match sources.get(file) {
         Some(s) => s.clone(),
@@ -423,6 +437,7 @@ fn run_file(
     let ctx = RuleContext {
         file: &parsed,
         index: Some(index),
+        adapters: Some(adapters),
     };
     let mut findings = Vec::new();
     for rule in registry.rules() {

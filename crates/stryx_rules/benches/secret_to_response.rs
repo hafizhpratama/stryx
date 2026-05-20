@@ -25,6 +25,7 @@ fn run_rules(source: &str, path: &std::path::Path) -> usize {
     let ctx = RuleContext {
         file: &parsed,
         index: None,
+        adapters: None,
     };
     registry.rules().iter().map(|r| r.run(&ctx).len()).sum()
 }

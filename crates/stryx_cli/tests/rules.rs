@@ -27,6 +27,7 @@ fn scan_file(path: &Path) -> Vec<Finding> {
     let ctx = RuleContext {
         file: &parsed,
         index: None,
+        adapters: None,
     };
     let raw: Vec<Finding> = registry.rules().iter().flat_map(|r| r.run(&ctx)).collect();
     // Apply the same post-rule suppression filter the CLI binary
@@ -71,6 +72,7 @@ fn scan_dir(dir: &Path) -> Vec<Finding> {
             let ctx = RuleContext {
                 file: &parsed,
                 index: Some(&index),
+                adapters: None,
             };
             for rule in registry.rules() {
                 if let Some(summary) = rule.extract(&ctx) {
@@ -111,6 +113,7 @@ fn scan_dir(dir: &Path) -> Vec<Finding> {
         let ctx = RuleContext {
             file: &parsed,
             index: Some(&index),
+            adapters: None,
         };
         for rule in registry.rules() {
             findings.extend(rule.run(&ctx));
@@ -150,6 +153,7 @@ fn extract_index(dir: &Path) -> ProjectIndex {
             let ctx = RuleContext {
                 file: &parsed,
                 index: Some(&index),
+                adapters: None,
             };
             for rule in registry.rules() {
                 if let Some(summary) = rule.extract(&ctx) {
@@ -1112,6 +1116,7 @@ fn unvalidated_body_to_db_validate_wrapper_silent() {
         let ctx = RuleContext {
             file: &parsed,
             index: Some(&extract_index),
+            adapters: None,
         };
         registry
             .rules()
@@ -1126,6 +1131,7 @@ fn unvalidated_body_to_db_validate_wrapper_silent() {
     let ctx = RuleContext {
         file: &parsed,
         index: Some(&index),
+        adapters: None,
     };
     let findings: Vec<_> = registry
         .rules()
