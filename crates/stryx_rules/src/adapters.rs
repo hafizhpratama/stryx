@@ -397,9 +397,10 @@ impl AdapterRegistry {
     /// as they ship. Currently:
     ///
     /// - Framework: `express`, `hono`, `nestjs`, `next-backend`
-    /// - Data layer: `prisma`
-    /// - Validation: `class-validator`
+    /// - Data layer: `prisma`, `drizzle`
+    /// - Validation: `zod`, `class-validator`
     /// - Auth: `better-auth`
+    /// - LLM SDK: `openai`
     pub fn builtin() -> Self {
         static EXPRESS: crate::adapters_express::ExpressAdapter =
             crate::adapters_express::ExpressAdapter;
@@ -410,10 +411,15 @@ impl AdapterRegistry {
             crate::adapters_next::NextBackendAdapter;
         static PRISMA: crate::adapters_prisma::PrismaAdapter =
             crate::adapters_prisma::PrismaAdapter;
+        static DRIZZLE: crate::adapters_drizzle::DrizzleAdapter =
+            crate::adapters_drizzle::DrizzleAdapter;
+        static ZOD: crate::adapters_zod::ZodAdapter = crate::adapters_zod::ZodAdapter;
         static CLASS_VALIDATOR: crate::adapters_class_validator::ClassValidatorAdapter =
             crate::adapters_class_validator::ClassValidatorAdapter;
         static BETTER_AUTH: crate::adapters_better_auth::BetterAuthAdapter =
             crate::adapters_better_auth::BetterAuthAdapter;
+        static OPENAI: crate::adapters_openai::OpenAiAdapter =
+            crate::adapters_openai::OpenAiAdapter;
         Self {
             adapters: vec![
                 &EXPRESS,
@@ -421,8 +427,11 @@ impl AdapterRegistry {
                 &NESTJS,
                 &NEXT_BACKEND,
                 &PRISMA,
+                &DRIZZLE,
+                &ZOD,
                 &CLASS_VALIDATOR,
                 &BETTER_AUTH,
+                &OPENAI,
             ],
         }
     }
@@ -670,20 +679,23 @@ mod tests {
     use std::path::PathBuf;
     use stryx_index::profile::{Detected, Evidence, EvidenceKind, FrameworkHint, ProjectProfile};
 
-    /// `builtin()` currently registers seven adapters across four
+    /// `builtin()` currently registers ten adapters across five
     /// dimensions. This pin updates as new built-in adapters land.
     #[test]
     fn builtin_registry_contains_expected_adapters() {
         let reg = AdapterRegistry::builtin();
-        assert_eq!(reg.all().len(), 7);
+        assert_eq!(reg.all().len(), 10);
         let ids: Vec<&str> = reg.all().iter().map(|a| a.id().0).collect();
         assert!(ids.contains(&"framework/express"));
         assert!(ids.contains(&"framework/hono"));
         assert!(ids.contains(&"framework/nestjs"));
         assert!(ids.contains(&"framework/next-backend"));
         assert!(ids.contains(&"data/prisma"));
+        assert!(ids.contains(&"data/drizzle"));
+        assert!(ids.contains(&"validation/zod"));
         assert!(ids.contains(&"validation/class-validator"));
         assert!(ids.contains(&"auth/better-auth"));
+        assert!(ids.contains(&"llm/openai"));
     }
 
     #[test]
