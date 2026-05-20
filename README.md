@@ -44,7 +44,7 @@ cd stryx
 cargo install --path crates/stryx_cli
 ```
 
-Pre-built binaries — attached to the [v0.2.14 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.2.14)
+Pre-built binaries — attached to the [v0.3.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.3.0)
 across five targets (Linux x64/arm64, macOS x64/arm64, Windows x64).
 
 npm — `npm install @hafizhpratama/stryx` or `npx @hafizhpratama/stryx
@@ -158,15 +158,16 @@ and the [stack-aware roadmap](docs/roadmap/stack-aware-scanning.md).
 
 ## Status
 
-**v0.2.14 — patch release.** All Critical-severity rules now have
-cross-file taint coverage — `flow/sql-injection` and
-`flow/command-injection-via-exec` joined SSRF, redirect-open, and
-unvalidated-body-to-db in the cross-file tier. Plus one precision
-fix on SSRF host-pinning (env-var-prefix templates now correctly
-classified Medium path-injection). 11 rules in the registry, no
-new rules vs. v0.2.0. APIs follow SemVer. See
-[ADR 0011](docs/decisions/0011-v01-to-v02-transition.md) for
-the Phase 2 plan and the v0.1 retrospective.
+**v0.3.0 — first stack-aware milestone.** `ProjectProfile` ships:
+Stryx now detects the TypeScript backend stack (language, runtime,
+framework, data layer, validator, auth, LLM SDK, deployment) from
+`package.json`, lockfiles, and config files (no source parsing
+required). Detection appears in both the human and JSON scan output;
+the next release wires adapters into rule decisions. Zero rule-
+behaviour change in this milestone — the existing 11 rules fire on
+the same code they did at v0.2.15. See [ADR 0013](docs/decisions/0013-stack-aware-project-profiles.md)
+for the architecture and the [stack-aware roadmap](docs/roadmap/stack-aware-scanning.md)
+for what lands in v0.4.0 (broad adapter pass across all P0/P1 stacks).
 
 - ✅ Architecture, ADRs, rule specs
 - ✅ Foundational crates `stryx_index` and `stryx_taint`
@@ -192,16 +193,17 @@ the Phase 2 plan and the v0.1 retrospective.
 - ✅ App Router `searchParams.X` recognised as a body source
 - ✅ CLI binary (`cargo install --path crates/stryx_cli`)
 - ✅ Pre-built binaries on [GitHub Releases](https://github.com/hafizhpratama/stryx/releases)
+- ✅ npm distribution (`@hafizhpratama/stryx`)
+- ✅ `ProjectProfile` cheap-pass detection (v0.3.0)
+- 🚧 Broad adapter pass — sources / sinks / sanitisers / guards
+  for every P0 and P1 stack in the catalog (v0.4.0)
 - 🚧 GitHub Action
-- 🚧 napi-rs npm distribution
 - 🚧 Homebrew formula
 - 📋 `flow/path-traversal` slice 2 (deferred — 0 OSS TPs in
   Phase 1 sample)
-- 📋 ADR 0009 / ADR 0010 substrate pull-through (Phase 2
-  Track C — guard-based barriers formalisation, external
-  library summaries)
-- 📋 Hono / Express support via source/sink adapters (Phase 3)
-- 📋 Type-aware analysis, custom taint configs (Phase 4)
+- 📋 Score (0–100, severity-capped), surface controls, `--diff <base>`
+  (planned v0.5.0+)
+- 📋 Type-aware analysis, custom taint configs (later)
 
 ## Documentation
 
