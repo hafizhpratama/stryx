@@ -14,7 +14,7 @@ use std::path::PathBuf;
 
 use regex::Regex;
 use stryx_ast::{
-    ScopeFlags, Visit,
+    ParsedFile, ScopeFlags, Visit,
     ast::{
         ArrowFunctionExpression, BindingPattern, CallExpression, Expression, Function,
         MemberExpression, ObjectPropertyKind, Statement, VariableDeclaration,
@@ -23,6 +23,7 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
+use crate::adapters::{EnabledAdapters, MatcherContext, SinkKind};
 use crate::steps::sanitizers::RedactorSanitizer;
 use crate::steps::sinks::{ResponseSink, is_response_constructor, response_sink_label};
 use crate::steps::{StepCtx, StepKind};
@@ -142,29 +143,118 @@ impl Rule for SecretToResponse {
     }
 
     fn run<'a, 'b>(&self, ctx: &RuleContext<'a, 'b>) -> Vec<Finding> {
-        let mut visitor = SecretFlowVisitor::new(ctx.file.path.clone(), self);
+        let mut visitor =
+            SecretFlowVisitor::new_with_adapters(ctx.file.path.clone(), self, ctx.adapters);
+        // Stash the `&ParsedFile` so the response-sink recogniser can
+        // construct a `MatcherContext` when consulting adapter-contributed
+        // `SinkKind::Response` patterns. Held as a raw borrow on the
+        // visitor (rather than threaded through every `scan_for_sinks`
+        // call) so the AST traversal entry points stay shape-identical
+        // to the pre-substrate code path.
+        visitor.parsed_file = Some(ctx.file);
         visitor.visit_program(&ctx.file.program);
         visitor.findings
     }
 }
 
-struct SecretFlowVisitor<'r> {
+struct SecretFlowVisitor<'r, 'idx, 'b> {
     file: PathBuf,
     rule: &'r SecretToResponse,
     findings: Vec<Finding>,
     /// Stack of per-function scopes; each frame holds the names of
     /// identifiers currently carrying the Secret label.
     scopes: Vec<HashSet<String>>,
+    /// Active stack adapters resolved from the project's
+    /// `ProjectProfile`. `None` when the rule is exercised outside the
+    /// production scan loop (unit-test sites that build a visitor
+    /// directly). Consulted by [`Self::adapter_response_sink_label`]
+    /// as an OR-fallback after the hardcoded
+    /// [`response_sink_label`] recogniser fails — extends response-sink
+    /// coverage to every framework adapter's
+    /// `SinkKind::Response` pattern.
+    ///
+    /// Note: NestJS controllers return the response body from the
+    /// handler method rather than calling a sink (`res.json(...)`)
+    /// explicitly; recognising "this method's return value IS a
+    /// response sink" needs return-statement modelling that is out of
+    /// scope for this migration. The adapter substrate extends
+    /// recognition to Hono / Fastify / Next-backend / Express response
+    /// shapes (all of which DO call a sink); NestJS coverage stays
+    /// unchanged.
+    adapters: Option<&'idx EnabledAdapters>,
+    /// The `&ParsedFile` is needed to build a [`MatcherContext`] when
+    /// dispatching to [`crate::adapters::AstMatcher::matches`]. Paired
+    /// with [`Self::adapters`]: when one is `None` the other is unused.
+    /// The substrate's response-sink matchers (`MethodCall`,
+    /// `MethodCallAnyReceiver`, `NamespaceCall`) are pure-syntactic and
+    /// do not read from `file` or `index`, so this borrow is purely a
+    /// shape requirement of the matcher API.
+    parsed_file: Option<&'idx ParsedFile<'b>>,
 }
 
-impl<'r> SecretFlowVisitor<'r> {
-    fn new(file: PathBuf, rule: &'r SecretToResponse) -> Self {
+impl<'r, 'idx, 'b> SecretFlowVisitor<'r, 'idx, 'b> {
+    fn new_with_adapters(
+        file: PathBuf,
+        rule: &'r SecretToResponse,
+        adapters: Option<&'idx EnabledAdapters>,
+    ) -> Self {
         Self {
             file,
             rule,
             findings: Vec::new(),
             scopes: Vec::new(),
+            adapters,
+            parsed_file: None,
         }
+    }
+
+    /// OR-fallback to [`response_sink_label`]: returns a synthesised
+    /// label when the call expression matches an adapter-contributed
+    /// `SinkKind::Response` pattern. Active only when both
+    /// [`Self::adapters`] and [`Self::parsed_file`] are populated
+    /// (production scan path); a `None` on either short-circuits to
+    /// `None` so existing unit-test paths preserve byte-identical
+    /// behaviour.
+    ///
+    /// The label is derived from the call's callee chain (e.g.
+    /// `c.json`, `res.send`, `reply.send`) — same shape the hardcoded
+    /// recogniser produces — so the finding message stays uniform
+    /// regardless of which recognition arm fired. Falls back to the
+    /// pattern's `id` only when the callee chain isn't a
+    /// `receiver.method(...)` shape (defensive; the variants we accept
+    /// here are all member-call shaped).
+    ///
+    /// `expr` is the parent `Expression::CallExpression(call)` node —
+    /// passed by the caller so we can dispatch directly to
+    /// [`crate::adapters::AstMatcher::matches`] without re-synthesising
+    /// an `Expression` (the matcher API takes `&Expression`, never
+    /// `&CallExpression`).
+    fn adapter_response_sink_label(
+        &self,
+        expr: &Expression<'_>,
+        call: &CallExpression<'_>,
+    ) -> Option<String> {
+        let adapters = self.adapters?;
+        let parsed_file = self.parsed_file?;
+        let mctx = MatcherContext {
+            file: parsed_file,
+            // Response-sink patterns in the shipped adapters use
+            // `MethodCall` / `NamespaceCall` / `MethodCallAnyReceiver`,
+            // none of which consult the index. Passing `None` keeps
+            // this fallback hot-path-cheap and avoids accidentally
+            // depending on extract-pass ordering.
+            index: None,
+        };
+        let matched = adapters
+            .sinks
+            .iter()
+            .filter(|p| p.sink == SinkKind::Response)
+            .find(|p| p.matchers.iter().any(|m| m.matches(&mctx, expr)))?;
+        // Prefer a callee-derived label so the finding message reads
+        // like `c.json` / `res.send` regardless of which recognition
+        // arm fired. Falls back to the pattern's `id` for the rare
+        // case where the callee shape isn't `receiver.method(...)`.
+        callee_chain_label(call).or_else(|| Some(matched.id.to_string()))
     }
 
     fn enter_fn(&mut self) {
@@ -312,7 +402,20 @@ impl<'r> SecretFlowVisitor<'r> {
                 // carry a label is a future refinement; until then
                 // the label producer doubles as the canonical sink
                 // classifier.
-                if let Some(sink_label) = response_sink_label(call) {
+                //
+                // OR-semantics with the stack adapter substrate (ADR
+                // 0014): when the hardcoded recogniser returns `None`,
+                // consult the active adapters' `SinkKind::Response`
+                // patterns. For shipped adapters the hardcoded set is
+                // a superset of every adapter pattern, so the fallback
+                // is a no-op for existing fixtures — preserving
+                // byte-identical behaviour. Future adapters
+                // contributing novel response-sink shapes
+                // (server-action returns, route-handler wrappers) will
+                // light up automatically.
+                let sink_label = response_sink_label(call)
+                    .or_else(|| self.adapter_response_sink_label(expr, call));
+                if let Some(sink_label) = sink_label {
                     for arg in &call.arguments {
                         let Some(arg_expr) = arg.as_expression() else {
                             continue;
@@ -515,7 +618,7 @@ impl<'r> SecretFlowVisitor<'r> {
     }
 }
 
-impl<'a> Visit<'a> for SecretFlowVisitor<'_> {
+impl<'a> Visit<'a> for SecretFlowVisitor<'_, '_, '_> {
     fn visit_function(&mut self, func: &Function<'a>, _flags: ScopeFlags) {
         self.enter_fn();
         if let Some(body) = &func.body {
@@ -553,6 +656,26 @@ fn process_env_name(expr: &Expression<'_>) -> Option<String> {
 // `response_sink_label` and `is_response_constructor` moved to
 // `crate::steps::sinks::response` (ADR 0008 slice 8.4b). Imported
 // at the top of this file.
+
+/// Pretty-print a call's callee as a `receiver.method` chain — used
+/// by the adapter substrate fallback in
+/// [`SecretFlowVisitor::adapter_response_sink_label`] so findings
+/// surface the same shape (`c.json`, `res.send`, `reply.send`) the
+/// hardcoded recogniser produces. Returns `None` when the callee
+/// isn't a simple `<ident>.<method>(...)` shape — only the
+/// member-call call expressions adapter response-sink patterns
+/// emit are handled.
+fn callee_chain_label(call: &CallExpression<'_>) -> Option<String> {
+    let MemberExpression::StaticMemberExpression(method) = call.callee.as_member_expression()?
+    else {
+        return None;
+    };
+    let receiver = match &method.object {
+        Expression::Identifier(id) => id.name.as_str(),
+        _ => return None,
+    };
+    Some(format!("{}.{}", receiver, method.property.name.as_str()))
+}
 
 // `is_redactor_call` and `is_boolean_coercion` moved to
 // `crate::steps::sanitizers::redactor` (ADR 0008 slice 8.3c).

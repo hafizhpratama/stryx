@@ -15,7 +15,7 @@
 
 use regex::Regex;
 use stryx_ast::{
-    Visit,
+    ParsedFile, Visit,
     ast::{
         BindingPattern, CallExpression, Declaration, ExportDefaultDeclarationKind,
         ExportNamedDeclaration, Expression, Statement, VariableDeclarator,
@@ -24,6 +24,7 @@ use stryx_ast::{
 };
 use stryx_core::{Finding, Severity};
 
+use crate::adapters::{EnabledAdapters, GuardKind, MatcherContext, SanitizerKind};
 use crate::steps::sanitizers::AuthCheckSanitizer;
 use crate::steps::{StepCtx, StepKind};
 use crate::{Rule, RuleContext, RuleMeta};
@@ -89,10 +90,19 @@ impl Rule for AuthBypassViaWrapper {
             return findings;
         };
         let file_path = ctx.file.path.clone();
+        // `ctx.adapters` is threaded through the run pipeline to keep
+        // this rule consistent with the substrate plumbing applied to
+        // the body-source rules (`flow/sql-injection`, etc.). At this
+        // slice the run pass reads the cached `contains_auth_check`
+        // flag on each summary rather than re-walking wrapper bodies,
+        // so the threaded `adapters` value is not yet consulted here;
+        // a future slice that migrates the extract pass in
+        // `flow/unvalidated-body-to-db` to populate the flag under
+        // adapter context will use the same propagation path.
         for stmt in &ctx.file.program.body {
             match stmt {
                 Statement::ExportNamedDeclaration(decl) => {
-                    self.check_named_export(decl, &file_path, index, &mut findings);
+                    self.check_named_export(decl, &file_path, index, ctx.adapters, &mut findings);
                 }
                 Statement::ExportDefaultDeclaration(decl) => {
                     self.check_default_export(
@@ -100,6 +110,7 @@ impl Rule for AuthBypassViaWrapper {
                         decl.span,
                         &file_path,
                         index,
+                        ctx.adapters,
                         &mut findings,
                     );
                 }
@@ -116,6 +127,7 @@ impl AuthBypassViaWrapper {
         decl: &ExportNamedDeclaration<'_>,
         file: &std::path::Path,
         index: &stryx_index::ProjectIndex,
+        adapters: Option<&EnabledAdapters>,
         out: &mut Vec<Finding>,
     ) {
         let Some(declaration) = &decl.declaration else {
@@ -125,7 +137,7 @@ impl AuthBypassViaWrapper {
             return;
         };
         for declarator in &var.declarations {
-            self.check_declarator(declarator, file, index, out);
+            self.check_declarator(declarator, file, index, adapters, out);
         }
     }
 
@@ -135,12 +147,13 @@ impl AuthBypassViaWrapper {
         decl_span: stryx_ast::OxcSpan,
         file: &std::path::Path,
         index: &stryx_index::ProjectIndex,
+        adapters: Option<&EnabledAdapters>,
         out: &mut Vec<Finding>,
     ) {
         // `export default withAuth(handler)` — the declaration is a
         // CallExpression in oxc's `ExportDefaultDeclarationKind` enum.
         if let ExportDefaultDeclarationKind::CallExpression(call) = decl {
-            self.check_wrapper_call(call, file, index, out, decl_span);
+            self.check_wrapper_call(call, file, index, adapters, out, decl_span);
         }
     }
 
@@ -149,6 +162,7 @@ impl AuthBypassViaWrapper {
         declarator: &VariableDeclarator<'_>,
         file: &std::path::Path,
         index: &stryx_index::ProjectIndex,
+        adapters: Option<&EnabledAdapters>,
         out: &mut Vec<Finding>,
     ) {
         let Some(init) = &declarator.init else {
@@ -166,7 +180,7 @@ impl AuthBypassViaWrapper {
         let Expression::CallExpression(call) = init else {
             return;
         };
-        self.check_wrapper_call(call, file, index, out, declarator.span);
+        self.check_wrapper_call(call, file, index, adapters, out, declarator.span);
     }
 
     /// At a route-handler export site, check whether the call's callee
@@ -177,6 +191,7 @@ impl AuthBypassViaWrapper {
         call: &CallExpression<'_>,
         file: &std::path::Path,
         index: &stryx_index::ProjectIndex,
+        _adapters: Option<&EnabledAdapters>,
         out: &mut Vec<Finding>,
         site_span: stryx_ast::OxcSpan,
     ) {
@@ -223,7 +238,22 @@ impl AuthBypassViaWrapper {
 // ── Shared helper: contains_auth_helper_call ─────────────────────────────
 
 /// Walks `body` recursively (including nested function expressions) and
-/// returns true if any call site invokes a name in `AUTH_HELPER_NAMES`.
+/// returns true if any call site invokes a recognised authentication
+/// helper. Recognition is the OR of the hardcoded
+/// [`AUTH_HELPER_NAMES`] list (via [`AuthCheckSanitizer`]) and — when
+/// an active adapter set is wired in — any pattern contributed by an
+/// adapter as [`SanitizerKind::AuthCheck`] or
+/// [`GuardKind::SessionRequired`].
+///
+/// This entry point keeps its original signature so existing callers
+/// in the extract pass of `flow/unvalidated-body-to-db` continue to
+/// behave byte-identically (no file path / index / adapters available
+/// during raw-body extraction). Callers that have a `ParsedFile` and
+/// (optionally) adapters in hand should prefer
+/// [`contains_auth_helper_call_with_adapters`] so adapter-contributed
+/// auth-helper shapes (`@clerk/nextjs/server` `auth()`,
+/// `better-auth` `getSession()`, `next-auth` `auth()`, etc.) are
+/// recognised in addition to the hardcoded names.
 ///
 /// Used by:
 /// - This rule's run pass (indirectly, via the cached
@@ -231,7 +261,38 @@ impl AuthBypassViaWrapper {
 /// - `flow/unvalidated-body-to-db`'s `build_summary` populates that
 ///   flag by calling this helper once per function.
 pub fn contains_auth_helper_call(body: &[Statement<'_>]) -> bool {
-    let mut visitor = AuthCheckVisitor { found: false };
+    contains_auth_helper_call_with_adapters(body, None, None, None)
+}
+
+/// Adapter-aware variant of [`contains_auth_helper_call`]. When
+/// `adapters` is `Some`, an additional OR-fallback consults every
+/// [`SanitizerKind::AuthCheck`] sanitiser pattern and every
+/// [`GuardKind::SessionRequired`] guard pattern an active adapter
+/// contributes, matching each pattern's [`AstMatcher`]s against the
+/// current call expression. Recognition is strictly additive: a call
+/// the hardcoded list already recognises continues to fire; adapters
+/// can only add more recognitions, never remove them.
+///
+/// `file` and `index` are forwarded to the matcher dispatch so
+/// shapes that need import context (e.g.
+/// [`AstMatcher::ImportedCall`] resolving `@clerk/nextjs/server`'s
+/// `auth`) can resolve. Passing `None` for both is equivalent to the
+/// non-adapter path — import-resolving matchers will simply not fire.
+///
+/// [`AstMatcher`]: crate::adapters::AstMatcher
+/// [`AstMatcher::ImportedCall`]: crate::adapters::AstMatcher::ImportedCall
+pub fn contains_auth_helper_call_with_adapters<'a>(
+    body: &[Statement<'a>],
+    file: Option<&'a ParsedFile<'_>>,
+    index: Option<&stryx_index::ProjectIndex>,
+    adapters: Option<&EnabledAdapters>,
+) -> bool {
+    let mut visitor = AuthCheckVisitor {
+        found: false,
+        file,
+        index,
+        adapters,
+    };
     for stmt in body {
         visitor.visit_statement(stmt);
         if visitor.found {
@@ -241,22 +302,107 @@ pub fn contains_auth_helper_call(body: &[Statement<'_>]) -> bool {
     false
 }
 
-struct AuthCheckVisitor {
+struct AuthCheckVisitor<'a, 'idx> {
     found: bool,
+    /// Optional parsed file used to construct a [`MatcherContext`] for
+    /// the adapter-driven OR-fallback. `None` on the hardcoded path
+    /// (raw-body extraction); `Some` when an adapter-aware caller
+    /// passes one in.
+    file: Option<&'a ParsedFile<'idx>>,
+    /// Optional project index — forwarded to the matcher dispatch so
+    /// `ImportedCall` shapes can resolve. `None` mirrors the
+    /// hardcoded path's lack of import context.
+    index: Option<&'a stryx_index::ProjectIndex>,
+    /// Active stack adapters. `None` reproduces the pre-substrate
+    /// behaviour (hardcoded `AUTH_HELPER_NAMES` only). `Some` enables
+    /// the OR-fallback against `SanitizerKind::AuthCheck` and
+    /// `GuardKind::SessionRequired` patterns.
+    adapters: Option<&'a EnabledAdapters>,
 }
 
-impl<'a> Visit<'a> for AuthCheckVisitor {
+impl<'a, 'idx> AuthCheckVisitor<'a, 'idx> {
+    /// Adapter-driven OR-fallback. Returns true iff `expr` matches
+    /// any [`AstMatcher`] on any `AuthCheck` sanitiser pattern or
+    /// `SessionRequired` guard pattern contributed by an active
+    /// adapter. Pure read.
+    ///
+    /// The auth adapters (`auth/better-auth`, `auth/auth-js`,
+    /// `auth/clerk`) intentionally co-register the same matchers
+    /// under both `SanitizerKind::AuthCheck` and
+    /// `GuardKind::SessionRequired`. OR-including both roles gives
+    /// us the full recognition surface for "this call counts as a
+    /// real session check" — if an adapter ever contributes a guard
+    /// shape that isn't also a sanitiser (or vice versa), both arms
+    /// pick it up without coordination.
+    ///
+    /// [`AstMatcher`]: crate::adapters::AstMatcher
+    fn matches_adapter_auth_pattern(&self, expr: &Expression<'_>) -> bool {
+        let Some(adapters) = self.adapters else {
+            return false;
+        };
+        let Some(file) = self.file else {
+            return false;
+        };
+        let mctx = MatcherContext {
+            file,
+            index: self.index,
+        };
+        for pat in adapters
+            .sanitisers
+            .iter()
+            .filter(|p| p.sanitizer == SanitizerKind::AuthCheck)
+        {
+            if pat.matchers.iter().any(|m| m.matches(&mctx, expr)) {
+                return true;
+            }
+        }
+        for pat in adapters
+            .guards
+            .iter()
+            .filter(|p| p.guard == GuardKind::SessionRequired)
+        {
+            if pat.matchers.iter().any(|m| m.matches(&mctx, expr)) {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl<'a, 'idx> Visit<'a> for AuthCheckVisitor<'a, 'idx> {
+    fn visit_expression(&mut self, expr: &Expression<'a>) {
+        if self.found {
+            return;
+        }
+        // Adapter-driven OR-fallback runs on the `&Expression` surface
+        // so the substrate's `AstMatcher::matches` can dispatch on
+        // every call shape it recognises (`ImportedCall`,
+        // `NamespaceCall`, `MethodCall`, `MethodCallAnyReceiver`).
+        // Strictly additive: short-circuits to `false` when
+        // `adapters` / `file` are `None` (the historical extract-pass
+        // path that every existing fixture exercises), preserving
+        // byte-identical behaviour.
+        if self.matches_adapter_auth_pattern(expr) {
+            self.found = true;
+            return;
+        }
+        // Default descent — keeps the existing recursion semantics
+        // (nested calls / arrow returns / argument expressions are
+        // visited), which the hardcoded `visit_call_expression` hook
+        // below consumes.
+        stryx_ast::walk::walk_expression(self, expr);
+    }
+
     fn visit_call_expression(&mut self, call: &CallExpression<'a>) {
         if self.found {
             return;
         }
         // ADR 0008 — registry-dispatched auth-check recognition.
         // The body-walker stays where it lives; the per-call
-        // predicate moved to `AuthCheckSanitizer`. The visitor
-        // doesn't have a real file path or project index (it
-        // operates on raw AST bodies during summary extraction), so
-        // it constructs a sentinel `StepCtx` — auth recognition is
-        // purely syntactic and the step ignores the ctx fields.
+        // predicate moved to `AuthCheckSanitizer`. The step's
+        // `StepCtx` fields aren't consulted (auth recognition is
+        // purely syntactic on the callee shape), so a sentinel ctx is
+        // safe.
         let ctx = StepCtx {
             file: std::path::Path::new(""),
             index: None,
