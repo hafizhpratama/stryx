@@ -14,6 +14,7 @@
 //! Rules that don't need cross-file context simply skip `extract`; the
 //! default no-op implementation contributes nothing to the index.
 
+pub mod adapters;
 pub mod flows;
 pub mod generic;
 pub mod registry;

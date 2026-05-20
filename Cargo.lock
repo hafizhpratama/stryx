@@ -1454,6 +1454,8 @@ version = "0.3.0"
 dependencies = [
  "criterion",
  "regex",
+ "serde",
+ "serde_json",
  "stryx_ast",
  "stryx_core",
  "stryx_index",
