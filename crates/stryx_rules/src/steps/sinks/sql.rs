@@ -13,6 +13,12 @@
 //! - `<x>.query(<sql>, ...)` where `<x>` is a conventional
 //!   database-connection name (`pool` / `client` / `db` /
 //!   `connection`) — node-postgres / mysql2 raw query path.
+//! - `<x>.<y>.query(<sql>, ...)` where the LAST segment of the
+//!   receiver chain is a conventional connection name —
+//!   catches Sequelize's canonical `db.sequelize.query(<sql>)`,
+//!   TypeORM's `dataSource.query(...)`, and similar
+//!   injected-property shapes that the bare-identifier check
+//!   above misses.
 //!
 //! Severity hint is `Critical` — SQL injection is OWASP A03:2021
 //! and CWE-89, with database compromise and data exfiltration
@@ -74,15 +80,34 @@ pub fn is_sql_sink_call(call: &CallExpression<'_>) -> bool {
     // node-postgres / mysql2 raw query: `<conn>.query(<sql>, ...)`
     // where `<conn>` is one of the conventional bare-identifier
     // database-connection names.
-    if prop == "query"
-        && matches!(
-            &method.object,
-            Expression::Identifier(id)
-                if matches!(id.name.as_str(), "pool" | "client" | "db" | "connection")
-        )
-    {
+    if prop == "query" && is_conventional_db_receiver(&method.object) {
         return true;
     }
 
     false
+}
+
+/// Match a "conventional DB receiver" — either a bare identifier
+/// whose name is one of the canonical pool/client names, or a
+/// member-access chain whose LAST segment is one of those names.
+/// This recognises both `pool.query(...)` (bare) and the
+/// Sequelize/TypeORM injection-via-instance shapes
+/// (`db.sequelize.query(...)`, `this.dataSource.query(...)`).
+///
+/// Walking the last segment only — rather than every segment in
+/// the chain — is deliberate: it costs O(1) per call, keeps the
+/// rule out of class-hierarchy reasoning, and the conventional
+/// names are specific enough (`sequelize`, `db`, `pool`, ...) that
+/// a chain ending in one of them is almost always a real DB
+/// receiver. Apps that name an unrelated field `db` accept the FP.
+fn is_conventional_db_receiver(expr: &Expression<'_>) -> bool {
+    let name = match expr {
+        Expression::Identifier(id) => id.name.as_str(),
+        Expression::StaticMemberExpression(member) => member.property.name.as_str(),
+        _ => return false,
+    };
+    matches!(
+        name,
+        "pool" | "client" | "db" | "connection" | "sequelize" | "dataSource" | "knex"
+    )
 }

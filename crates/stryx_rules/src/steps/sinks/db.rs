@@ -82,7 +82,25 @@ pub fn is_db_write_sink(call: &CallExpression<'_>) -> bool {
 }
 
 pub fn is_prisma_write_sink(call: &CallExpression<'_>) -> bool {
-    // Prisma-shape: <prisma|db|database>.<model>.<method>
+    // Prisma-shape: `<receiver>.<model>.<method>(...)` where the
+    // terminal method is a recognised Prisma write verb. The
+    // receiver is either:
+    //
+    //   - a bare identifier like `prisma` / `db` / `database`
+    //     (the legacy shape — most starter templates use this), or
+    //   - a property access ending in a Prisma-like name —
+    //     `this.prismaService`, `this.prismaClient`, or any
+    //     `<x>.prisma` / `<x>.db` access, or a bare identifier
+    //     named `prismaService` / `prismaClient`. NestJS apps that
+    //     inject a `PrismaService extends PrismaClient` (the
+    //     canonical idiom in the official prisma-examples) end up
+    //     with `this.prismaService.user.create(...)`, which the
+    //     bare-identifier check above misses entirely.
+    //
+    // The receiver-name heuristic is conservative: only literal
+    // prisma-shaped names match. An app with a field accidentally
+    // named `prismaService` accepts the FP, but in practice that
+    // name almost always means a Prisma client.
     const SINK_METHODS: &[&str] = &[
         "create",
         "createMany",
@@ -106,10 +124,55 @@ pub fn is_prisma_write_sink(call: &CallExpression<'_>) -> bool {
     let Expression::StaticMemberExpression(model_member) = &method.object else {
         return false;
     };
-    let Expression::Identifier(root_id) = &model_member.object else {
-        return false;
-    };
-    matches!(root_id.name.as_str(), "prisma" | "db" | "database")
+    is_prisma_receiver(&model_member.object)
+}
+
+/// Does this expression name a Prisma client?
+///
+/// Accepts:
+/// - A bare identifier whose name is `prisma` / `db` / `database` /
+///   `prismaService` / `prismaClient` (or ends in `PrismaService` /
+///   `PrismaClient` for custom subclasses).
+/// - A static member access whose terminal property is one of those
+///   names (`this.prismaService`, `someService.prisma`).
+/// - A CALL whose callee resolves to a prisma-shaped method —
+///   `this.prismaService.extendedPrismaClient()`,
+///   `<x>.$extends(...)`, `<x>.client(...)`. This catches the
+///   `prisma-examples/orm/nest` shape where the controller writes
+///   `this.prismaService.extendedPrismaClient().post.create({...})`.
+fn is_prisma_receiver(expr: &Expression<'_>) -> bool {
+    match expr {
+        Expression::Identifier(id) => is_prisma_name(id.name.as_str()),
+        Expression::StaticMemberExpression(member) => is_prisma_name(member.property.name.as_str()),
+        // Chained-method receivers — `…extendedPrismaClient()` etc. The
+        // method name is the signal: any one of a short list of
+        // Prisma-augmenting method names rooted on a prisma-shaped
+        // receiver counts. We don't recurse into the call's own
+        // receiver because the outer property name is already a strong
+        // enough signal in practice; deeper validation would mostly
+        // catch test mocks at the cost of FN risk.
+        Expression::CallExpression(call) => {
+            let Some(callee) = call.callee.as_member_expression() else {
+                return false;
+            };
+            let MemberExpression::StaticMemberExpression(method) = callee else {
+                return false;
+            };
+            matches!(
+                method.property.name.as_str(),
+                "extendedPrismaClient" | "extendedClient" | "$extends" | "client" | "prisma"
+            )
+        }
+        _ => false,
+    }
+}
+
+fn is_prisma_name(name: &str) -> bool {
+    matches!(
+        name,
+        "prisma" | "db" | "database" | "prismaService" | "prismaClient"
+    ) || name.ends_with("PrismaService")
+        || name.ends_with("PrismaClient")
 }
 
 pub fn is_drizzle_write_sink(call: &CallExpression<'_>) -> bool {

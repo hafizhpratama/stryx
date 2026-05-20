@@ -1,5 +1,8 @@
 pub mod auth_bypass_via_wrapper;
 mod command_injection_via_exec;
+mod eval_injection;
+mod insecure_deserialize;
+mod nosql_injection;
 mod path_traversal;
 mod prompt_injection;
 mod redirect_open;
@@ -11,6 +14,9 @@ mod xss_via_dangerously_set_inner_html;
 
 pub use auth_bypass_via_wrapper::AuthBypassViaWrapper;
 pub use command_injection_via_exec::CommandInjectionViaExec;
+pub use eval_injection::EvalInjection;
+pub use insecure_deserialize::InsecureDeserialize;
+pub use nosql_injection::NoSqlInjection;
 pub use path_traversal::PathTraversal;
 pub use prompt_injection::PromptInjection;
 pub use redirect_open::RedirectOpen;

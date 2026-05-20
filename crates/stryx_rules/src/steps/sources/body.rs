@@ -73,9 +73,20 @@ impl TaintStep for BodySource {
     }
 }
 
-/// `req.body` / `request.body` / `c.req.body` / `ctx.request.body`.
+/// `req.body` / `request.body` / `c.req.body` / `ctx.request.body`,
+/// plus `req.files` (multer / express-fileupload), `req.query` (URL
+/// search params), and `req.params` (route parameters). All four are
+/// attacker-controlled buckets on the Express request object.
+/// `headers` is excluded — most app code reads only specific
+/// known-safe headers and treating every header as tainted would
+/// produce massive FPs at zero added signal.
+///
+/// Previously this was `body` only; NodeGoat's `routes/research.js`
+/// (SSRF via `req.query.url`) and `routes/allocations.js` (NoSQL
+/// injection via `req.params.userId`) both went undetected with the
+/// narrower set.
 pub fn is_request_body_member(object: &Expression<'_>, prop: &str) -> bool {
-    if prop != "body" {
+    if !matches!(prop, "body" | "files" | "query" | "params") {
         return false;
     }
     is_request_like_expr(object)

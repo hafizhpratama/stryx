@@ -64,3 +64,15 @@ harness = false
 [[bench]]
 name    = "command_injection_via_exec"
 harness = false
+
+[[bench]]
+name    = "eval_injection"
+harness = false
+
+[[bench]]
+name    = "nosql_injection"
+harness = false
+
+[[bench]]
+name    = "insecure_deserialize"
+harness = false

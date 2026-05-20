@@ -37,5 +37,8 @@ pub fn builtin_rules() -> RuleRegistry {
     reg.register(Arc::new(flows::XssViaDangerouslySetInnerHtml::new()));
     reg.register(Arc::new(flows::SqlInjection::new()));
     reg.register(Arc::new(flows::CommandInjectionViaExec::new()));
+    reg.register(Arc::new(flows::EvalInjection::new()));
+    reg.register(Arc::new(flows::NoSqlInjection::new()));
+    reg.register(Arc::new(flows::InsecureDeserialize::new()));
     reg
 }

@@ -1,14 +1,23 @@
-//! HTTP-call sink step — outbound `fetch` / `axios.<method>` / `got`
-//! recogniser for the `flow/ssrf-via-fetch` rule.
+//! HTTP-call sink step — outbound HTTP-client recogniser for the
+//! `flow/ssrf-via-fetch` rule.
 //!
 //! Recognised shapes:
 //!
 //! - Bare `fetch(url, ...)` (the global Fetch API in Next.js
 //!   App Router runtimes).
-//! - `axios.<method>(url, ...)` for the standard axios methods
-//!   (`get`, `post`, `put`, `patch`, `delete`, `head`, `options`,
-//!   `request`).
-//! - `got(url, ...)` and `got.<method>(url, ...)`.
+//! - Bare `got(url, ...)`, `needle(url, ...)`, `request(url, ...)`,
+//!   `superagent(url, ...)` — common Node HTTP clients used as
+//!   the bare callable.
+//! - `axios.<method>(url, ...)` for the standard axios methods.
+//! - `got.<method>(url, ...)` for got's per-verb shorthands.
+//! - `needle.<method>(url, ...)` — `needle.get`, `needle.post`,
+//!   etc. NodeGoat's research route uses this exact shape.
+//! - `request.<method>(url, ...)` — the `request` package's
+//!   per-verb shorthands (legacy but still common).
+//! - `superagent.<method>(url, ...)` — superagent's per-verb
+//!   methods.
+//! - `http.<method>(url, ...)` and `https.<method>(url, ...)`
+//!   for the Node built-ins (`get` and `request`).
 //!
 //! Severity hint is `High` — SSRF is in the OWASP Top 10 and the
 //! consequence (internal-metadata exfiltration, internal-service
@@ -35,40 +44,58 @@ impl TaintStep for FetchSink {
     }
 }
 
-/// True iff `call` is one of the recognised outbound HTTP shapes
-/// — bare `fetch(...)`, `axios.<method>(...)`, `got(...)`, or
-/// `got.<method>(...)`.
+/// Standard HTTP verb method names used across axios/got/needle/
+/// request/superagent. Centralised so adding `connect` or `trace`
+/// later only touches one place.
+const HTTP_VERBS: &[&str] = &[
+    "get", "post", "put", "patch", "delete", "head", "options", "request",
+];
+
+/// Node built-in `http` / `https` modules expose `get` and `request`
+/// only — kept separate so the broader verb list does not introduce
+/// FPs against unrelated `http`-named identifiers using methods like
+/// `.options(...)`.
+const NODE_HTTP_VERBS: &[&str] = &["get", "request"];
+
+/// True iff `call` is one of the recognised outbound HTTP shapes.
+/// Conservative on the receiver name (must be a known HTTP-client
+/// identifier or a Node built-in module name) to keep FPs low.
 pub fn is_http_sink_call(call: &CallExpression<'_>) -> bool {
     match &call.callee {
-        Expression::Identifier(id) => {
-            matches!(id.name.as_str(), "fetch" | "got")
-        }
+        // Bare-callable forms: `fetch(url)`, `got(url)`, etc. Some
+        // libraries are imported as the default callable (`needle`,
+        // `request`, `superagent`) and accept the URL as the first
+        // positional argument.
+        Expression::Identifier(id) => matches!(
+            id.name.as_str(),
+            "fetch" | "got" | "needle" | "request" | "superagent"
+        ),
+
         Expression::StaticMemberExpression(_) => {
-            let Some(member) = call.callee.as_member_expression() else {
-                return false;
-            };
-            let MemberExpression::StaticMemberExpression(method) = member else {
+            let Some(MemberExpression::StaticMemberExpression(method)) =
+                call.callee.as_member_expression()
+            else {
                 return false;
             };
             let prop = method.property.name.as_str();
-            // `axios.<method>(...)` — standard methods.
-            if let Expression::Identifier(receiver) = &method.object
-                && receiver.name == "axios"
-                && matches!(
-                    prop,
-                    "get" | "post" | "put" | "patch" | "delete" | "head" | "options" | "request"
-                )
-            {
-                return true;
+
+            let Expression::Identifier(receiver) = &method.object else {
+                return false;
+            };
+
+            match receiver.name.as_str() {
+                // axios.<verb>(url, ...)
+                "axios" => HTTP_VERBS.contains(&prop),
+                // got/needle/request/superagent share the same per-
+                // verb shorthand surface.
+                "got" | "needle" | "request" | "superagent" => HTTP_VERBS.contains(&prop),
+                // Node built-ins: `http.get(...)` / `http.request(...)`
+                // (and HTTPS equivalents). Restricted to the two real
+                // methods these modules expose to avoid lighting up
+                // unrelated identifiers named `http`.
+                "http" | "https" => NODE_HTTP_VERBS.contains(&prop),
+                _ => false,
             }
-            // `got.<method>(...)` — the `got` library's per-verb methods.
-            if let Expression::Identifier(receiver) = &method.object
-                && receiver.name == "got"
-                && matches!(prop, "get" | "post" | "put" | "patch" | "delete" | "head")
-            {
-                return true;
-            }
-            false
         }
         _ => false,
     }

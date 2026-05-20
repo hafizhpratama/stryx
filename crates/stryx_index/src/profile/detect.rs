@@ -31,7 +31,22 @@ pub fn detect(path: &Path) -> ProjectProfile {
         path.parent().unwrap_or(Path::new(".")).to_path_buf()
     };
 
-    let pkg = read_package_json(&root);
+    let pkg = read_package_json(&root).map(|mut p| {
+        // Monorepo workspaces: when the root `package.json` declares
+        // a `workspaces` array, the actual stack lives in the
+        // per-workspace `package.json`s. Without this merge, a Hono
+        // starters monorepo with empty root deps reports `runtime:
+        // node` only — Hono lives in `templates/*/package.json` and
+        // is invisible to the root-only detector.
+        //
+        // Approach: union every workspace's deps/scripts/etc. INTO
+        // the root PackageJson before running the per-category
+        // detectors. The detectors stay unchanged — they just see a
+        // richer dependency set. Each merged-in workspace's path is
+        // recorded so evidence trails back to the right file.
+        merge_workspace_packages(&root, &mut p);
+        p
+    });
 
     ProjectProfile {
         language: detect_language(&root, pkg.as_ref()),
@@ -91,6 +106,111 @@ fn read_package_json(root: &Path) -> Option<PackageJson> {
             .map(str::to_string),
         type_module: value.get("type").and_then(|v| v.as_str()) == Some("module"),
     })
+}
+
+/// Read the root `package.json` (already parsed into `root_pkg`) once
+/// more to extract its `workspaces` field, expand the patterns to
+/// concrete directories, read each workspace's `package.json`, and
+/// merge its deps/devDeps/scripts into `root_pkg`. No-ops when the
+/// root has no `workspaces` field, or when none of the patterns
+/// expand to a directory containing `package.json`.
+///
+/// Pattern support is intentionally narrow — only the shapes that
+/// appear in real Node monorepos:
+///
+///   - literal path: `"shared-utils"`
+///   - tail-glob: `"packages/*"`, `"apps/*"`, `"templates/*"`
+///   - double-star tail: `"packages/**"` is treated as `packages/*`
+///
+/// Deep `**` recursion is out of scope — Lerna/Nx/Turborepo are
+/// covered by their conventional `packages/*` layout, which the
+/// tail-glob handles.
+fn merge_workspace_packages(root: &Path, root_pkg: &mut PackageJson) {
+    let raw = match std::fs::read_to_string(&root_pkg.path) {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let value: Value = match serde_json::from_str(&strip_jsonc(&raw)) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let patterns: Vec<String> = match value.get("workspaces") {
+        // npm/yarn shape: `"workspaces": ["packages/*", ...]`
+        Some(Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(str::to_string)
+            .collect(),
+        // yarn-classic shape: `"workspaces": { "packages": [...] }`
+        Some(Value::Object(obj)) => obj
+            .get("packages")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        _ => return,
+    };
+
+    for pattern in patterns {
+        for ws_dir in expand_workspace_pattern(root, &pattern) {
+            let Some(ws_pkg) = read_package_json(&ws_dir) else {
+                continue;
+            };
+            // Union deps/devDeps/scripts. Root wins on name collisions
+            // (e.g. root pinning a different version than a workspace)
+            // because the root entry was inserted first — the
+            // `entry().or_insert(...)` pattern preserves that.
+            for (k, v) in ws_pkg.dependencies {
+                root_pkg.dependencies.entry(k).or_insert(v);
+            }
+            for (k, v) in ws_pkg.dev_dependencies {
+                root_pkg.dev_dependencies.entry(k).or_insert(v);
+            }
+            for (k, v) in ws_pkg.scripts {
+                root_pkg.scripts.entry(k).or_insert(v);
+            }
+        }
+    }
+}
+
+/// Expand a workspaces pattern into a list of absolute directories
+/// known to exist under `root`. Handles literal paths and tail-glob
+/// patterns (`templates/*`, `packages/**`).
+fn expand_workspace_pattern(root: &Path, pattern: &str) -> Vec<PathBuf> {
+    let stripped = pattern.trim_end_matches('/');
+    // Tail-glob: split off the trailing `*` or `**` segment and list
+    // the parent directory.
+    let (parent_part, is_glob) = if let Some(stem) = stripped.strip_suffix("/**") {
+        (stem, true)
+    } else if let Some(stem) = stripped.strip_suffix("/*") {
+        (stem, true)
+    } else {
+        (stripped, false)
+    };
+
+    if !is_glob {
+        // Literal workspace path. Just check it exists.
+        let dir = root.join(parent_part);
+        if dir.is_dir() {
+            return vec![dir];
+        }
+        return Vec::new();
+    }
+
+    let parent = root.join(parent_part);
+    let Ok(entries) = std::fs::read_dir(&parent) else {
+        return Vec::new();
+    };
+    entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect()
 }
 
 fn as_str_map(value: Option<&Value>) -> HashMap<String, String> {
