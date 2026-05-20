@@ -148,7 +148,26 @@ deterministic_only = false        # set true for reproducible CI
 
 [output]
 format = "human"   # human | json (SARIF + GitHub annotations: roadmap)
+
+[surfaces]
+# Per-rule routing. Each rule can go to any subset of:
+#   cli        — printed in the human/JSON report (the default)
+#   score      — counted in the score & summary, hidden from CLI output
+#   ciFailure  — forces a non-zero exit code regardless of --fail-on
+#   prComment  — included in the GitHub Action PR comment (v0.6.0)
+#
+# The literal key `default` applies to any rule not listed below.
+default = ["cli"]
+"flow/sql-injection"           = ["cli", "ciFailure"]
+"flow/command-injection-via-exec" = ["cli", "ciFailure"]
+"generic/hardcoded-secret"     = ["score"]
 ```
+
+> **Status (v0.4.0)**: only the `[surfaces]` section is wired into the
+> engine. `[scan]`, `[severity]`, `[rules]`, `[llm]`, and `[output]`
+> are documented for forward compatibility but ignored for now — use
+> the matching CLI flags instead until a later release wires them
+> through.
 
 All settings can also be set via CLI flags. CLI flags win over the file:
 

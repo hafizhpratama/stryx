@@ -4,9 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use stryx_cli::config::{StryxConfig, Surface};
 use stryx_cli::{ScanOptions, ScanResult, scan_with_options};
 
-use stryx_core::Severity;
+use stryx_core::{Finding, Severity};
 use stryx_reporter::{ReportFormat, ReportOptions, write_report};
 use stryx_rules::builtin_rules;
 
@@ -152,6 +153,7 @@ fn cmd_scan(
         diff_base: diff.map(str::to_string),
     };
     let result = scan_with_options(path, &options)?;
+    let config = StryxConfig::load(path);
 
     if std::env::var("STRYX_DEBUG_DUMP").as_deref() == Ok("1") {
         maybe_write_debug_dump(&result);
@@ -165,11 +167,38 @@ fn cmd_scan(
         return Ok(ExitCode::SUCCESS);
     }
 
+    // Partition findings by surface. The engine's analysis is finished —
+    // `result.findings` is the full truth — but `stryx.toml [surfaces]`
+    // can route each rule to a subset of output channels:
+    //   - `cli`        ⇒ printed in the human/JSON report
+    //   - `score`      ⇒ counted in score+summary but hidden from output
+    //   - `ciFailure`  ⇒ forces a non-zero exit regardless of --fail-on
+    //   - `prComment`  ⇒ recorded but no consumer yet (v0.6.0 PR Action)
+    // A rule routed to an empty list is fully silenced. The reporter
+    // gets only the `cli`-routed slice; exit-code logic considers both
+    // the standard --fail-on threshold and any CI-failure finding.
+    let cli_findings: Vec<&Finding> = result
+        .findings
+        .iter()
+        .filter(|f| config.surfaces_for(&f.rule_id).contains(&Surface::Cli))
+        .collect();
+    let ci_failure_present = result.findings.iter().any(|f| {
+        config
+            .surfaces_for(&f.rule_id)
+            .contains(&Surface::CiFailure)
+    });
+
+    // The reporter takes a `&[Finding]` — collect a fresh owned vector
+    // of clones so the borrow on `result.findings` releases before the
+    // call. Findings are cheap (small structs); the cost is negligible
+    // compared to the AST work that produced them.
+    let cli_findings_owned: Vec<Finding> = cli_findings.into_iter().cloned().collect();
+
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
     write_report(
         &mut handle,
-        &result.findings,
+        &cli_findings_owned,
         |p| result.sources.get(p).cloned(),
         Some(&result.profile),
         format,
@@ -180,8 +209,9 @@ fn cmd_scan(
         },
     )?;
 
-    let max_severity = result.findings.iter().map(|f| f.severity).max();
-    let should_fail = matches!(max_severity, Some(s) if s >= fail_threshold);
+    let max_cli_severity = cli_findings_owned.iter().map(|f| f.severity).max();
+    let threshold_tripped = matches!(max_cli_severity, Some(s) if s >= fail_threshold);
+    let should_fail = threshold_tripped || ci_failure_present;
     Ok(if should_fail {
         ExitCode::from(1)
     } else {

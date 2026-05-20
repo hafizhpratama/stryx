@@ -21,6 +21,7 @@ use stryx_index::{PathAlias, ProjectIndex};
 use stryx_rules::adapters::{AdapterRegistry, EnabledAdapters};
 use stryx_rules::{RuleContext, RuleRegistry, builtin_rules};
 
+pub mod config;
 mod suppress;
 pub use suppress::filter_suppressed;
 

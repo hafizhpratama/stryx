@@ -18,6 +18,97 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-05-20
+
+**Adapter substrate + DX shell.** v0.4.0 closes the loop that v0.3.0
+opened: the `ProjectProfile` from v0.3.0 now drives a registered set
+of 22 stack adapters (frameworks, runtimes, data layers, validators,
+auth, LLM SDKs) that contribute sources, sinks, sanitisers, guards,
+and propagator patterns to the generic vulnerability rules. Every
+flagship body-source rule (`flow/unvalidated-body-to-db`,
+`flow/sql-injection`, `flow/command-injection-via-exec`,
+`flow/path-traversal`, `flow/ssrf-via-fetch`, `flow/redirect-open`,
+`flow/prompt-injection`, `flow/xss-via-dangerously-set-inner-html`)
+plus `auth/bypass-via-wrapper` and `secret/secret-to-response`
+consults the active adapter set during taint propagation.
+
+Alongside the substrate, this release ships the DX shell: a default
+scan subcommand (`stryx <path>` works without the `scan` keyword),
+grouped findings with representative locations, a 0–100 Stryx Score
+with severity caps, `--diff <base>` for PR-only CI runs, surface
+controls in `stryx.toml`, and a `STRYX_DEBUG_DUMP=1` diagnostic
+side-channel.
+
+### Added
+
+- **Adapter substrate** (ADR 0014): `StackAdapter` trait,
+  `AdapterRegistry::builtin()`, `EnabledAdapters` flat view,
+  closed-enum `AstMatcher` dispatch with seven variants (no
+  `Box<dyn>` in hot paths). 22 P0/P1 adapters land in this release —
+  runtimes (`node`, `bun`), frameworks (`express`, `fastify`,
+  `hono`, `nestjs`, `next`), data layers (`prisma`, `drizzle`,
+  `pg`, `mysql2`), validators (`zod`, `valibot`, `joi`, `yup`,
+  `ajv`, `class-validator`), auth (`better-auth`, `auth-js`,
+  `clerk`), and LLM SDKs (`openai`, `anthropic`).
+- `RuleContext.adapters` plus `match_source` / `match_sink` /
+  `match_sanitiser` / `match_guard` / `match_propagator` helpers so
+  rules consult the active adapter set during visitor traversal.
+- Decorator pre-taint substrate —
+  `decorated_param_names_for_adapters` walks active
+  `AstMatcher::DecoratedParam` patterns, lighting up NestJS-style
+  `@Body()` / `@Query()` / `@Param()` flows without rule-side code
+  changes.
+- **CLI default scan** — `stryx <path>` (no `scan` keyword) runs a
+  full scan with current-directory default; the explicit
+  `stryx scan` subcommand remains as an alias for scripts.
+- **`--verbose`** — restores the per-finding output shape (one
+  block per finding) for users piping into grep/regex tools.
+  Default output groups findings by `(severity, rule_id)` and
+  shows up to three representative locations per group with a
+  `+ N more` footer.
+- **`--diff <base>`** — scan only files changed vs a git ref. Uses
+  `git diff --diff-filter=ACMR <base>...` plus
+  `git ls-files --others --exclude-standard` for untracked-not-
+  ignored files. Falls back to a full scan when git is unavailable.
+- **Stryx Score** — 0–100 health number in the human-mode summary
+  line and the JSON `summary.score` field. Severity caps: any
+  Critical caps at 49, High at 74, Medium at 89, Low at 99.
+- **`stryx.toml [surfaces]`** — per-rule routing to `cli` /
+  `prComment` / `score` / `ciFailure`. Default `["cli"]` preserves
+  prior behavior. `score` counts toward the score but suppresses
+  from CLI output; `ciFailure` forces a non-zero exit independent
+  of `--fail-on`. `prComment` is recorded for the v0.6.0 GitHub
+  Action PR comment writer.
+- **`STRYX_DEBUG_DUMP=1`** — writes a full JSON report to
+  `/tmp/stryx-report-<unix-ts>.json` after every scan regardless of
+  `--format`, announced via a stderr line. Write failures log at
+  `warn` and never fail the scan.
+- Reporter footer — `scanned N files in Mms` follows every scan
+  output (suppressed only when both counters are zero).
+
+### Changed
+
+- Engine pipeline now constructs `AdapterRegistry::builtin()` and
+  resolves `EnabledAdapters` against the detected profile once per
+  scan, threading `Some(&EnabledAdapters)` through the extract+run
+  passes via `RuleContext.adapters`.
+- `ScanResult` gains `file_count: usize` and `elapsed_ms: u128`.
+  The former `scan(path)` helper is now a thin wrapper over the new
+  `scan_with_options(path, &ScanOptions)` entry point — napi
+  binding and integration tests continue to use the helper
+  unchanged.
+- `write_report` takes a `ReportOptions` struct (verbose flag plus
+  scan metadata) instead of ad-hoc trailing args, so future surface
+  controls can extend it without churning every caller.
+
+### Documentation
+
+- ADR 0014 (`docs/decisions/0014-adapter-substrate-api.md`) —
+  closed-enum `AstMatcher` substrate design.
+- `docs/getting-started.md` — documents the `[surfaces]` section
+  with a status note covering which sections are wired through
+  today.
+
 ## [0.3.0] — 2026-05-20
 
 **Stack-aware scanning, Phase 1.** First minor bump of the v0.3.x
