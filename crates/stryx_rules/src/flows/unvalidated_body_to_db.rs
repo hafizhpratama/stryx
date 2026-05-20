@@ -750,9 +750,7 @@ impl<'idx> FlowVisitor<'idx> {
                     // can record a tainted-leaf shape while leaving
                     // `tainted_return = false`, which previously
                     // panicked the debug assertion in build_summary.
-                    if !self.tainted_return
-                        && self.return_shape_seen.count_tainted_leaves() > 0
-                    {
+                    if !self.tainted_return && self.return_shape_seen.count_tainted_leaves() > 0 {
                         self.tainted_return = true;
                     }
                 }
@@ -3193,7 +3191,10 @@ fn format_function_snippet(file: &std::path::Path, anchor_byte: u32) -> String {
     };
     let anchor = anchor_byte as usize;
     if anchor > source.len() {
-        return format!("    (anchor byte {anchor} out of range, source is {} bytes)", source.len());
+        return format!(
+            "    (anchor byte {anchor} out of range, source is {} bytes)",
+            source.len()
+        );
     }
     let mut line_starts: Vec<usize> = vec![0];
     for (i, b) in source.bytes().enumerate() {
@@ -3201,19 +3202,13 @@ fn format_function_snippet(file: &std::path::Path, anchor_byte: u32) -> String {
             line_starts.push(i + 1);
         }
     }
-    let anchor_line = line_starts
-        .iter()
-        .rposition(|&s| s <= anchor)
-        .unwrap_or(0);
+    let anchor_line = line_starts.iter().rposition(|&s| s <= anchor).unwrap_or(0);
     let start_line = anchor_line.saturating_sub(2);
     let end_line = (anchor_line + 6).min(line_starts.len().saturating_sub(1));
     let mut out = String::from("  source:\n");
     for ln in start_line..=end_line {
         let line_start = line_starts[ln];
-        let line_end = line_starts
-            .get(ln + 1)
-            .copied()
-            .unwrap_or(source.len());
+        let line_end = line_starts.get(ln + 1).copied().unwrap_or(source.len());
         let text = source[line_start..line_end].trim_end_matches('\n');
         let marker = if ln == anchor_line { ">" } else { " " };
         out.push_str(&format!("    {marker} {:>5} | {text}\n", ln + 1));

@@ -85,7 +85,9 @@ pub enum EvidenceKind {
     TsConfig,
 }
 
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(
+    Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum LanguageHint {
     #[default]
@@ -193,17 +195,50 @@ mod tests {
     #[test]
     fn brand_name_variants_serialize_to_canonical_strings() {
         let cases = [
-            (serde_json::to_string(&LanguageHint::TypeScript).unwrap(), "\"typescript\""),
-            (serde_json::to_string(&LanguageHint::JavaScript).unwrap(), "\"javascript\""),
-            (serde_json::to_string(&FrameworkHint::NestJs).unwrap(), "\"nestjs\""),
-            (serde_json::to_string(&FrameworkHint::NextBackend).unwrap(), "\"next-backend\""),
-            (serde_json::to_string(&ValidatorHint::TypeBox).unwrap(), "\"typebox\""),
-            (serde_json::to_string(&ValidatorHint::ArkType).unwrap(), "\"arktype\""),
-            (serde_json::to_string(&LlmSdkHint::OpenAi).unwrap(), "\"openai\""),
-            (serde_json::to_string(&LlmSdkHint::LangChain).unwrap(), "\"langchain\""),
-            (serde_json::to_string(&AuthHint::BetterAuth).unwrap(), "\"better-auth\""),
-            (serde_json::to_string(&AuthHint::AuthJs).unwrap(), "\"auth-js\""),
-            (serde_json::to_string(&RuntimeHint::CloudflareWorkers).unwrap(), "\"cloudflare-workers\""),
+            (
+                serde_json::to_string(&LanguageHint::TypeScript).unwrap(),
+                "\"typescript\"",
+            ),
+            (
+                serde_json::to_string(&LanguageHint::JavaScript).unwrap(),
+                "\"javascript\"",
+            ),
+            (
+                serde_json::to_string(&FrameworkHint::NestJs).unwrap(),
+                "\"nestjs\"",
+            ),
+            (
+                serde_json::to_string(&FrameworkHint::NextBackend).unwrap(),
+                "\"next-backend\"",
+            ),
+            (
+                serde_json::to_string(&ValidatorHint::TypeBox).unwrap(),
+                "\"typebox\"",
+            ),
+            (
+                serde_json::to_string(&ValidatorHint::ArkType).unwrap(),
+                "\"arktype\"",
+            ),
+            (
+                serde_json::to_string(&LlmSdkHint::OpenAi).unwrap(),
+                "\"openai\"",
+            ),
+            (
+                serde_json::to_string(&LlmSdkHint::LangChain).unwrap(),
+                "\"langchain\"",
+            ),
+            (
+                serde_json::to_string(&AuthHint::BetterAuth).unwrap(),
+                "\"better-auth\"",
+            ),
+            (
+                serde_json::to_string(&AuthHint::AuthJs).unwrap(),
+                "\"auth-js\"",
+            ),
+            (
+                serde_json::to_string(&RuntimeHint::CloudflareWorkers).unwrap(),
+                "\"cloudflare-workers\"",
+            ),
         ];
         for (got, want) in &cases {
             assert_eq!(got, want, "JSON spelling regressed");
