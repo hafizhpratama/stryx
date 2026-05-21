@@ -244,7 +244,7 @@ invalidates when we add or change entry types.
 Storage layers:
 
 1. **In-process** — `dashmap::DashMap<CacheKey, FileIndexEntries>`
-   for the duration of a scan (v0.2.1)
+   for the duration of a scan (current behavior)
 2. 📋 **On-disk** — `~/.cache/stryx/index/` SQLite for repeat scans
    across CLI invocations; entries expire after 30 days unused.
    Phase 3.
@@ -299,11 +299,11 @@ What happens when extraction or queries fail:
 - 📋 **Symbol re-export chain too deep (>5 hops)**: mark the symbol
   as `opaque` in the resolve path; log at `warn` level. Cross-file
   rules treat opaque symbols pessimistically (assume taint passes
-  through). v0.2.1 does *one* hop only.
+  through). The current implementation does *one* hop only.
 - 📋 **Circular imports**: planned to be detected via Tarjan SCC
   during merge; treated as normal — TypeScript supports them. Symbol
   resolution prefers the file that declares the symbol, not the file
-  that re-exports. v0.2.1's resolver returns `None` on a missing
+  that re-exports. The current resolver returns `None` on a missing
   hop, which is conservative but loses precision on cycles.
 - **Parse failure on a file**: file is excluded from the index entirely
   (no entries contributed); scan continues; we log the file path so

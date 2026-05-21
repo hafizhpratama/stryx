@@ -306,7 +306,7 @@ process (configurable via `--max-skip-rate`).
 - **Auto-fix** — We report; we don't rewrite. Auto-fix is v2.
 - **Incremental scans** — Every scan is full. Incremental scans
   (only changed files) require LSP-style integration; on the
-  roadmap, not v0.2.1.
+  roadmap, not in the current release.
 
 Cross-file analysis itself is **done** by this pipeline as of v0.1
 (per [ADR 0003](../decisions/0003-cross-file-and-taint-as-core.md));

@@ -15,7 +15,7 @@
 | Severity | critical |
 | Frameworks | generic JS/TS backend (Express, Hono, Next.js route handlers, NestJS controllers) |
 | Default | enabled |
-| Added in | v0.5 (first cut — single-file slice) |
+| Added in | v0.4.0 (first cut — single-file slice) |
 
 ## What this rule catches
 
@@ -306,4 +306,4 @@ disabled = ["flow/eval-injection"]
 
 | Version | Change |
 |---|---|
-| v0.5 | Initial single-file slice — body source → `eval` / `Function` / `new Function` / `setTimeout(<string>, ...)` / `setInterval(<string>, ...)` sinks. Bare-identifier callee shapes only. Severity Critical. No sanitiser recognition; inline function/arrow literals suppress the timer-call shapes. |
+| v0.4.0 | Initial single-file slice — body source → `eval` / `Function` / `new Function` / `setTimeout(<string>, ...)` / `setInterval(<string>, ...)` sinks. Bare-identifier callee shapes only. Severity Critical. No sanitiser recognition; inline function/arrow literals suppress the timer-call shapes. |

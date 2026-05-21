@@ -13,7 +13,7 @@
 | Severity | critical |
 | Frameworks | generic Node, express, nextjs >= 13 (single-file slice 1) |
 | Default | enabled |
-| Added in | v0.3.0 |
+| Added in | v0.4.0 |
 
 ## What this rule catches
 
@@ -249,4 +249,4 @@ disabled = ["flow/insecure-deserialize"]
 
 | Version | Change |
 |---|---|
-| v0.3.0 | Initial single-file slice — body source → node-serialize `unserialize`, js-yaml `yaml.load`, and Node `vm.runInX` sinks. Severity Critical. No sanitiser recognition; `yaml.safeLoad` is recognised as safe by exclusion from the sink set. |
+| v0.4.0 | Initial single-file slice — body source → node-serialize `unserialize`, js-yaml `yaml.load`, and Node `vm.runInX` sinks. Severity Critical. No sanitiser recognition; `yaml.safeLoad` is recognised as safe by exclusion from the sink set. |

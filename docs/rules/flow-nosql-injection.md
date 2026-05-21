@@ -14,7 +14,7 @@
 | Severity | high |
 | Frameworks | Express, NestJS, generic Node + `mongodb` / Mongoose |
 | Default | enabled |
-| Added in | v0.4.x |
+| Added in | v0.4.0 |
 
 ## What this rule catches
 
@@ -273,4 +273,4 @@ disabled = ["flow/nosql-injection"]
 
 | Version | Change |
 |---|---|
-| v0.4.x | Initial single-file slice — body-tainted property values inside MongoDB filter object literals. Severity High. No cross-file taint summary yet. |
+| v0.4.0 | Initial single-file slice — body-tainted property values inside MongoDB filter object literals. Severity High. No cross-file taint summary yet. |

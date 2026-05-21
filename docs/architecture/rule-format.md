@@ -198,7 +198,7 @@ actually safe?"
 We provide several visitor traits in `stryx_ast::visit`:
 
 - `Visit` — read-only AST walking
-- `VisitMut` — mutable, for future auto-fix work (not used at v0.2.1)
+- `VisitMut` — mutable, for future auto-fix work (not used today)
 - `VisitWithCtx` — visitor with implicit context threading
 
 Most rules use `Visit`. Implement only the methods for node types you
