@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="Stryx logo" width="160" />
+</p>
+
 # Stryx
 
 > Stack-aware security for JavaScript and TypeScript backends.

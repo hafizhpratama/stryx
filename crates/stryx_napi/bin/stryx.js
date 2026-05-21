@@ -1,225 +1,109 @@
 #!/usr/bin/env node
-// Stryx CLI shim for the napi-rs npm distribution.
+// Thin spawn wrapper around the native `stryx` Rust CLI binary,
+// which is bundled in the platform-specific subpackage that npm
+// resolves via optionalDependencies.
 //
-// Mirrors the Rust CLI's `stryx scan <path>` surface:
-//   - `scan` is the only subcommand at v0.2.1
-//   - `--format human|json`  (default human)
-//   - `--fail-on info|low|medium|high|critical`  (default high)
+// The full CLI surface — default-scan subcommand, `--verbose`,
+// `--diff <base>`, grouped output, Stryx Score, `stryx.toml
+// [surfaces]`, `STRYX_DEBUG_DUMP`, profile block, footer — all
+// lives in the Rust binary. Re-implementing it in JS would create
+// a second source of truth that inevitably drifts; spawning the
+// binary directly gives the npm distribution byte-identical
+// behavior with the `cargo install` / GitHub Release downloads.
 //
-// Exit code: 0 if no findings at or above --fail-on; 1 otherwise.
-// Any error (bad args, scan failure, IO error) → exit 2.
+// Exit code is forwarded from the child. On a fatal signal we
+// re-raise so the parent shell sees the right termination cause.
 
 "use strict";
 
-const fs = require("node:fs");
+const { spawn } = require("node:child_process");
 const path = require("node:path");
-const { scan } = require("../index.js");
+const fs = require("node:fs");
 
-const SEVERITY_RANK = {
-  info: 0,
-  low: 1,
-  medium: 2,
-  high: 3,
-  critical: 4,
-};
-
-function usage() {
-  return [
-    "stryx — stack-aware security for JavaScript and TypeScript backends",
-    "",
-    "USAGE:",
-    "  stryx scan [PATH] [OPTIONS]",
-    "",
-    "ARGS:",
-    "  PATH                 Path to scan (default: \".\")",
-    "",
-    "OPTIONS:",
-    "  --format <FORMAT>    Output format: human | json (default: human)",
-    "  --fail-on <LEVEL>    Minimum severity for non-zero exit",
-    "                       (info | low | medium | high | critical; default: high)",
-    "  -h, --help           Show this help",
-    "  -V, --version        Show version",
-    "",
-    "EXAMPLES:",
-    "  npx stryx scan",
-    "  npx stryx scan ./src --format=json",
-    "  npx stryx scan . --fail-on=medium",
-  ].join("\n");
-}
-
-function parseArgs(argv) {
-  const args = { _: [], format: "human", failOn: "high" };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "-h" || a === "--help") {
-      args.help = true;
-    } else if (a === "-V" || a === "--version") {
-      args.version = true;
-    } else if (a === "--format") {
-      args.format = argv[++i];
-    } else if (a.startsWith("--format=")) {
-      args.format = a.slice("--format=".length);
-    } else if (a === "--fail-on") {
-      args.failOn = argv[++i];
-    } else if (a.startsWith("--fail-on=")) {
-      args.failOn = a.slice("--fail-on=".length);
-    } else if (a.startsWith("-")) {
-      throw new Error(`unknown flag: ${a}`);
-    } else {
-      args._.push(a);
-    }
+// Maps `${process.platform}-${process.arch}` to the platform
+// subpackage name. Must stay in lockstep with the `napi.targets`
+// list in package.json — when a new target is added there, add
+// a case here, otherwise users on that platform will see an
+// "unsupported platform" error even though they have a binary
+// available.
+function platformPackageName() {
+  const key = `${process.platform}-${process.arch}`;
+  switch (key) {
+    case "darwin-x64":
+      return "@hafizhpratama/stryx-darwin-x64";
+    case "darwin-arm64":
+      return "@hafizhpratama/stryx-darwin-arm64";
+    case "linux-x64":
+      return "@hafizhpratama/stryx-linux-x64-gnu";
+    case "linux-arm64":
+      return "@hafizhpratama/stryx-linux-arm64-gnu";
+    case "win32-x64":
+      return "@hafizhpratama/stryx-win32-x64-msvc";
+    default:
+      throw new Error(
+        `stryx: unsupported platform ${key}. Pre-built binaries are available for ` +
+          "darwin (x64/arm64), linux gnu (x64/arm64), and win32 x64. " +
+          "If you need another target, build from source via `cargo install --git " +
+          "https://github.com/hafizhpratama/stryx --tag vX.Y.Z stryx_cli`."
+      );
   }
-  return args;
 }
 
-function lineCol(source, byteOffset) {
-  // Same semantics as crates/stryx_reporter/src/lib.rs::line_col —
-  // 1-indexed line and column counted in chars, not bytes. For
-  // ASCII source files (common in TS) bytes and chars coincide;
-  // for multi-byte UTF-8 chars, this errs on the side of matching
-  // the Rust output.
-  let line = 1;
-  let col = 1;
-  // String#charCodeAt walks UTF-16 code units; we walk bytes via
-  // a Buffer view so multi-byte chars don't desync.
-  const buf = Buffer.from(source);
-  const limit = Math.min(byteOffset, buf.length);
-  for (let i = 0; i < limit; i++) {
-    if (buf[i] === 0x0a) {
-      line += 1;
-      col = 1;
-    } else {
-      col += 1;
-    }
-  }
-  return [line, col];
-}
-
-function formatHuman(findings) {
-  if (findings.length === 0) {
-    return "stryx: no findings\n";
-  }
-  const sourceCache = new Map();
-  const lines = [];
-  const summary = {
-    info: 0,
-    low: 0,
-    medium: 0,
-    high: 0,
-    critical: 0,
-  };
-  for (const f of findings) {
-    summary[f.severity] = (summary[f.severity] || 0) + 1;
-    let src = sourceCache.get(f.file);
-    if (src === undefined) {
-      try {
-        src = fs.readFileSync(f.file, "utf8");
-      } catch {
-        src = null;
-      }
-      sourceCache.set(f.file, src);
-    }
-    const [line, col] = src ? lineCol(src, f.start) : [1, 1];
-    lines.push(`${f.severity.padEnd(8)} ${f.ruleId}  ${f.file}:${line}:${col}`);
-    lines.push(`         ${f.message}`);
-    if (f.help) {
-      lines.push(`         help: ${f.help}`);
-    }
-  }
-  lines.push("");
-  lines.push(
-    `${findings.length} finding(s): ${summary.critical} critical, ${summary.high} high, ${summary.medium} medium, ${summary.low} low, ${summary.info} info`,
-  );
-  return lines.join("\n") + "\n";
-}
-
-function formatJson(findings) {
-  const summary = {
-    info: 0,
-    low: 0,
-    medium: 0,
-    high: 0,
-    critical: 0,
-  };
-  for (const f of findings) summary[f.severity] = (summary[f.severity] || 0) + 1;
-  return (
-    JSON.stringify(
-      {
-        schema: "stryx.findings/v1",
-        findings: findings.map((f) => ({
-          rule_id: f.ruleId,
-          severity: f.severity,
-          message: f.message,
-          help: f.help ?? null,
-          span: { file: f.file, start: f.start, end: f.end },
-        })),
-        summary: { total: findings.length, ...summary },
-      },
-      null,
-      2,
-    ) + "\n"
-  );
-}
-
-function maxRank(findings) {
-  let max = -1;
-  for (const f of findings) {
-    const r = SEVERITY_RANK[f.severity];
-    if (r !== undefined && r > max) max = r;
-  }
-  return max;
-}
-
-function main(argv) {
-  let args;
+// Resolve the absolute path to the `stryx` binary inside the
+// installed platform subpackage. `require.resolve` finds the
+// package regardless of hoist depth (npm/pnpm/yarn handle this
+// differently and we want it to work everywhere). The binary
+// sits next to the subpackage's package.json.
+function resolveBinary() {
+  const pkgName = platformPackageName();
+  let pkgJsonPath;
   try {
-    args = parseArgs(argv);
-  } catch (e) {
-    process.stderr.write(`error: ${e.message}\n\n${usage()}\n`);
-    return 2;
+    pkgJsonPath = require.resolve(`${pkgName}/package.json`);
+  } catch {
+    throw new Error(
+      `stryx: platform package "${pkgName}" not found. npm probably skipped its install — ` +
+        `try \`npm install --include=optional\` or install the subpackage directly with ` +
+        `\`npm install ${pkgName}\`.`
+    );
   }
-
-  if (args.help) {
-    process.stdout.write(usage() + "\n");
-    return 0;
+  const dir = path.dirname(pkgJsonPath);
+  const binName = process.platform === "win32" ? "stryx.exe" : "stryx";
+  const binPath = path.join(dir, binName);
+  if (!fs.existsSync(binPath)) {
+    throw new Error(
+      `stryx: binary not found at ${binPath}. The platform package "${pkgName}" was ` +
+        "installed but is missing the CLI binary — please file an issue at " +
+        "https://github.com/hafizhpratama/stryx/issues with your OS, arch, and " +
+        "install method."
+    );
   }
-  if (args.version) {
-    const pkg = require("../package.json");
-    process.stdout.write(`stryx ${pkg.version}\n`);
-    return 0;
-  }
-
-  const subcommand = args._[0];
-  if (subcommand !== "scan") {
-    process.stderr.write(`error: unknown subcommand: ${subcommand ?? "(none)"}\n\n${usage()}\n`);
-    return 2;
-  }
-  const target = args._[1] ?? ".";
-
-  if (SEVERITY_RANK[args.failOn] === undefined) {
-    process.stderr.write(`error: unknown --fail-on value: ${args.failOn}\n`);
-    return 2;
-  }
-  if (args.format !== "human" && args.format !== "json") {
-    process.stderr.write(`error: unknown --format value: ${args.format}\n`);
-    return 2;
-  }
-
-  let result;
-  try {
-    result = scan(path.resolve(target));
-  } catch (e) {
-    process.stderr.write(`error: scan failed: ${e.message ?? e}\n`);
-    return 2;
-  }
-
-  const out = args.format === "json"
-    ? formatJson(result.findings)
-    : formatHuman(result.findings);
-  process.stdout.write(out);
-
-  const threshold = SEVERITY_RANK[args.failOn];
-  return maxRank(result.findings) >= threshold ? 1 : 0;
+  return binPath;
 }
 
-process.exit(main(process.argv.slice(2)));
+(function main() {
+  let binPath;
+  try {
+    binPath = resolveBinary();
+  } catch (err) {
+    process.stderr.write(`${err.message}\n`);
+    process.exit(2);
+    return;
+  }
+
+  const child = spawn(binPath, process.argv.slice(2), { stdio: "inherit" });
+
+  child.on("error", (err) => {
+    process.stderr.write(`stryx: failed to spawn ${binPath}: ${err.message}\n`);
+    process.exit(2);
+  });
+
+  child.on("exit", (code, signal) => {
+    if (signal) {
+      // Re-raise the signal so the parent shell sees the real
+      // termination cause (e.g. Ctrl+C reports SIGINT, not exit 0).
+      process.kill(process.pid, signal);
+    } else {
+      process.exit(code ?? 1);
+    }
+  });
+})();

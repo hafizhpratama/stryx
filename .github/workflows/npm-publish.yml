@@ -107,6 +107,91 @@ jobs:
         working-directory: crates/stryx_napi
         run: npx napi pre-publish -t npm --skip-optional-publish
 
+      # Bundle the standalone Rust `stryx` CLI binary into each
+      # platform subpackage. The release.yml workflow builds and
+      # uploads `stryx-<ver>-<target>.{tar.gz,zip}` archives for
+      # every supported target; we download them here, extract,
+      # and copy the binary into the matching `npm/<dir>/` so the
+      # main package's `bin/stryx.js` spawn wrapper can find it.
+      #
+      # Without this step, the npm distribution only ships the
+      # napi `.node` library, which the (pre-v0.4.1) JS shim
+      # called directly — losing the full CLI surface (default
+      # scan, --verbose, --diff, grouped output, score, surfaces,
+      # STRYX_DEBUG_DUMP). Bundling the binary keeps the npm
+      # experience byte-identical with `cargo install` + GitHub
+      # Release downloads.
+      - name: Bundle CLI binaries into platform subpackages
+        working-directory: crates/stryx_napi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${{ inputs.tag }}"
+          version="${version#v}"
+          # Parallel arrays — TARGETS[i] is the Rust triple,
+          # DIRS[i] is the matching `npm/<dir>/` (napi-rs platform
+          # name). Stay in lockstep with the `napi.targets` list
+          # in package.json and with the case statement in
+          # `bin/stryx.js::platformPackageName()`.
+          TARGETS=( \
+            x86_64-apple-darwin \
+            aarch64-apple-darwin \
+            x86_64-unknown-linux-gnu \
+            aarch64-unknown-linux-gnu \
+            x86_64-pc-windows-msvc \
+          )
+          DIRS=( \
+            darwin-x64 \
+            darwin-arm64 \
+            linux-x64-gnu \
+            linux-arm64-gnu \
+            win32-x64-msvc \
+          )
+          mkdir -p .release-cli
+          for i in "${!TARGETS[@]}"; do
+            target="${TARGETS[$i]}"
+            dir="${DIRS[$i]}"
+            archive="stryx-${version}-${target}"
+            if [[ "$target" == "x86_64-pc-windows-msvc" ]]; then
+              asset="${archive}.zip"
+              binname="stryx.exe"
+            else
+              asset="${archive}.tar.gz"
+              binname="stryx"
+            fi
+            echo "::group::bundle $target → npm/$dir/$binname"
+            gh release download "${{ inputs.tag }}" \
+              --repo "${{ github.repository }}" \
+              --pattern "$asset" \
+              --dir .release-cli \
+              --clobber
+            rm -rf ".release-cli/extracted-$dir"
+            mkdir -p ".release-cli/extracted-$dir"
+            if [[ "$asset" == *.zip ]]; then
+              unzip -q ".release-cli/$asset" -d ".release-cli/extracted-$dir"
+            else
+              tar -xzf ".release-cli/$asset" -C ".release-cli/extracted-$dir"
+            fi
+            cp ".release-cli/extracted-$dir/$archive/$binname" "npm/$dir/$binname"
+            chmod +x "npm/$dir/$binname" || true
+            # Patch the subpackage's package.json `files` array to
+            # include the binary, otherwise `npm publish` would skip
+            # it and the spawn wrapper would `ENOENT` on install.
+            node -e "
+              const fs = require('fs');
+              const path = 'npm/${dir}/package.json';
+              const pkg = JSON.parse(fs.readFileSync(path, 'utf8'));
+              const have = new Set(pkg.files || []);
+              have.add('${binname}');
+              pkg.files = Array.from(have);
+              fs.writeFileSync(path, JSON.stringify(pkg, null, 2) + '\n');
+            "
+            echo "::endgroup::"
+          done
+          echo "platform subpackages now contain:"
+          ls -la npm/*/
+
       - name: Publish platform subpackages
         if: ${{ !inputs.dry_run }}
         working-directory: crates/stryx_napi/npm

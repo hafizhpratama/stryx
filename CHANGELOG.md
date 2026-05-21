@@ -18,6 +18,45 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-05-21
+
+**npm distribution fix.** v0.4.0 shipped the full DX shell (default
+scan, `--verbose`, `--diff <base>`, grouped output, Stryx Score,
+`stryx.toml [surfaces]`, `STRYX_DEBUG_DUMP`, profile block, footer)
+in the Rust CLI binary but the npm package's JS shim wrapped the
+napi library directly with its own arg parsing and reporter, so npm
+users were stuck with the v0.3.x CLI surface and reduced output.
+v0.4.1 bundles the standalone Rust binary into each platform
+subpackage and replaces the shim with a thin `spawn()` wrapper so
+npm users get byte-identical behavior with `cargo install` /
+GitHub Release downloads.
+
+### Fixed
+
+- npm package now resolves `stryx <path>` (default-scan) correctly;
+  previously it errored with `unknown subcommand` and forced users
+  into the legacy `stryx scan <path>` syntax.
+- All v0.4.0 DX features available via npm: `--verbose`,
+  `--diff <base>`, grouped findings with representative locations,
+  Stryx Score in the summary line, profile block at the top of
+  human output, `scanned N files in Mms` footer, `stryx.toml`
+  `[surfaces]` routing, and `STRYX_DEBUG_DUMP=1` diagnostic dumps.
+- Exit code from the native binary now propagates faithfully through
+  `npx @hafizhpratama/stryx`, including signal-on-signal semantics
+  (Ctrl+C reports SIGINT to the parent shell, not exit 0).
+
+### Changed
+
+- `crates/stryx_napi/bin/stryx.js` is now a 100-line `spawn()`
+  wrapper instead of a JS reimplementation of the CLI. The napi
+  binding (`require('@hafizhpratama/stryx').scan`) remains for
+  programmatic access from JS toolchains.
+- The npm-publish workflow now downloads the per-platform CLI
+  archives from the matching GitHub Release and stages each
+  binary into its platform subpackage before publishing.
+- README adds a project logo and the v0.4.x rule + adapter summary
+  in the rollup table.
+
 ## [0.4.0] — 2026-05-21
 
 **Adapter substrate + DX shell + dogfood-closed rules.** v0.4.0
