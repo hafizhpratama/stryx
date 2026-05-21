@@ -99,13 +99,15 @@ stryx/
   table, import graph, intra-file call graph, framework hints. Built
   once per scan; queried by rules and the taint engine. See
   [`docs/architecture/semantic-index.md`](docs/architecture/semantic-index.md).
-  At v0.3.0 the crate also owns the cheap-pass `ProjectProfile`
-  detector (`stryx_index::profile`), which inspects package.json,
-  lockfiles, and a few config files to identify the runtime,
-  framework, data layer, validator, auth provider, LLM SDK, and
-  deployment target. The profile is surfaced via `ScanResult.profile`
-  and the JSON envelope, but does not yet influence rule behaviour —
-  adapter consumption lands in v0.4.0. See
+  The crate also owns the cheap-pass `ProjectProfile` detector
+  (`stryx_index::profile`), which inspects package.json, lockfiles,
+  and a few config files to identify the runtime, framework, data
+  layer, validator, auth provider, LLM SDK, and deployment target.
+  As of v0.4.0 it walks `workspaces` arrays so monorepo roots
+  aggregate per-template stack evidence. The profile is surfaced
+  via `ScanResult.profile`, the JSON envelope, and (since v0.4.0)
+  the active adapter set that the rules consult during taint
+  propagation. See
   [`docs/architecture/project-profile.md`](docs/architecture/project-profile.md).
 
 - **`stryx_taint`** owns: the inter-procedural taint engine — `Source`,
@@ -114,14 +116,16 @@ stryx/
   [`docs/architecture/taint-engine.md`](docs/architecture/taint-engine.md).
 
 - **`stryx_rules`** owns: every shipped rule, organized as
-  `sources/`, `sinks/`, `sanitizers/`, and `flows/` (per ADR 0003).
-  Each rule implements the `Rule` trait and may declare a
-  `taint_signature()` and `scope()` (single-file or cross-file).
-  At v0.2.1, 11 rules ship in the registry; the `StepKind` substrate
-  (ADR 0008) carries 17 closed-enum variants × 6 trait methods. The
-  planned adapter registry keeps rule semantics generic while adding
-  stack-specific source/sink/sanitiser/guard facts; see
-  [`docs/architecture/stack-adapters.md`](docs/architecture/stack-adapters.md).
+  `sources/`, `sinks/`, `sanitizers/`, `adapters_*`, and `flows/`
+  (per ADR 0003 and ADR 0014). Each rule implements the `Rule`
+  trait and may declare a `taint_signature()` and `scope()`
+  (single-file or cross-file). As of v0.4.0, 14 rules ship in
+  the registry and 22 stack adapters contribute sources, sinks,
+  sanitisers, guards, and propagator patterns through the
+  closed-enum `AstMatcher` substrate (ADR 0014). The `StepKind`
+  substrate (ADR 0008) carries the per-rule step-trait variants.
+  Rule semantics stay generic; adapters add stack-specific facts.
+  See [`docs/architecture/stack-adapters.md`](docs/architecture/stack-adapters.md).
 
 - **`stryx_llm`** owns: the `LlmClient` trait, prompt templates per rule,
   retry logic, cost tracking. Pluggable: Anthropic, OpenAI, local Ollama.

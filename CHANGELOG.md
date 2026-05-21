@@ -18,19 +18,18 @@ and Stryx adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
-## [0.4.0] — 2026-05-20
+## [0.4.0] — 2026-05-21
 
-**Adapter substrate + DX shell.** v0.4.0 closes the loop that v0.3.0
-opened: the `ProjectProfile` from v0.3.0 now drives a registered set
-of 22 stack adapters (frameworks, runtimes, data layers, validators,
-auth, LLM SDKs) that contribute sources, sinks, sanitisers, guards,
-and propagator patterns to the generic vulnerability rules. Every
-flagship body-source rule (`flow/unvalidated-body-to-db`,
-`flow/sql-injection`, `flow/command-injection-via-exec`,
-`flow/path-traversal`, `flow/ssrf-via-fetch`, `flow/redirect-open`,
-`flow/prompt-injection`, `flow/xss-via-dangerously-set-inner-html`)
-plus `auth/bypass-via-wrapper` and `secret/secret-to-response`
-consults the active adapter set during taint propagation.
+**Adapter substrate + DX shell + dogfood-closed rules.** v0.4.0
+closes the loop that v0.3.0 opened: the `ProjectProfile` from v0.3.0
+now drives a registered set of 22 stack adapters (frameworks,
+runtimes, data layers, validators, auth, LLM SDKs) that contribute
+sources, sinks, sanitisers, guards, and propagator patterns to the
+generic vulnerability rules. The shipped registry grows from 11 to
+14 rules — three new categories (eval / NoSQL / deserialize) plus
+broader sink/source coverage for the existing rules — driven by
+dogfooding against OWASP NodeGoat, DVNA, Documenso, and the official
+Prisma examples.
 
 Alongside the substrate, this release ships the DX shell: a default
 scan subcommand (`stryx <path>` works without the `scan` keyword),
@@ -58,6 +57,21 @@ side-channel.
   `AstMatcher::DecoratedParam` patterns, lighting up NestJS-style
   `@Body()` / `@Query()` / `@Param()` flows without rule-side code
   changes.
+- **Three new rules** surfaced by NodeGoat / DVNA dogfooding:
+  - `flow/eval-injection` (Critical) — `eval` / `Function` /
+    `new Function` / `setTimeout` / `setInterval` invoked with a
+    tainted string payload. NodeGoat's `contributions.js` is the
+    canonical bad pattern.
+  - `flow/nosql-injection` (High) — MongoDB
+    `collection.find/findOne/update/delete` shapes called with a
+    body-derived object literal. Guarded against
+    `Array.prototype.find` false positives by requiring an
+    `ObjectExpression` first argument.
+  - `flow/insecure-deserialize` (Critical) — `node-serialize`
+    `unserialize`, `js-yaml` `load` (unsafe variant only —
+    `safeLoad` is silent), `vm.runInNewContext` /
+    `runInThisContext` / `runInContext`. DVNA's `appHandler.js`
+    imports `node-serialize` directly.
 - **CLI default scan** — `stryx <path>` (no `scan` keyword) runs a
   full scan with current-directory default; the explicit
   `stryx scan` subcommand remains as an alias for scripts.
@@ -85,6 +99,54 @@ side-channel.
   `warn` and never fail the scan.
 - Reporter footer — `scanned N files in Mms` follows every scan
   output (suppressed only when both counters are zero).
+- **ProjectProfile monorepo workspaces** — `package.json`
+  `workspaces` arrays (npm, yarn, pnpm shapes) are walked and per-
+  workspace `package.json` files merged into the root view, so the
+  `honojs/starter` monorepo correctly surfaces Hono and the
+  per-template framework deps that used to be invisible.
+- **`generic/hardcoded-secret` credential-named mode (High)** —
+  string literals assigned to credential-shaped bindings
+  (`apiKey`, `STRIPE_SECRET_KEY`, `accessToken`) are flagged
+  even when the value doesn't match a provider prefix. Guarded
+  against three false-positive classes: bare-name generic keys
+  (`key`, `token`, `secret`), descriptor-suffix names
+  (`tokenNamePrefix`, `keyPath`), and placeholder-shaped values
+  (`YOUR_KEY`, `changeme`, URLs, template literals).
+
+### Changed
+
+- **Sink coverage broadened** across existing rules in response to
+  dogfood gaps:
+  - SQL sink accepts nested-receiver `.query(...)` —
+    `db.sequelize.query(...)`, `dataSource.query(...)`,
+    `knex.query(...)` (canonical Sequelize/TypeORM/Knex raw-SQL
+    shape).
+  - SSRF HTTP-sink list extended with `needle`, `request`,
+    `superagent`, `http.get/request`, `https.get/request` (both
+    bare-callable and per-verb forms).
+  - Prisma write sink recognises injected-service receivers —
+    `this.prismaService.X.create(...)` plus chained
+    `this.prismaService.extendedPrismaClient().X.create(...)`.
+    NestJS+Prisma was the headline FN; the prisma-examples
+    NestJS controller went from 0 to 5 findings on the second
+    dogfood pass.
+  - `BodySource` recognises `req.files` (multer / express-
+    fileupload), `req.query`, and `req.params` in addition to
+    `req.body`. NodeGoat's `req.query.url`-driven SSRF and
+    `req.params.id`-driven open-redirect both started firing as
+    a result.
+- Engine pipeline now constructs `AdapterRegistry::builtin()` and
+  resolves `EnabledAdapters` against the detected profile once per
+  scan, threading `Some(&EnabledAdapters)` through the extract+run
+  passes via `RuleContext.adapters`.
+- `ScanResult` gains `file_count: usize` and `elapsed_ms: u128`.
+  The former `scan(path)` helper is now a thin wrapper over the new
+  `scan_with_options(path, &ScanOptions)` entry point — napi
+  binding and integration tests continue to use the helper
+  unchanged.
+- `write_report` takes a `ReportOptions` struct (verbose flag plus
+  scan metadata) instead of ad-hoc trailing args, so future surface
+  controls can extend it without churning every caller.
 
 ### Changed
 
@@ -108,6 +170,10 @@ side-channel.
 - `docs/getting-started.md` — documents the `[surfaces]` section
   with a status note covering which sections are wired through
   today.
+- New rule docs: `docs/rules/flow-eval-injection.md`,
+  `docs/rules/flow-nosql-injection.md`,
+  `docs/rules/flow-insecure-deserialize.md` — every section of the
+  template populated, real-world canonical bad patterns cited.
 
 ## [0.3.0] — 2026-05-20
 

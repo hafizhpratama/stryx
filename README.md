@@ -157,50 +157,59 @@ and the [stack-aware roadmap](docs/roadmap/stack-aware-scanning.md).
 
 ## Status
 
-**v0.3.0 — first stack-aware milestone.** `ProjectProfile` ships:
-Stryx now detects the TypeScript backend stack (language, runtime,
-framework, data layer, validator, auth, LLM SDK, deployment) from
-`package.json`, lockfiles, and config files (no source parsing
-required). Detection appears in both the human and JSON scan output;
-the next release wires adapters into rule decisions. Zero rule-
-behaviour change in this milestone — the existing 11 rules fire on
-the same code they did at v0.2.15. See [ADR 0013](docs/decisions/0013-stack-aware-project-profiles.md)
-for the architecture and the [stack-aware roadmap](docs/roadmap/stack-aware-scanning.md)
-for what lands in v0.4.0 (broad adapter pass across all P0/P1 stacks).
+**v0.4.0 — adapter substrate + DX shell + dogfood-closed rules.**
+The `ProjectProfile` from v0.3.0 now drives 22 registered stack
+adapters that contribute sources, sinks, sanitisers, guards, and
+propagator patterns to the rules. The registry grows from 11 to 14
+rules — three new categories (eval / NoSQL / deserialize) plus
+broader sink/source coverage on the existing rules — surfaced by
+dogfooding against OWASP NodeGoat, DVNA, Documenso, and the official
+Prisma examples. The CLI gains a default scan subcommand, grouped
+output with representative locations, a 0–100 Stryx Score with
+severity caps, `--diff <base>` for PR-only CI runs, and per-rule
+surface routing via `stryx.toml`. See [the CHANGELOG](CHANGELOG.md#040--2026-05-21)
+for the full feature list.
 
 - ✅ Architecture, ADRs, rule specs
 - ✅ Foundational crates `stryx_index` and `stryx_taint`
-- ✅ Stable cross-file rules (v0.1):
+- ✅ Cross-file rules:
   - `flow/unvalidated-body-to-db`
   - `flow/auth-bypass-via-wrapper`
   - `flow/secret-to-response`
-- ✅ Experimental cross-file rules (v0.2 / v0.2.14):
-  - `flow/ssrf-via-fetch` (slice 2 cross-file, three-level
-    chain convergence, URL-allow-list sanitisers, env-host
-    path-injection precision)
-  - `flow/redirect-open` (slice 2 cross-file)
-  - `flow/sql-injection` (slice 2 cross-file — Critical;
-    Prisma `$queryRawUnsafe` / Drizzle `sql.raw` /
-    node-postgres raw query)
-  - `flow/command-injection-via-exec` (slice 2 cross-file —
-    Critical; Node.js `child_process` exec / spawn / execFile)
-- ✅ Experimental single-file rules (v0.2):
+  - `flow/ssrf-via-fetch` (needle/request/superagent/http(s) added
+    in v0.4.0)
+  - `flow/redirect-open`
+  - `flow/sql-injection` (Critical; Prisma `$queryRawUnsafe` /
+    Drizzle `sql.raw` / node-postgres raw query / Sequelize
+    `db.sequelize.query` added in v0.4.0)
+  - `flow/command-injection-via-exec` (Critical; Node.js
+    `child_process` exec / spawn / execFile)
+- ✅ Single-file rules:
   - `flow/path-traversal`
   - `flow/prompt-injection` (OpenAI + Anthropic)
   - `flow/xss-via-dangerously-set-inner-html` (DOMPurify +
     sanitize-html sanitisers)
+  - `flow/eval-injection` — new in v0.4.0 (Critical; eval /
+    Function / setTimeout-with-string)
+  - `flow/nosql-injection` — new in v0.4.0 (High; MongoDB
+    operator-injection shapes)
+  - `flow/insecure-deserialize` — new in v0.4.0 (Critical;
+    node-serialize, yaml.load unsafe, vm.runInX)
+- ✅ Generic rule: `generic/hardcoded-secret` (provider-prefix
+  Critical mode + credential-named-binding High mode as of v0.4.0)
+- ✅ `ProjectProfile` cheap-pass detection (v0.3.0)
+- ✅ 22 stack adapters wired into the rules (v0.4.0)
+- ✅ Monorepo workspaces walked for per-template profile evidence
+  (v0.4.0)
+- ✅ Stryx Score (0–100, severity-capped), `[surfaces]` per-rule
+  routing, `--diff <base>` PR-only mode (v0.4.0)
 - ✅ App Router `searchParams.X` recognised as a body source
 - ✅ CLI binary (`cargo install --path crates/stryx_cli`)
 - ✅ Pre-built binaries on [GitHub Releases](https://github.com/hafizhpratama/stryx/releases)
 - ✅ npm distribution (`@hafizhpratama/stryx`)
-- ✅ `ProjectProfile` cheap-pass detection (v0.3.0)
-- 🚧 Broad adapter pass — sources / sinks / sanitisers / guards
-  for every P0 and P1 stack in the catalog (v0.4.0)
-- 🚧 GitHub Action
-- 📋 `flow/path-traversal` slice 2 (deferred — 0 OSS TPs in
-  Phase 1 sample)
-- 📋 Score (0–100, severity-capped), surface controls, `--diff <base>`
-  (planned v0.5.0+)
+- 🚧 GitHub Action with sticky PR comment + annotations (v0.6.0)
+- 📋 P2 adapter follow-ups (Elysia, mongoose, kysely, lucia,
+  vercel-ai-sdk, etc.) as user demand surfaces
 - 📋 Type-aware analysis, custom taint configs (later)
 
 ## Documentation

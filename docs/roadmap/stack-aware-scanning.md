@@ -261,16 +261,21 @@ Product confusion:
 
 Suggested release train:
 
-- `v0.3.0`: profile JSON + human profile block, no behavior changes
-  (shipped)
-- `v0.4.0`: adapter substrate + broad adapter pass across all P0/P1
-  stacks (every P0/P1 framework, runtime, data layer, validator,
-  auth, and LLM SDK adapter ships in one release)
-- `v0.5.0`: P2 adapter follow-ups as user demand surfaces +
-  report polish (grouped findings, representative locations,
-  full-diagnostics dump, `--diff <base>`)
-- `v0.6.0`: GitHub Action with sticky PR comment + annotations
-- `v0.7.0`: score (0–100, severity-capped) and surface controls
-  (`cli` / `prComment` / `score` / `ciFailure` routing)
+- `v0.3.0` (shipped): profile JSON + human profile block, no
+  behavior changes
+- `v0.4.0` (shipped): adapter substrate + 22 P0/P1 adapters +
+  three new rules (eval/NoSQL/deserialize) + monorepo workspaces
+  detection. **Also shipped early, originally scoped to later
+  releases**: report polish (grouped findings, representative
+  locations, full-diagnostics dump, `--diff <base>`), Stryx Score
+  (0–100, severity-capped), and surface controls (`cli` /
+  `prComment` / `score` / `ciFailure` routing in `stryx.toml`).
+- `v0.5.0`: cross-file flow for the three new rules + P2 adapter
+  follow-ups as user demand surfaces (Elysia, mongoose, kysely,
+  lucia, vercel-ai-sdk, langchain) + taint-engine improvements
+  for method-chain transparency (e.g. `req.files.x.data.toString()`
+  preserving taint through `.toString()`).
+- `v0.6.0`: GitHub Action with sticky PR comment + annotations —
+  the consumer for the `prComment` surface stubbed in v0.4.0.
 - `v1.0.0`: stable profile schema, stable adapter IDs, CI-ready
-  defaults
+  defaults.
