@@ -2,19 +2,22 @@
 
 How rules are structured in the Stryx codebase.
 
-## Implementation status (as of v0.2.1)
+## Implementation status (as of v0.4.x)
 
 📋 The richly-typed `Rule` trait sketch below — with
 `interests()`, `taint_signature()`, `scope()`, and per-node
-dispatch — is design intent. The actual shipped trait at v0.2.1
+dispatch — is design intent. The actual shipped trait at v0.4.x
 is leaner: `meta()` + `extract()` + `run()` (see
 [`crates/stryx_rules/src/lib.rs`](../../crates/stryx_rules/src/lib.rs)).
 `RuleMeta` carries `id`, `default_severity`, and `description`;
 `extract()` contributes a per-file summary to the project index
 (default no-op); `run()` returns `Vec<Finding>`. Source / sink /
 sanitiser primitives moved into the `StepKind` + `TaintStep`
-substrate per [ADR 0008](../decisions/0008-taint-step-trait-substrate.md),
-not the trait surface.
+substrate per [ADR 0008](../decisions/0008-taint-step-trait-substrate.md);
+v0.4.0 added the adapter-contributed `AstMatcher` closed-enum
+substrate per [ADR 0014](../decisions/0014-adapter-substrate-api.md)
+that rules query via `RuleContext::adapters`. Neither lives on the
+trait surface.
 
 The sketch below remains useful as the planning shape the trait
 is evolving toward (per-node `interests` dispatch, formal

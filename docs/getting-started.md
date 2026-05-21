@@ -4,7 +4,7 @@ This guide gets you from zero to your first scan in 5 minutes.
 
 ## Install
 
-At v0.3.0 there are three install paths that work today (from source,
+At v0.4.1 there are three install paths that work today (from source,
 pre-built binary, npm). A crates.io publish (`cargo install stryx-cli`)
 follows once the crate is registered.
 
@@ -21,15 +21,16 @@ Needs the Rust toolchain (1.93+). The `stryx` binary lands in
 
 ### Pre-built binaries — works today
 
-The [v0.3.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.3.0)
+The [latest GitHub Release](https://github.com/hafizhpratama/stryx/releases/latest)
 ships archives across five targets (Linux x64/arm64, macOS x64/arm64,
 Windows x64):
 
 ```bash
 # Linux x86_64 example — substitute target for your platform.
-curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-0.3.0-x86_64-unknown-linux-gnu.tar.gz \
+# Replace <VERSION> with the latest tag (e.g. 0.4.1).
+curl -L https://github.com/hafizhpratama/stryx/releases/latest/download/stryx-<VERSION>-x86_64-unknown-linux-gnu.tar.gz \
   | tar xz
-./stryx-0.3.0-x86_64-unknown-linux-gnu/stryx scan
+./stryx-<VERSION>-x86_64-unknown-linux-gnu/stryx .
 ```
 
 Targets available:

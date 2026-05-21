@@ -1,7 +1,7 @@
 # Stryx Architecture
 
 > Deep design reference. Read this before making structural changes.
-> Last reviewed: 2026-05-20 (v0.3.0)
+> Last reviewed: 2026-05-21 (v0.4.1)
 
 ## Design goals
 

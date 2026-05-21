@@ -48,11 +48,14 @@ cd stryx
 cargo install --path crates/stryx_cli
 ```
 
-Pre-built binaries — attached to the [v0.3.0 GitHub Release](https://github.com/hafizhpratama/stryx/releases/tag/v0.3.0)
+Pre-built binaries — attached to the
+[latest GitHub Release](https://github.com/hafizhpratama/stryx/releases/latest)
 across five targets (Linux x64/arm64, macOS x64/arm64, Windows x64).
 
-npm — `npm install @hafizhpratama/stryx` or `npx @hafizhpratama/stryx
-scan`. Cargo (`cargo install stryx-cli`) follows once the crate is
+npm — `npm install @hafizhpratama/stryx` or
+`npx @hafizhpratama/stryx@latest <path>` (the bare path form works as
+of v0.4.1; `npx @hafizhpratama/stryx scan ./src` is still accepted).
+Cargo (`cargo install stryx-cli`) follows once the crate is
 published to crates.io.
 
 ## First scan

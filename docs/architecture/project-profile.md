@@ -1,12 +1,18 @@
 # Project Profile Architecture
 
-> **Status (2026-05-20):** Phase 1 shipped in v0.3.0 — the cheap-pass
-> detector (`stryx_index::profile::detect`) reads package.json,
-> lockfiles, and a small set of config files; the resulting
-> `ProjectProfile` is surfaced via `ScanResult.profile` and the JSON
-> envelope. Source-evidence collection during the extract pass,
-> `WorkspaceProfile` for monorepos, the `--profile` flag, and
-> `[profile]` config overrides remain planned for Phase 2+.
+> **Status (2026-05-21):** Phase 1 shipped in v0.3.0 — the
+> cheap-pass detector (`stryx_index::profile::detect`) reads
+> package.json, lockfiles, and a small set of config files;
+> `ProjectProfile` is surfaced via `ScanResult.profile` and the
+> JSON envelope. v0.4.0 wired the profile into rule decisions
+> via 22 registered stack adapters
+> ([ADR 0014](../decisions/0014-adapter-substrate-api.md)).
+> v0.4.1 added monorepo `workspaces` array traversal so root
+> profiles aggregate per-workspace evidence. Source-evidence
+> collection during the extract pass, the `--profile` CLI flag,
+> and `[profile]` config overrides remain planned for a future
+> release (see the
+> [stack-aware roadmap](../roadmap/stack-aware-scanning.md)).
 
 The project profile is Stryx's stack-detection layer. It runs before
 rules produce user-facing findings and tells the rest of the engine which

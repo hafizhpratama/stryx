@@ -6,7 +6,7 @@ reaches a dangerous sink unsanitized.
 > Foundational reference. Read [ADR 0003](../decisions/0003-cross-file-and-taint-as-core.md)
 > first for *why* taint analysis is v0.1 core.
 
-## Implementation status (as of v0.2.1)
+## Implementation status (as of v0.4.x)
 
 This document mixes shipped behaviour with design intent. The
 following are **not yet implemented** and are flagged inline with
@@ -15,9 +15,11 @@ following are **not yet implemented** and are flagged inline with
 - The `Source` / `Sink` / `Sanitizer` trait surface below — by v0.2
   it consolidated into the `TaintStep` trait substrate
   ([ADR 0008](../decisions/0008-taint-step-trait-substrate.md))
-  carried by 17 `StepKind` closed-enum variants. The free trait
-  objects in this doc remain a teaching shape; real code dispatches
-  through `StepKind`.
+  carried by `StepKind` closed-enum variants. v0.4.0 layered the
+  adapter-contributed pattern substrate on top via the closed-enum
+  `AstMatcher` ([ADR 0014](../decisions/0014-adapter-substrate-api.md)).
+  The free trait objects in this doc remain a teaching shape; real
+  code dispatches through `StepKind` + `AstMatcher`.
 - On-disk SQLite summary cache at `~/.cache/stryx/summaries/` — not
   in `scan()`. Phase 3.
 - SCC detection on the call graph — not implemented. The bounded
@@ -25,10 +27,10 @@ following are **not yet implemented** and are flagged inline with
   [ADR 0004](../decisions/0004-two-pass-fixpoint-with-iteration-cap.md)
   is the current substitute.
 - `UncertainZone` emission and Layer 3 LLM escalation — vocabulary
-  exists in `stryx_core`; no v0.2.1 rule emits zones yet
+  exists in `stryx_core`; no v0.4.x rule emits zones yet
   (`flow/auth-bypass-via-wrapper` is the planned first consumer).
 
-What **is** built at v0.2.1: `ParamFlow` with five reach flags
+What **is** built at v0.4.x: `ParamFlow` with reach flags
 (`reaches_db_sink_unsanitized`, `reaches_fetch_sink_unsanitized`,
 `reaches_redirect_sink_unsanitized`, `reaches_sql_sink_unsanitized`,
 `reaches_exec_sink_unsanitized`) plus the SSRF precision flag
@@ -37,8 +39,11 @@ project-index fixed-point; the cross-file `lookup_callee_summary`
 resolution path; the shape-lattice fields (`tainted_offsets`,
 `param_shape`, `return_shape`, `propagates_to_return`) per
 [ADRs 0006 / 0007](../decisions/0006-shape-lattice-taint-summary.md)
-in observation-only mode; and 11 rules across single-file and
+in observation-only mode; and 14 rules across single-file and
 cross-file scope (see [`docs/rules/`](../rules/) for the catalog).
+The three v0.4.0 rules (eval / nosql / deserialize) are single-file
+only; cross-file extension is on the
+[stack-aware roadmap](../roadmap/stack-aware-scanning.md).
 
 ## What it is and why it exists
 
@@ -72,7 +77,7 @@ question. This is the LLM's primary architectural role.
 Three traits, one label set, one shared context:
 
 ```rust
-// As shipped at v0.2.1 — see crates/stryx_taint/src/lib.rs.
+// As shipped at v0.4.x — see crates/stryx_taint/src/lib.rs.
 pub enum TaintLabel {
     UserInput,     // request body, query params, headers, form data, searchParams
     AuthSubject,   // verified session subject (auth-bypass + scope rules)
@@ -110,7 +115,7 @@ The `TaintContext` exposes:
 
 ## The label set
 
-The shipped labels at v0.2.1 are `UserInput`, `AuthSubject`,
+The shipped labels at v0.4.x are `UserInput`, `AuthSubject`,
 `Secret`, `DbRow`, and `Any`. Each maps to a class of violation
 with its own sink rules:
 
@@ -372,11 +377,13 @@ fixture exceeds 1.5s.
 ## Adding a new source / sink / sanitizer
 
 > 📋 The teaching-shape example below shows the v0.0.1 `Source`
-> trait. At v0.2.1 the substrate consolidated into `TaintStep` +
+> trait. By v0.2.1 the substrate consolidated into `TaintStep` +
 > closed-enum `StepKind` per
-> [ADR 0008](../decisions/0008-taint-step-trait-substrate.md) so
-> rule visitors dispatch through one enum instead of trait-object
-> vectors. The real shipped shape for `BodySource` lives at
+> [ADR 0008](../decisions/0008-taint-step-trait-substrate.md);
+> v0.4.0 layered the adapter-contributed `AstMatcher` substrate on
+> top per [ADR 0014](../decisions/0014-adapter-substrate-api.md) so
+> rule visitors dispatch through one closed enum per role instead of
+> trait-object vectors. The real shipped shape for `BodySource` lives at
 > [`crates/stryx_rules/src/steps/sources/body.rs`](../../crates/stryx_rules/src/steps/sources/body.rs);
 > sinks at `crates/stryx_rules/src/steps/sinks/`; sanitisers at
 > `crates/stryx_rules/src/steps/sanitizers/`. Adding a step today

@@ -3,13 +3,13 @@
 When and how Stryx escalates from deterministic AST analysis to a Large
 Language Model for context-aware analysis.
 
-## Implementation status (as of v0.2.1)
+## Implementation status (as of v0.4.x)
 
 📋 This document is design intent. The vocabulary
 (`UncertainZone`, `LlmClient` trait, escalation flow, cache shape)
-exists in `stryx_core` / `stryx_llm`, but **no v0.2.1 rule actually
+exists in `stryx_core` / `stryx_llm`, but **no v0.4.x rule actually
 emits `UncertainZone`s** and the `--no-llm` CLI flag / `[llm]`
-config block are not yet wired. Every shipped finding at v0.2.1
+config block are not yet wired. Every shipped finding at v0.4.x
 comes from the deterministic Layer 2 path, so scans are already
 deterministic by construction.
 

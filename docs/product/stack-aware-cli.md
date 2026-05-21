@@ -55,11 +55,11 @@ Target behavior:
 ## Example output
 
 ```text
-stryx v0.3.0
+stryx v0.5.0
 
 ✔ Select projects to scan › api
 ✔ Found 38 uncommitted changed files. Only scan those? … no
-Scanning /Users/hafizhpratama/Sites/api...
+Scanning ./api...
 
 ✔ Detecting language. Found TypeScript.
 ✔ Detecting runtime. Found Bun.

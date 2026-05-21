@@ -64,26 +64,31 @@ npx @hafizhpratama/stryx scan . --fail-on=medium
 
 ## What it catches
 
-11 rules in the registry. Highlights:
+14 rules in the registry. Highlights:
 
 | Rule | Severity | Catches |
 |---|---|---|
-| `flow/sql-injection` | Critical | Body taint → `$queryRawUnsafe` / `sql.raw` / raw query |
+| `flow/sql-injection` | Critical | Body taint → `$queryRawUnsafe` / `sql.raw` / `db.sequelize.query` / raw query |
 | `flow/command-injection-via-exec` | Critical | Body taint → `child_process` exec/spawn |
-| `flow/ssrf-via-fetch` | High/Medium | Body taint → `fetch` / `axios` / `got` URL |
+| `flow/eval-injection` | Critical | Body taint → `eval` / `Function` / `setTimeout`-with-string |
+| `flow/insecure-deserialize` | Critical | Body taint → `node-serialize.unserialize` / `yaml.load` / `vm.runInX` |
+| `flow/ssrf-via-fetch` | High/Medium | Body taint → `fetch` / `axios` / `got` / `needle` / `request` / `http(s).X` |
+| `flow/nosql-injection` | High | Body-shaped object → MongoDB `collection.find/update/delete` |
 | `flow/redirect-open` | High | Body taint → `NextResponse.redirect` etc. |
-| `flow/unvalidated-body-to-db` | High | Body → Prisma/Drizzle/etc. without zod/valibot/yup |
+| `flow/unvalidated-body-to-db` | High | Body → Prisma/Drizzle/TypeORM/Mongoose/NestJS injected service without zod/valibot/yup |
 | `flow/auth-bypass-via-wrapper` | High | `withAuth(...)` wrapper that doesn't actually check |
 | `flow/secret-to-response` | High | `process.env.X` reaching response body |
 | `flow/path-traversal` | High | Body taint → `fs.<method>` path |
 | `flow/prompt-injection` | High | Body taint → LLM prompt content (OpenAI / Anthropic) |
 | `flow/xss-via-dangerously-set-inner-html` | High | Body taint → React `dangerouslySetInnerHTML` |
-| `generic/hardcoded-secret` | Medium | Credential-shaped strings inline |
+| `generic/hardcoded-secret` | Critical/High | Provider-prefix tokens (AWS / Anthropic / Stripe / GitHub / OpenAI) + credential-named bindings with secret-shaped values |
 
 **Eight rules trace flows across files** — a route handler in
 `app/api/.../route.ts` that hands data to a helper in `lib/<x>.ts`
 which then sinks to a DB / fetch / exec call is caught at the route's
-call site, even though no single file shows the full path.
+call site, even though no single file shows the full path. The three
+v0.4.0 rules (eval / NoSQL / deserialize) are single-file at v0.4.x
+and gain cross-file flow in v0.5.0.
 
 See the [full rule library](https://github.com/hafizhpratama/stryx/tree/main/docs/rules)
 on GitHub.
@@ -102,8 +107,9 @@ Project profile: detect runtime / framework / data layer /
     ↓
 Layer 1: oxc parser → arena AST (per file, parallel)
     ↓
-Layer 2: project semantic index + AST rules + taint engine
-         (stack adapters consume the profile in upcoming v0.4.0)
+Layer 2: project semantic index + 22 stack adapters + AST rules
+         + taint engine (adapters consume the profile; rules consult
+         the active adapter set during taint propagation)
     ↓
 Layer 3 (optional): LLM escalation on flagged uncertain zones, cached
     ↓
@@ -143,17 +149,22 @@ with the real code that triggered it.
 
 ## Status
 
-**v0.3.0** — first stack-aware milestone. `ProjectProfile`
-cheap-pass detection ships: Stryx now identifies the user's
-TypeScript backend stack (language, runtime, framework, data
-layer, validator, auth, LLM SDK, deployment) from `package.json`,
-lockfiles, and config files. Detection appears in both human and
-JSON output. The next release (v0.4.0) wires the profile into
-rule decisions across a broad adapter pass — every P0/P1 stack
-in the catalog. Zero rule-behaviour change in v0.3.0; the 11
-existing rules fire on the same code they did at v0.2.15. APIs
-follow SemVer. See the [changelog](https://github.com/hafizhpratama/stryx/blob/main/CHANGELOG.md)
-for release-by-release detail.
+**v0.4.1** — adapter substrate + DX shell + dogfood-closed rules.
+The `ProjectProfile` from v0.3.0 now drives 22 registered stack
+adapters that contribute sources, sinks, sanitisers, guards, and
+propagator patterns to the generic rules. The registry ships 14
+rules — three new categories (`flow/eval-injection`,
+`flow/nosql-injection`, `flow/insecure-deserialize`) alongside
+broader sink/source coverage on the older rules. The CLI gains a
+default-scan subcommand, grouped findings with representative
+locations, a 0–100 Stryx Score with severity caps, `--diff <base>`
+for PR-only CI runs, surface controls in `stryx.toml`, monorepo
+workspace traversal, and a `STRYX_DEBUG_DUMP=1` diagnostic side
+channel. APIs follow SemVer. See the
+[changelog](https://github.com/hafizhpratama/stryx/blob/main/CHANGELOG.md)
+for release-by-release detail and the
+[roadmap](https://github.com/hafizhpratama/stryx/blob/main/docs/roadmap/stack-aware-scanning.md)
+for what's next.
 
 ## Links
 

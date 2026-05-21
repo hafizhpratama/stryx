@@ -84,8 +84,8 @@ A code construct that cleanses a `TaintLabel` from a value (e.g.,
 `crates/stryx_rules/src/sanitizers/`.
 
 ### TaintLabel
-A category of taint a value carries. At v0.2.1 the shipped labels
-are `UserInput` (request body / query / headers / `searchParams`),
+A category of taint a value carries. The shipped labels are
+`UserInput` (request body / query / params / files / `searchParams`),
 `AuthSubject` (verified session subject), `Secret`
 (`process.env.X` or credential-shaped string), `DbRow` (data read
 from a DB query), and `Any` (used by sanitisers that clear every
@@ -105,7 +105,7 @@ reaches, which labels it preserves on the return value. Stored at
 machine. The concrete v0.2 shape is `ExportedFunctionSummary`.
 
 ### ExportedFunctionSummary
-The concrete v0.2.1 implementation of FunctionSummary. Produced by
+The concrete shipped implementation of FunctionSummary. Produced by
 each rule's `extract` pass; carries one `ParamFlow` per formal
 parameter, plus `contains_auth_check` and `validates_request_body`
 flags read by `flow/auth-bypass-via-wrapper` and
@@ -129,7 +129,10 @@ that carries each rule's source / sink / sanitiser / propagator
 recognisers. Every rule's taint logic dispatches through `StepKind`
 via the six `TaintStep` trait methods (`as_source`, `as_call_source`,
 `as_member_source`, `as_sink`, `as_sanitizer`, `as_propagator`).
-At v0.2.1 there are 17 variants × 6 methods = 102 dispatch sites.
+v0.4.0 added the complementary closed-enum `AstMatcher` substrate
+([ADR 0014](decisions/0014-adapter-substrate-api.md)) so 22 stack
+adapters can contribute framework-specific patterns without rules
+importing adapter code directly.
 
 ### ProjectIndex
 The project-level read-only data structure built once per scan
@@ -144,15 +147,25 @@ in v0.3.0. It records detected language, runtime, framework, data
 layer, validation, auth, LLM SDK, and deployment evidence so Stryx
 can enable the right adapters. Built by the cheap-pass detector in
 `stryx_index::profile` from `package.json`, lockfiles, and a small
-set of config files — no source parsing required. Adapter
-consumption of the profile lands in v0.4.0.
+set of config files — no source parsing required. As of v0.4.0 the
+profile drives the registered [StackAdapter](#stackadapter) set,
+and as of v0.4.1 it walks `workspaces` arrays so monorepo roots
+aggregate per-workspace evidence.
 
 ### StackAdapter
-A planned adapter that contributes stack-specific sources, sinks,
-sanitisers, guards, and propagators to generic rules. Example:
+A registered adapter that contributes stack-specific sources, sinks,
+sanitisers, guards, and propagators to the generic rules via the
+closed-enum `AstMatcher` substrate from
+[ADR 0014](decisions/0014-adapter-substrate-api.md). Example:
 `framework/hono` teaches Stryx about `c.req.json()` and `c.redirect()`;
 `runtime/bun` teaches Stryx about `Bun.serve`, `Bun.spawn`, and
-`Bun.write`.
+`Bun.write`. v0.4.0 ships 22 adapters (runtimes node/bun, frameworks
+express/fastify/hono/nestjs/next, data layers prisma/drizzle/pg/mysql2,
+validators zod/valibot/joi/yup/ajv/class-validator, auth
+better-auth/auth-js/clerk, LLM SDKs openai/anthropic); P2 follow-ups
+(mongoose, kysely, knex, elysia, lucia, supabase-auth, vercel-ai-sdk,
+langchain) land on demand — see the
+[stack-aware roadmap](roadmap/stack-aware-scanning.md).
 
 ### RuleScope
 Either `SingleFile` or `CrossFile`. Declared by each rule so the

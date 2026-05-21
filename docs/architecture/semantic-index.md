@@ -6,17 +6,16 @@ The project-level read-only index that powers cross-file analysis.
 > first for *why* a project index exists. Read [`taint-engine.md`](taint-engine.md)
 > for the engine that queries it most heavily.
 
-## Implementation status (as of v0.2.1)
+## Implementation status (as of v0.4.x)
 
 This document mixes shipped behaviour with design intent. The
 following are **not yet implemented** — flagged inline with 📋:
 
-- `re_export_chain` traversal in `SymbolEntry` — the implemented
-  `ProjectIndex::resolve` now handles direct and wildcard re-exports
-  in the v0.2 line, but the richer `SymbolEntry` design below remains
-  design intent.
+- `re_export_chain` traversal in `SymbolEntry` — `ProjectIndex::resolve`
+  handles direct and wildcard re-exports, but the richer `SymbolEntry`
+  design below remains design intent.
 - On-disk SQLite cache at `~/.cache/stryx/index/` — not in code.
-  v0.2.1 rebuilds the index every scan from in-memory parse results.
+  v0.4.x rebuilds the index every scan from in-memory parse results.
 - Tarjan SCC detection on circular imports — not in code. Cycles
   in the import graph are handled by the resolver returning `None`
   on the second hop, which is conservative but loses precision.
